@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "GitHub CLI",
-    "description": "Scaffold for a plugin that will manage the local GitHub CLI; it changes nothing yet.",
+    "description": "Adds a GitHub page to the settings panel that manages the local gh executable and the accounts it is signed in with.",
     "detail": "docs/DETAIL.md"
   }
 }
