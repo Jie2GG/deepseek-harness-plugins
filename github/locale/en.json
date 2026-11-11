@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "GitHub CLI",
+    "description": "Scaffold for a plugin that will manage the local GitHub CLI; it changes nothing yet.",
+    "detail": "docs/DETAIL.md"
+  }
+}
