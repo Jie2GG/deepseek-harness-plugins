@@ -1,0 +1,27 @@
+# 依赖与构建产物（每个插件目录独立）
+node_modules/
+lib/
+dist/
+build/
+*.tsbuildinfo
+
+# 测试与覆盖率
+coverage/
+.nyc_output/
+
+# 日志
+*.log
+pnpm-debug.log*
+npm-debug.log*
+yarn-error.log*
+
+# 环境变量与本地配置
+.env
+.env.local
+.env.*.local
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+*.swp
+.DS_Store

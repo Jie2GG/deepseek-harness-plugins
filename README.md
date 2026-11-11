@@ -1,0 +1,26 @@
+# DeepSeek Harness Plugins
+
+Jie2GG 维护的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）插件集合。
+
+本仓库遵循「**一个顶层目录 = 一个独立插件**」的约定：每个插件目录自带完整的
+`package.json` 与全部元信息，可以单独安装、单独发版、单独删除；插件之间不共享
+workspace，也不互相依赖。
+
+## 插件索引
+
+| 插件目录 | 包名（`@jie2gg/dsh-plugin-*`） | 简介 | 状态 |
+| --- | --- | --- | --- |
+| *（暂无，欢迎通过 PR 添加）* | | | |
+
+## 使用
+
+插件可发布到 npm 后安装，也可从本仓库的对应目录直接安装（本地文件夹 / git）。
+安装后在 DSH 的「插件」管理面板中启用或禁用。
+
+## 开发
+
+新增插件请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)，其中定义了标准目录结构与必需字段。
+
+## 许可证
+
+[Apache-2.0](LICENSE)
