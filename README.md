@@ -8,6 +8,10 @@ workspace，也不互相依赖。
 
 ## 插件索引
 
+本表是全仓**权威插件地图**：每个插件都必须登记于此，新增、改名、弃用均须在同一
+commit 同步本表。「状态」列仅限 `stable` / `experimental` / `deprecated` 三个取值，
+定义见 [CONTRIBUTING.md](CONTRIBUTING.md#插件状态取值)。
+
 | 插件目录 | 包名（`@jie2gg/dsh-plugin-*`） | 简介 | 状态 |
 | --- | --- | --- | --- |
 | *（暂无，欢迎通过 PR 添加）* | | | |
@@ -19,7 +23,8 @@ workspace，也不互相依赖。
 
 ## 开发
 
-新增插件请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)，其中定义了标准目录结构与必需字段。
+新增插件请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)，其中定义了标准目录结构与必需字段；
+AI agent 协作与仓库导航约定见 [AGENTS.md](AGENTS.md)（`CLAUDE.md` 为其符号链接）。
 
 ## 许可证
 
