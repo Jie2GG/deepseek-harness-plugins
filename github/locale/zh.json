@@ -1,7 +1,0 @@
-{
-  "meta": {
-    "title": "GitHub CLI",
-    "description": "在设置面板中新增 GitHub 页面，管理本机的 gh 可执行文件与它登录的账号。",
-    "detail": "docs/DETAIL.zh.md"
-  }
-}

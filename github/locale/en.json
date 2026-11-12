@@ -1,7 +1,0 @@
-{
-  "meta": {
-    "title": "GitHub CLI",
-    "description": "Adds a GitHub page to the settings panel that manages the local gh executable and the accounts it is signed in with.",
-    "detail": "docs/DETAIL.md"
-  }
-}

@@ -14,7 +14,7 @@ commit 同步本表。「状态」列仅限 `stable` / `experimental` / `depreca
 
 | 插件目录 | 包名（`@jie2gg/dsh-plugin-*`） | 简介 | 状态 |
 | --- | --- | --- | --- |
-| `github/` | `@jie2gg/dsh-plugin-github` | 设置面板新增 GitHub 页，管理本机 gh 的登录账号与程序本身 | experimental |
+| *（暂无，欢迎通过 PR 添加）* | | | |
 
 ## 使用
 

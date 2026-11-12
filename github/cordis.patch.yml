@@ -1,5 +1,0 @@
-# Bundle entry: the GitHub CLI plugin row, whose configuration is set by its settings page.
-- insert:
-    - id: github
-      name: '@jie2gg/dsh-plugin-github'
-      config: {}
