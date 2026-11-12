@@ -1,4 +1,4 @@
-# Bundle entry: one Host plugin row, inert in 0.1.0.
+# Bundle entry: the GitHub CLI plugin row, whose configuration is set by its settings page.
 - insert:
     - id: github
       name: '@jie2gg/dsh-plugin-github'
