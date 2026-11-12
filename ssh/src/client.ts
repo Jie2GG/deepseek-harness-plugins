@@ -28,6 +28,15 @@ window.__ModuleLoader__.load({
     const NS = 'settings.ssh'
     /** The plugin's own route on the shared `/api` channel. */
     const ROUTE = '/api/ssh/rpc'
+    /**
+     * Input ranges the Host validates against, mirrored here only so the
+     * settings page can state them before a wrong value is typed.
+     * `src/storage.ts` is the authority: MIN/MAX_PROBE_TIMEOUT_MS and
+     * MIN/MAX_MAX_OUTPUT_BYTES.
+     */
+    const BOUNDS = { probeTimeoutMinMs: 1000, probeTimeoutMaxMs: 120000, outputMinBytes: 1024, outputMaxBytes: 4194304 }
+    /** Base of the tab ids this page owns: `<id>-<value>` and `<id>-<value>-panel`. */
+    const TAB_BASE = 'dshssh-tabs'
 
     /** Browser-facing copy. Both baseline locales are required by the locale service. */
     const DICT: Record<string, Record<string, string>> = {
@@ -36,6 +45,16 @@ window.__ModuleLoader__.load({
         title: 'Remote connections',
         intro: 'Named SSH targets this machine can reach, kept in this plugin\'s own storage so the page can edit them without touching the profile patch file. The plugin never reads or writes ~/.ssh/config and never adds a host key.',
         storedIn: 'Stored by the plugin in its own ssh_targets storage domain.',
+        tabsLabel: 'Sections of this page',
+        tabList: 'SSH targets',
+        tabSettings: 'Client settings',
+        commandHint: 'A name resolved on PATH, or an absolute path. Nothing is installed or upgraded: an executable that cannot be resolved is reported as its own result.',
+        boundsTitle: 'Fixed bounds',
+        boundsTargets: 'Targets per profile',
+        boundsConcurrency: 'Probes at once',
+        boundsPerRound: 'Targets per “Test all” round',
+        boundsTimeout: 'Probe timeout accepts',
+        boundsOutput: 'Output ceiling accepts',
         settingsTitle: 'Client settings',
         settingsCommand: 'ssh executable',
         settingsProbeTimeout: 'Probe timeout (ms)',
@@ -105,6 +124,16 @@ window.__ModuleLoader__.load({
         title: '远程连接',
         intro: '保存「本机能够连上的命名 SSH 目标」。清单存在插件自己的存储里，页面改它不会动 profile 的 patch 文件；插件从不读写 ~/.ssh/config，也不会替你写入主机密钥。',
         storedIn: '由插件存放在它自己的 ssh_targets 存储域中。',
+        tabsLabel: '本页面内的分区',
+        tabList: 'SSH 目标清单',
+        tabSettings: '客户端参数',
+        commandHint: '填 PATH 能解析到的名字，或绝对路径。插件不会安装或升级程序：解析不到就单独作为一种结果报告。',
+        boundsTitle: '固定边界',
+        boundsTargets: '每个 profile 可存的目标数',
+        boundsConcurrency: '同时进行的探测数',
+        boundsPerRound: '「全部测试」单轮覆盖的目标数',
+        boundsTimeout: '探测超时可填范围',
+        boundsOutput: '输出上限可填范围',
         settingsTitle: '客户端参数',
         settingsCommand: 'ssh 可执行文件',
         settingsProbeTimeout: '探测超时（毫秒）',
@@ -255,6 +284,20 @@ window.__ModuleLoader__.load({
 .dshssh-foot{display:flex;align-items:center;gap:8px;justify-content:flex-end;flex-wrap:wrap}
 .dshssh-error{font-size:12px;color:var(--dsw-alias-state-error-primary)}
 .dshssh-sep{color:var(--dsw-alias-border-l2)}
+.dshssh-bounds{display:flex;flex-direction:column;gap:7px;margin:0}
+.dshssh-bound{display:flex;align-items:baseline;justify-content:space-between;gap:12px;border-bottom:1px solid var(--dsw-alias-border-l1);padding-bottom:6px}
+.dshssh-bound dt{font-size:12px;color:var(--dsw-alias-label-secondary)}
+.dshssh-bound dd{margin:0;font-size:12px;overflow-wrap:anywhere;color:var(--dsw-alias-label-primary)}
+.dshssh-tabs{position:relative;display:inline-grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:2px;padding:4px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-interactive-bg-hover);justify-self:start}
+.dshssh-tabs-indicator{position:absolute;top:4px;left:4px;width:calc((100% - 8px - 2px * (var(--dshssh-segment-count) - 1)) / var(--dshssh-segment-count));height:calc(100% - 8px);border:0;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1);box-shadow:var(--dsw-elevation-soft);transform:translateX(calc(var(--dshssh-segment-index) * (100% + 2px)));transition:transform 160ms ease;pointer-events:none}
+.dshssh-tab{box-sizing:border-box;position:relative;z-index:1;height:28px;padding:0 16px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;font:inherit;font-size:13px;line-height:20px;font-weight:500;white-space:nowrap;cursor:pointer;color:var(--dsw-alias-label-secondary);transition:color 120ms ease}
+.dshssh-tab[aria-selected="true"]{color:var(--dsw-alias-label-primary)}
+.dshssh-tab:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
+.dshssh-tab:disabled{cursor:default;opacity:.4}
+.dshssh-tab:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:-2px}
+.dshssh-panel{display:flex;flex-direction:column;gap:16px}
+.dshssh-panel:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.dshssh-tabs-indicator,.dshssh-tab{transition:none}}
 `
 
     /**
@@ -518,12 +561,105 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The section itself.
+     * The enabled option one walk key lands on. Mirrors the host tablist:
+     * arrows step to the nearest enabled neighbour and wrap, Home and End jump.
+     * @param options - the tabs in display order.
+     * @param from - index of the selected tab.
+     * @param key - the pressed key.
+     * @returns the tab the key asks for, or `undefined` when none does.
+     */
+    function walkTo(options: readonly { value: string; disabled?: boolean }[], from: number, key: string): { value: string } | undefined {
+      const enabled = options.filter(option => option.disabled !== true)
+      if (enabled.length === 0) return undefined
+      if (key === 'Home') return enabled[0]
+      if (key === 'End') return enabled[enabled.length - 1]
+      const step = key === 'ArrowRight' || key === 'ArrowDown' ? 1 : -1
+      const count = options.length
+      for (let offset = 1; offset < count; offset += 1) {
+        const candidate = options[((from + step * offset) % count + count) % count]
+        if (candidate !== undefined && candidate.disabled !== true) return candidate
+      }
+      return undefined
+    }
+
+    /**
+     * The tab switcher at the head of this page.
+     *
+     * Its markup, keyboard walk, and sliding indicator are the host's
+     * `SegmentedControl` copied rather than imported: a plugin must not load
+     * another Harness client package as a module, so the behavior is vendored
+     * and the classes are renamed under this plugin's prefix.
+     */
+    function SshTabs(props: {
+      id: string
+      value: string
+      options: readonly { value: string; label: string }[]
+      label: string
+      onChange: (next: string) => void
+    }): any {
+      const list = React.useRef(null)
+      const selected = Math.max(0, props.options.findIndex(option => option.value === props.value))
+
+      // A walk key reports the next value and the owner re-renders with it; the
+      // keyboard follows the selection so the roving tabindex stays usable.
+      React.useEffect(() => {
+        const root = list.current
+        if (root === null || root === undefined) return
+        const doc = typeof document === 'object' && document !== undefined ? document : undefined
+        if (doc === undefined || !root.contains(doc.activeElement)) return
+        const tab = root.querySelector('[role="tab"][aria-selected="true"]')
+        if (tab !== null && tab !== undefined) tab.focus()
+      }, [props.value])
+
+      const onKeyDown = (event: any): void => {
+        const key: string = event.key
+        if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(key)) return
+        event.preventDefault()
+        const target = walkTo(props.options, selected, key)
+        if (target !== undefined && target.value !== props.value) props.onChange(target.value)
+      }
+
+      return h('div', {
+        ref: list,
+        role: 'tablist',
+        'aria-label': props.label,
+        class: 'dshssh-tabs',
+        style: {
+          '--dshssh-segment-count': String(props.options.length),
+          '--dshssh-segment-index': String(selected),
+        },
+      },
+        h('span', { 'aria-hidden': 'true', class: 'dshssh-tabs-indicator' }),
+        props.options.map(option => {
+          const active = option.value === props.value
+          return h('button', {
+            key: option.value,
+            id: `${props.id}-${option.value}`,
+            type: 'button',
+            role: 'tab',
+            'aria-selected': active,
+            'aria-controls': `${props.id}-${option.value}-panel`,
+            tabIndex: active ? 0 : -1,
+            class: 'dshssh-tab',
+            onClick: () => { if (!active) props.onChange(option.value) },
+            onKeyDown,
+          }, option.label)
+        }),
+      )
+    }
+
+    /**
+     * The page this plugin contributes.
+     *
+     * The SSH target list and the client settings share one page as two tabs,
+     * because the settings shell gives a plugin exactly one navigation entry per
+     * section; both tabs read and write the same Host state through one `list`.
      * @param props - seat props: the localized reader and the panel `close`.
      * @returns the rendered page.
      */
     function SshSection(props: any): any {
       const t = translator(props)
+      const [tab, setTab] = React.useState('list')
       const [connections, setConnections] = React.useState([] as ConnectionRecord[])
       const [settings, setSettings] = React.useState(null as SshSettings | null)
       const [limits, setLimits] = React.useState({ maxConnections: 64, concurrentProbes: 4, probeAllLimit: 12 })
@@ -968,12 +1104,40 @@ window.__ModuleLoader__.load({
           }, busy === 'settings' ? t('saving') : t('settingsSave')),
         ),
         h('p', { class: 'dshssh-muted' }, t('settingsHint')),
+        h('p', { class: 'dshssh-muted' }, t('commandHint')),
         h('div', { class: 'dshssh-grid' },
           h(TextField, { label: t('settingsCommand'), value: settingsDraft.command, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, command: value })) }, disabled: busy !== null || settings === null }),
           h(TextField, { label: t('settingsProbeTimeout'), value: settingsDraft.probeTimeoutMs, type: 'number', onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, probeTimeoutMs: value })) }, disabled: busy !== null || settings === null }),
           h(TextField, { label: t('settingsMaxOutput'), value: settingsDraft.maxOutputBytes, type: 'number', onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, maxOutputBytes: value })) }, disabled: busy !== null || settings === null }),
         ),
         settings === null ? h('span', { class: 'dshssh-muted' }, loading ? t('listProbing') : t('listLoadFailed')) : null,
+      )
+
+      /** What the plugin fixes in code, so a value on this page never surprises the reader. */
+      const boundsCard = h('section', { class: 'dshssh-card' },
+        h('h3', { class: 'dshssh-card-title' }, t('boundsTitle')),
+        h('dl', { class: 'dshssh-bounds' },
+          h('div', { class: 'dshssh-bound', key: 'targets' },
+            h('dt', {}, t('boundsTargets')),
+            h('dd', {}, String(limits.maxConnections)),
+          ),
+          h('div', { class: 'dshssh-bound', key: 'lanes' },
+            h('dt', {}, t('boundsConcurrency')),
+            h('dd', {}, String(limits.concurrentProbes)),
+          ),
+          h('div', { class: 'dshssh-bound', key: 'round' },
+            h('dt', {}, t('boundsPerRound')),
+            h('dd', {}, String(limits.probeAllLimit)),
+          ),
+          h('div', { class: 'dshssh-bound', key: 'timeout' },
+            h('dt', {}, t('boundsTimeout')),
+            h('dd', {}, `${String(BOUNDS.probeTimeoutMinMs / 1000)} s – ${String(BOUNDS.probeTimeoutMaxMs / 1000)} s`),
+          ),
+          h('div', { class: 'dshssh-bound', key: 'output' },
+            h('dt', {}, t('boundsOutput')),
+            h('dd', {}, `1 KiB – 4 MiB`),
+          ),
+        ),
       )
 
       const listCard = h('section', { class: 'dshssh-card' },
@@ -1011,12 +1175,30 @@ window.__ModuleLoader__.load({
         formRegion(),
       )
 
+      const tabs = h(SshTabs, {
+        id: TAB_BASE,
+        value: tab,
+        label: t('tabsLabel'),
+        options: [
+          { value: 'list', label: t('tabList') },
+          { value: 'settings', label: t('tabSettings') },
+        ],
+        onChange: (next: string) => { setTab(next) },
+      })
+      const panel = h('div', {
+        id: `${TAB_BASE}-${tab}-panel`,
+        role: 'tabpanel',
+        'aria-labelledby': `${TAB_BASE}-${tab}`,
+        tabIndex: 0,
+        class: 'dshssh-panel',
+      }, tab === 'list' ? listCard : h('div', { class: 'dshssh-panel' }, settingsCard, boundsCard))
+
       return h('div', { class: 'dshssh-root' },
         h('style', {}, CSS),
         header,
         noticeRegion,
-        settingsCard,
-        listCard,
+        tabs,
+        panel,
       )
     }
 
@@ -1024,7 +1206,8 @@ window.__ModuleLoader__.load({
       /** The client services this module needs from the page. */
       inject: ['slots', 'locale'],
       /**
-       * Register the dictionaries and the two settings-panel seats.
+       * Register the dictionaries and the one page this plugin contributes, with
+       * its navigation icon.
        * @param ctx - the browser plugin context.
        */
       apply(ctx: any): void {

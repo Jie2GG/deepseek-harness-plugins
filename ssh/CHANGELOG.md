@@ -4,6 +4,42 @@ All notable changes to `@jie2gg/dsh-plugin-ssh` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project uses [semantic versioning](https://semver.org/).
 
+## 0.3.0
+
+### Changed
+
+- **One navigation entry, two tabs.** The 0.2.0 page keeps its single
+  `settings.section` (id `ssh`, order 25, 远程连接 / Remote connections) and its
+  icon; its content is now switched by a tab strip across the top: **SSH
+  targets** (list, form, probes) and **Client settings** (the `ssh` executable,
+  the probe timeout, the output ceiling). The settings shell has no grouping
+  mechanism for plugin sections, so tabs are how two views live under one entry.
+- The tab strip is the host's `SegmentedControl` **copied, not imported**: equal
+  segments with a sliding indicator, `role="tablist"` / `role="tab"` /
+  `aria-selected` / `aria-controls`, a `role="tabpanel"` the page labels back
+  with `aria-labelledby`, a roving `tabIndex`, the same Arrow / Home / End walk,
+  and focus-follows-selection. Classes are renamed under `dshssh-` and the
+  styling references host tokens only (`--dsw-radius-md`, `--dsw-radius-sm`,
+  `--dsw-alias-interactive-bg-hover`, `--dsw-elevation-soft`,
+  `--dsw-focus-ring-width`), because a plugin must not load another Harness
+  client package as a module.
+- The settings tab gained a read-only **Fixed bounds** card: target capacity,
+  probe concurrency, the `probeAll` round size, and the accepted ranges for the
+  two numeric fields, so a value the Host would reject is visible before it is
+  typed.
+- The extra-arguments hint states that one line is one `ssh` argv entry, because
+  a spaced `-o value` pair must arrive as two lines.
+
+### Notes
+
+- No operation, route method, or stored field changed: both tabs use the same
+  `list` / `save` / `remove` / `probe` / `probeAll` / `configUpdate` set over one
+  page state, and the Host re-reads the settings at each probe, so a change on
+  one tab takes effect on the other immediately. A probe started on the list tab
+  keeps running while the settings tab is open.
+- The selected tab is page-local: the page opens on **SSH targets**, and the
+  choice is not persisted.
+
 ## 0.2.0
 
 ### Added

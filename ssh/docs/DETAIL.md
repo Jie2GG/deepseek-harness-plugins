@@ -2,16 +2,24 @@
 
 Manages the SSH targets this machine reaches: a named list of hosts and OpenSSH
 aliases, the settings each one connects with, and a connectivity test you can
-run from the browser. Version **0.2.0** adds the page; the agent still runs
-nothing on your behalf.
+run from the browser. Version **0.3.0** keeps the same operations and splits them
+into two tabs inside one settings page; the agent still runs nothing on your
+behalf.
 
 ## Where the page is
 
 Open **Settings** and pick **Remote connections** in the navigation (中文：设置 →
 远程连接). The entry carries its own icon and follows the language you choose in
-General settings.
+General settings. Across its top sit two tabs:
 
-## What version 0.2.0 does
+- **SSH targets** — the list: add, edit, delete, and test.
+- **Client settings** — the `ssh` executable, the probe timeout, and the output
+  ceiling every probe honours, next to the bounds the plugin fixes in code.
+
+Both tabs read and write one page state, so a probe you started on the first tab
+keeps running while you edit values on the second.
+
+## What version 0.3.0 does
 
 - **SSH target list.** Add, edit, and delete named targets. Each one carries a
   display name, a host name or an existing OpenSSH host alias, and optionally a
@@ -24,8 +32,10 @@ General settings.
   Results are classified as reachable, authentication failed, unreachable, host
   key not trusted, timed out, or `ssh` not found, and the last result is kept
   with its timestamp and the captured output tail.
-- **Client settings.** The `ssh` executable (a name on `PATH` or an absolute
-  path), the probe timeout, and the captured output ceiling.
+- **Client settings**, on the second tab: the `ssh` executable (a name on
+  `PATH` or an absolute path), the probe timeout, and the captured output
+  ceiling. That tab also states the bounds the plugin fixes in code, so a value
+  outside a range is not a surprise.
 
 ## Where your data is kept
 
@@ -65,13 +75,14 @@ None of these exist yet, and the interface may still change.
 
 ## Configuration
 
-The bundle inserts one plugin row with `config: {}` and 0.2.0 declares no
-configuration fields: everything the page edits lives in the plugin's own
+The bundle inserts one plugin row with `config: {}` and 0.3.0 declares no
+configuration fields: everything the pages edit lives in the plugin's own
 storage. Any key you add to that row is currently ignored.
 
 ## Limits of this release
 
-- The page is the only surface; the agent cannot see or use this list yet.
+- The page and its two tabs are the only surface; the agent cannot see or use
+  this list yet.
 - A probe can authenticate only with what a non-interactive `ssh` can use today:
   an agent, or a key without a passphrase.
 - The page needs the Host's `/api` carrier, the subprocess provider, and the

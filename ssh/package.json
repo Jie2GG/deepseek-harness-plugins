@@ -1,8 +1,8 @@
 {
   "name": "@jie2gg/dsh-plugin-ssh",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "Adds a Remote connections page to the settings panel: a named list of SSH targets you can edit and test.",
+  "description": "Adds a Remote connections page to the settings panel: SSH targets you can edit and test, and the ssh settings those probes honour, as two tabs.",
   "keywords": [
     "dsh",
     "dsh-bundle",

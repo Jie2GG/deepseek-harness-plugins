@@ -52,10 +52,13 @@ that is wrong.
 Then in a running Harness: `plugin_manager` → `install_bundle` with the absolute
 path of this directory. Acceptance per the repository rules: no manifest
 diagnostics, and the title, description, icon, and detail document render in both
-English and Chinese; the settings navigation shows **Remote connections** / 「远程
-连接」 with its icon. A page reload is required to load a freshly installed
-bundle's client artifact; `dev:web` HMR only covers the harness checkout's own
-bundles.
+English and Chinese; the settings navigation shows one **Remote connections** /
+「远程连接」 row with its icon, and the page opens on the **SSH targets** tab with
+**Client settings** beside it. A freshly installed bundle's client artifact needs
+the page to (re)load it: the open page follows the Host module graph over HMR, so
+a rebuilt bundle for an installed row is usually swapped in without a manual
+refresh — but a replaced package (not a rebuilt one) needs a restart to load a
+fresh module generation.
 
 ## API
 
@@ -113,11 +116,23 @@ Bounds live in `src/storage.ts`: 64 targets, 4 concurrent probes, 12 per
 
 ### Client (`src/client.ts`)
 
-Registers the `settings.ssh` dictionaries (both baseline locales), then two seats
-in `apply`, each inside its own `ctx.effect`:
+One component owns the page and its two tabs: `SshSection` holds the state, the
+`list` read, and every operation, while `SshTabs` switches which cards render —
+**SSH targets** (the list, the form, and the probe results) or **Client settings**
+(the three fields plus the read-only fixed bounds). `apply` registers the
+`settings.ssh` dictionaries (both baseline locales) and then two seats, each
+inside its own `ctx.effect`:
 
-- `settings.section` → `{ id: 'ssh', order: 25, label: () => ctx.locale.bind(NS)('nav'), locale: NS }`
-- `settings.section.icon` → `{ id: 'ssh' }`, rendered with `{ size, active }`
+| Seat | Registration | Renders |
+| --- | --- | --- |
+| `settings.section` | `{ id: 'ssh', order: 25, label: () => ctx.locale.bind(NS)('nav'), locale: NS }` | the page, including its tab strip |
+| `settings.section.icon` | `{ id: 'ssh' }` | caret + dashed link + server rack, matching `icon.svg` |
+
+The settings shell has no grouping mechanism for plugin sections — one section is
+one navigation row — so two views under one row are the page's own tabs. The tab
+strip is the host `SegmentedControl` copied into this module rather than
+imported, which is what the plugin-UI rules require; see the vendoring note under
+**Verified contracts** for the markup, keyboard, and token contract it carries.
 
 Controls and their stylesheet are local to the plugin (`dshssh-*` classes,
 `--dsw-alias-*` tokens only, no Harness client package required as a module), and
@@ -127,7 +142,8 @@ unmounting removes it.
 ## Verified contracts
 
 Facts checked against the running DSH (`0.2.2-rc.1`, `web` profile) while 0.2.0
-was written, so the next round does not have to re-derive them:
+was written and re-checked at 0.3.0, so the next round does not have to
+re-derive them:
 
 - `ctx.storageDomain.open(spec)` → `Domain` with `table(name)` (`get`, `keys()`,
   `entries()` as `[key, value]`, `size`, `put`, `delete`, `deleteMany`,
@@ -147,8 +163,10 @@ was written, so the next round does not have to re-derive them:
 - `settings.section` registration is `{ id, order?, label?, locale?, inject? }`
   and its owner props are only `{ close }`; shipped sections sit at
   `signin` -1, `general` 0, `models` 10, `plugins` 15, `agent-presets` 20, so 25
-  lands last. `settings.section.icon` addresses the same id and is rendered with
-  `{ size: 16, active }`.
+  and 26 land last, one per page. `settings.section.icon` addresses a section by
+  its exact id and is rendered with `{ size: 16, active }`; an unmatched id never
+  renders and an unregistered one falls back to the shell glyph. Both pages and
+  both icons were observed live in the `web` profile at 0.3.0 (`active: true`).
 - `ctx.locale.register(ns, language, dict)` requires both `en` and `zh`; a
   registration after mount is picked up without a remount, and a `label` thunk is
   re-read on every projection, so the nav text follows the language without
@@ -158,6 +176,17 @@ was written, so the next round does not have to re-derive them:
   `dsh-client-store`, `dsh-client-ui-slots`, `dsh-client-ui-primitives`,
   `dsh-client-ui-dockkit`. Only `react` is required here, and the live theme
   exposes the `--dsw-alias-*` tokens this page styles with.
+- The host tab primitive lives in
+  `packages/client/ui-primitives/src/SegmentedControl.tsx` and its stylesheet:
+  tab ids `<id>-<value>`, the panel `<id>-<value>-panel` labelled back with
+  `aria-labelledby`, a roving `tabIndex`, an Arrow / Up / Down / Home / End walk
+  that steps enabled neighbours and wraps, focus that follows the selection, and
+  a sliding indicator placed arithmetically from two custom properties rather
+  than by measuring the DOM. Every token that strip uses is defined in
+  `packages/client/ui-theme/src/styles/` (`--dsw-alias-interactive-bg-hover`,
+  `--dsw-radius-md`, `--dsw-radius-sm`, `--dsw-elevation-soft`,
+  `--dsw-focus-ring-width`, `--dsw-focus-ring-color`), so copying the rules gives
+  a plugin the same look without loading the primitive as a module.
 - Child processes start from the parent environment minus names matching
   `/KEY|PASSWORD|SECRET|TOKEN/i` and minus every `DSH_*` name, so
   `SSH_AUTH_SOCK` reaches `ssh` (an agent keeps working) while a
@@ -177,9 +206,9 @@ was written, so the next round does not have to re-derive them:
    both the storage domain and the patch file; `BatchMode=yes` stays until then.
 4. Optional: read `~/.ssh/config` aliases as a suggested inventory (`ctx.fs`).
 
-## Limits of 0.2.0
+## Limits of 0.3.0
 
-- The settings page is the only surface; the agent cannot see the list yet.
+- One settings page, its two tabs, is the only surface; the agent cannot see the list yet.
 - A probe can only use what a non-interactive `ssh` already has: an agent or a
   key without a passphrase.
 - Deleting the bundle leaves `storages/ssh_targets.json` behind.

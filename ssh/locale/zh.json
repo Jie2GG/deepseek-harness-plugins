@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "SSH 管理",
-    "description": "在设置面板新增「远程连接」页：管理命名 SSH 目标清单，可在页面里编辑并测试连通性。",
+    "description": "在设置面板新增「远程连接」页：用顶部两个选项卡分别管理命名 SSH 目标清单（含连通性测试）与探测用的 ssh 程序、超时与输出上限。",
     "detail": "docs/DETAIL.zh.md"
   }
 }
