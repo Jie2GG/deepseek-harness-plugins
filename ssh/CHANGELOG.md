@@ -4,6 +4,69 @@ All notable changes to `@jie2gg/dsh-plugin-ssh` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project uses [semantic versioning](https://semver.org/).
 
+## 0.4.0
+
+### Added
+
+- **Three authentication modes per target: key, key + password, and password.**
+  The choice is a segmented control under the address, and the ssh command line
+  follows from it: key keeps `BatchMode=yes` with
+  `PreferredAuthentications=publickey` (ssh-agent or an unencrypted key); key +
+  password leaves method negotiation to OpenSSH so the key is tried first and the
+  password answers as a fallback; password sets `PubkeyAuthentication=no` with
+  `PreferredAuthentications=password,keyboard-interactive`. Every mode that can be
+  prompted adds `NumberOfPasswordPrompts=1`, so a wrong secret fails fast instead
+  of spending the probe deadline on retries.
+- **A password or key passphrase can now be used without a terminal.** The plugin
+  prepares a private `askpass` helper — a directory and script at mode `0700`
+  under the system temp directory, removed when the plugin unloads — and exports
+  `SSH_ASKPASS` with `SSH_ASKPASS_REQUIRE=force` plus the secret in a dedicated
+  environment entry. `ssh` passes the prompt text to the helper, which answers a
+  passphrase prompt with the passphrase and any other with the password, falling
+  back to whichever slot is filled. The secret never appears in `argv`, and
+  because the subprocess service scrubs credential-shaped and `DSH_*` names from
+  every child, the value is handed over explicitly.
+- **Secrets live in the Harness credential store, not in this plugin's file.** A
+  target's password and passphrase are `grant` records addressed
+  `ssh/<target-id>-password` and `ssh/<target-id>-passphrase`, written with
+  `modifyRecord` and removed with `deleteRecord`; deleting a target forgets both.
+  The store keeps them in `$DSH_HOME/.credentials.yaml`, readable by the owner
+  only. The browser never receives a value: the list shows presence, a typed
+  secret travels to the Host once, and leaving a field empty keeps what is stored.
+- **The new-connection form is one address field, the authentication choice, the
+  secret fields that choice needs, an optional display name, and a collapsed
+  advanced section.** `[user@]host[:port]`, a bare alias, an IPv6 literal in
+  brackets, and an `ssh://` prefix all parse into the stored `host`, `user`, and
+  `port`, which the Host still keeps as separate fields. Secret inputs carry a
+  reveal button, a “stored — leave empty to keep it” placeholder, and a checkbox
+  that forgets the stored value. The list shows each target's mode and which
+  secret slots are filled.
+- A page-level warning when the Host cannot prepare the askpass helper, and a
+  per-target `secret-error` refusal instead of a probe that would only hang.
+
+### Changed
+
+- Record format `version: 2` with `compatibleVersions: [1]`: a stored target
+  without `auth` reads as `key`, which is exactly what 0.2.0 and 0.3.0 meant, so
+  no existing record is rewritten or refused.
+- `list` also returns the accepted ranges for the two numeric settings and the
+  helper state, and `save` / `probe` accept a `secrets` object, so the settings
+  tab no longer mirrors the ranges in browser code.
+- The settings shell hands a plugin one navigation row per section, and the
+  authentication choice is not a page: it is a `radiogroup` reusing the same
+  vendored segmented strip, with `aria-checked` in place of `aria-selected`.
+- A Host half that supports secrets reports itself through `list.askpass`; a page
+  talking to a Host module that has not been restarted yet hides the
+  authentication controls and says why, instead of failing on an unknown field.
+
+### Notes
+
+- The credential store keeps secrets out of the profile patch file and out of
+  this plugin's JSON, but not away from the agent: agent tool processes run as the
+  same OS user that can read `$DSH_HOME/.credentials.yaml`.
+- A probe can still only run `ssh … true`; no remote command executes with the
+  new secrets yet.
+
 ## 0.3.0
 
 ### Changed

@@ -45,6 +45,7 @@ function identityOf(input: ConnectionInput): Omit<ConnectionRecord, 'id' | 'crea
   return {
     label: trimmed(input.label) ?? '',
     host: trimmed(input.host) ?? '',
+    auth: input.auth ?? 'key',
     ...(user === undefined ? {} : { user }),
     ...(input.port === undefined ? {} : { port: input.port }),
     ...(identityFile === undefined ? {} : { identityFile }),

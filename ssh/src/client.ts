@@ -6,17 +6,19 @@
  * only runtime import is `react`, taken from the page's baseline module table,
  * and the single top-level `import type` is erased by the compiler. Controls
  * and their stylesheet are local to this plugin, styled exclusively from
- * `--dsw-alias-*` theme tokens, because a plugin must not require another
- * Harness client package as a module.
+ * `--dsw-alias-*` and other host theme tokens, because a plugin must not require
+ * another Harness client package as a module.
  *
- * Every operation goes to the plugin's own `/api/ssh/rpc` route, which reads
- * and writes the plugin's storage domain; nothing here touches the profile
- * patch file, and no secret is ever rendered.
+ * The new-connection form is one address field, a segmented authentication
+ * choice, the secret fields that choice needs, and a collapsed advanced section.
+ * A typed secret travels to the Host once — either stored in the credential
+ * store on save or used transiently by a draft probe — and no secret value ever
+ * comes back to the browser.
  *
  * @module @jie2gg/dsh-plugin-ssh/client
  */
 
-import type { ConnectionInput, ConnectionRecord, ProbeOutcome, SshFailure, SshSettings } from './types.ts'
+import type { AuthMode, ConnectionInput, ConnectionRecord, ConnectionView, ProbeOutcome, SshFailure } from './types.ts'
 
 window.__ModuleLoader__.load({
   id: '@jie2gg/dsh-plugin-ssh',
@@ -28,15 +30,18 @@ window.__ModuleLoader__.load({
     const NS = 'settings.ssh'
     /** The plugin's own route on the shared `/api` channel. */
     const ROUTE = '/api/ssh/rpc'
-    /**
-     * Input ranges the Host validates against, mirrored here only so the
-     * settings page can state them before a wrong value is typed.
-     * `src/storage.ts` is the authority: MIN/MAX_PROBE_TIMEOUT_MS and
-     * MIN/MAX_MAX_OUTPUT_BYTES.
-     */
-    const BOUNDS = { probeTimeoutMinMs: 1000, probeTimeoutMaxMs: 120000, outputMinBytes: 1024, outputMaxBytes: 4194304 }
     /** Base of the tab ids this page owns: `<id>-<value>` and `<id>-<value>-panel`. */
     const TAB_BASE = 'dshssh-tabs'
+    /** Base of the authentication-mode radio ids. */
+    const AUTH_BASE = 'dshssh-auth'
+    /** The three authentication modes, in display order. */
+    const AUTH_OPTIONS: readonly { value: AuthMode; labelKey: string; hintKey: string }[] = [
+      { value: 'key', labelKey: 'authKey', hintKey: 'authKeyHint' },
+      { value: 'key+password', labelKey: 'authBoth', hintKey: 'authBothHint' },
+      { value: 'password', labelKey: 'authPassword', hintKey: 'authPasswordHint' },
+    ]
+    /** Dictionary key naming each mode, for list rows. */
+    const AUTH_LABEL: Record<string, string> = { key: 'authKey', 'key+password': 'authBoth', password: 'authPassword' }
 
     /** Browser-facing copy. Both baseline locales are required by the locale service. */
     const DICT: Record<string, Record<string, string>> = {
@@ -44,10 +49,17 @@ window.__ModuleLoader__.load({
         nav: 'Remote connections',
         title: 'Remote connections',
         intro: 'Named SSH targets this machine can reach, kept in this plugin\'s own storage so the page can edit them without touching the profile patch file. The plugin never reads or writes ~/.ssh/config and never adds a host key.',
-        storedIn: 'Stored by the plugin in its own ssh_targets storage domain.',
+        storedIn: 'Stored by the plugin in its own ssh_targets storage domain; passwords and passphrases live in the Harness credential store.',
         tabsLabel: 'Sections of this page',
         tabList: 'SSH targets',
         tabSettings: 'Client settings',
+        settingsTitle: 'Client settings',
+        settingsCommand: 'ssh executable',
+        settingsProbeTimeout: 'Probe timeout (ms)',
+        settingsMaxOutput: 'Output ceiling (bytes)',
+        settingsSave: 'Save settings',
+        settingsSaved: 'Saved.',
+        settingsHint: 'A probe runs with BatchMode=yes unless it needs a secret, in which case the askpass helper answers the prompt for it.',
         commandHint: 'A name resolved on PATH, or an absolute path. Nothing is installed or upgraded: an executable that cannot be resolved is reported as its own result.',
         boundsTitle: 'Fixed bounds',
         boundsTargets: 'Targets per profile',
@@ -55,36 +67,48 @@ window.__ModuleLoader__.load({
         boundsPerRound: 'Targets per “Test all” round',
         boundsTimeout: 'Probe timeout accepts',
         boundsOutput: 'Output ceiling accepts',
-        settingsTitle: 'Client settings',
-        settingsCommand: 'ssh executable',
-        settingsProbeTimeout: 'Probe timeout (ms)',
-        settingsMaxOutput: 'Output ceiling (bytes)',
-        settingsSave: 'Save settings',
-        settingsSaved: 'Saved.',
-        settingsHint: 'A probe always runs with BatchMode=yes, so it never waits for a passphrase.',
         listTitle: 'SSH targets',
         listCount: '{count} of {limit} saved',
         listAdd: 'New connection',
         listAddFull: 'Target limit reached',
         listProbeAll: 'Test all',
         listProbing: 'Testing…',
-        listSkipped: 'Tested the first {probed}; {skipped} still untested (raise the limit with another round).',
+        listSkipped: 'Tested the first {probed}; {skipped} still untested.',
         listEmpty: 'No SSH targets yet',
         listEmptyHint: 'Add a host name or an existing OpenSSH host alias, then test it here.',
         listLoadFailed: 'The settings page could not reach the plugin on this Host.',
         newTitle: 'New connection',
         editTitle: 'Edit connection',
-        fLabel: 'Display name',
-        fHost: 'Host or alias',
-        fUser: 'User',
-        fPort: 'Port',
-        fIdentity: 'Identity file',
+        addrLabel: 'Connection address',
+        addrPlaceholder: 'jiegg@build.example:22022',
+        addrHint: 'One field: [user@]host[:port], or an ssh:// URL. A bare name is read as an OpenSSH host alias.',
+        addrBad: 'That address could not be read. Expected [user@]host[:port].',
+        labelField: 'Display name',
+        labelHint: 'Left empty, the address is used.',
+        authTitle: 'Authentication',
+        authKey: 'Key',
+        authBoth: 'Key + password',
+        authPassword: 'Password',
+        authKeyHint: 'Uses ssh-agent or a private key with no passphrase. The passphrase field below covers an encrypted key.',
+        authBothHint: 'Tries the key first, then falls back to the account password.',
+        authPasswordHint: 'Password only: publickey offers are skipped.',
+        keyFileLabel: 'Private key file',
+        passphraseLabel: 'Key passphrase',
+        passwordLabel: 'Login password',
+        advanced: 'Advanced options',
+        advancedHint: 'Jump host, extra ssh arguments, and a note.',
         fProxy: 'Jump host',
-        fArgs: 'Extra ssh flags',
+        fArgs: 'Extra ssh arguments',
         fArgsHint: 'One ssh argv entry per line: -4 on its own, an option with its value glued into one token (-oServerAliveCountMax=3), or the option and its value on two lines.',
         fNote: 'Note',
         fOptional: 'optional',
         fRequired: 'Required.',
+        secretStored: 'Stored — leave empty to keep it',
+        secretClear: 'Forget the stored value',
+        showSecret: 'Show',
+        hideSecret: 'Hide',
+        secretSet: 'password stored',
+        passphraseSet: 'passphrase stored',
         test: 'Test',
         testDraft: 'Test before saving',
         edit: 'Edit',
@@ -94,10 +118,13 @@ window.__ModuleLoader__.load({
         save: 'Save',
         saving: 'Saving…',
         saved: 'Saved.',
-        removed: 'Deleted.',
+        removed: 'Deleted, and its stored secret was forgotten.',
+        removedOrphan: 'Deleted, but its stored secret could not be removed.',
         copyDetail: 'Copy diagnostics',
         copied: 'Copied.',
         copyFailed: 'The browser refused the clipboard.',
+        askpassUnavailable: 'This Host cannot prepare the ssh askpass helper, so a stored password or passphrase cannot be used. Key-agent probes still work.',
+        legacyHost: 'The running Host predates password support: it still needs to be restarted for the authentication choice and the secret fields to appear. Until then a target connects with ssh-agent or an unencrypted key.',
         stIdle: 'Not tested',
         stRunning: 'Testing…',
         stReachable: 'Reachable',
@@ -111,22 +138,30 @@ window.__ModuleLoader__.load({
         took: '{ms} ms',
         hintUnknownHost: 'OpenSSH has no trusted host key for this host yet. Connect once from a terminal (ssh <host>) to record it; this page never writes known_hosts.',
         hintSshMissing: 'The configured ssh executable could not be resolved. Install OpenSSH or set its path in Client settings.',
-        hintAuthFailed: 'The connection reached the server but no credential was accepted. ssh-agent or a key without a passphrase is what a probe can use.',
+        hintAuthFailed: 'The connection reached the server but no credential was accepted. For a password or an encrypted key, fill the secret field; for an agent key, check that the agent is running.',
         hintUnreachable: 'The host did not accept the session: check the address, the port, and any jump host.',
         hintTimeout: 'The probe ran out of time. Raise the probe timeout if this host is slow to answer.',
         hintBadInput: 'Check the highlighted field.',
         hintBusy: 'Too many probes are running. Wait for the current ones to finish.',
         hintStorage: 'The plugin could not read its stored connections. See the Host log for the storage failure.',
+        hintSecret: 'The plugin could not reach the credential store for this secret.',
         hintInternal: 'The plugin reported an unexpected failure.',
       },
       zh: {
         nav: '远程连接',
         title: '远程连接',
         intro: '保存「本机能够连上的命名 SSH 目标」。清单存在插件自己的存储里，页面改它不会动 profile 的 patch 文件；插件从不读写 ~/.ssh/config，也不会替你写入主机密钥。',
-        storedIn: '由插件存放在它自己的 ssh_targets 存储域中。',
+        storedIn: '清单与参数存在插件自己的 ssh_targets 存储域；密码与口令存在 Harness 凭据库里。',
         tabsLabel: '本页面内的分区',
         tabList: 'SSH 目标清单',
         tabSettings: '客户端参数',
+        settingsTitle: '客户端参数',
+        settingsCommand: 'ssh 可执行文件',
+        settingsProbeTimeout: '探测超时（毫秒）',
+        settingsMaxOutput: '输出上限（字节）',
+        settingsSave: '保存参数',
+        settingsSaved: '已保存。',
+        settingsHint: '不需要凭据的探测以 BatchMode=yes 运行；需要用凭据时，由 askpass 助手应答提示。',
         commandHint: '填 PATH 能解析到的名字，或绝对路径。插件不会安装或升级程序：解析不到就单独作为一种结果报告。',
         boundsTitle: '固定边界',
         boundsTargets: '每个 profile 可存的目标数',
@@ -134,13 +169,6 @@ window.__ModuleLoader__.load({
         boundsPerRound: '「全部测试」单轮覆盖的目标数',
         boundsTimeout: '探测超时可填范围',
         boundsOutput: '输出上限可填范围',
-        settingsTitle: '客户端参数',
-        settingsCommand: 'ssh 可执行文件',
-        settingsProbeTimeout: '探测超时（毫秒）',
-        settingsMaxOutput: '输出上限（字节）',
-        settingsSave: '保存参数',
-        settingsSaved: '已保存。',
-        settingsHint: '探测始终以 BatchMode=yes 运行，因此不会等待输入口令。',
         listTitle: 'SSH 目标清单',
         listCount: '已保存 {count} / {limit}',
         listAdd: '新建连接',
@@ -153,17 +181,36 @@ window.__ModuleLoader__.load({
         listLoadFailed: '设置页无法连到本机上的这个插件。',
         newTitle: '新建连接',
         editTitle: '编辑连接',
-        fLabel: '显示名称',
-        fHost: '主机名或别名',
-        fUser: '用户',
-        fPort: '端口',
-        fIdentity: '私钥文件',
+        addrLabel: '连接地址',
+        addrPlaceholder: 'jiegg@build.example:22022',
+        addrHint: '一个框就够：[user@]host[:port]，也接受 ssh:// 开头的写法。只写名字时按 OpenSSH 别名理解。',
+        addrBad: '读不出这个地址，期望写法是 [user@]host[:port]。',
+        labelField: '显示名称',
+        labelHint: '留空就用地址当名称。',
+        authTitle: '登录方式',
+        authKey: '密钥',
+        authBoth: '密钥 + 密码',
+        authPassword: '密码',
+        authKeyHint: '使用 ssh-agent 或无口令私钥；私钥带口令时填下面的口令框。',
+        authBothHint: '先试密钥，再退回账号密码。',
+        authPasswordHint: '只用密码：不再提供 publickey。',
+        keyFileLabel: '私钥文件',
+        passphraseLabel: '私钥口令',
+        passwordLabel: '登录密码',
+        advanced: '高级选项',
+        advancedHint: '跳板主机、额外 ssh 参数、备注。',
         fProxy: '跳板主机',
         fArgs: '额外 ssh 参数',
         fArgsHint: '每行一个 ssh 参数：单独一个 -4；把选项和值写成一个参数（-oServerAliveCountMax=3）；或者选项一行、取值一行。',
         fNote: '备注',
         fOptional: '可选',
         fRequired: '此项必填。',
+        secretStored: '已保存 · 留空表示不改',
+        secretClear: '忘掉已保存的值',
+        showSecret: '显示',
+        hideSecret: '隐藏',
+        secretSet: '已存密码',
+        passphraseSet: '已存口令',
         test: '测试',
         testDraft: '保存前先测试',
         edit: '编辑',
@@ -173,10 +220,13 @@ window.__ModuleLoader__.load({
         save: '保存',
         saving: '保存中…',
         saved: '已保存。',
-        removed: '已删除。',
+        removed: '已删除，同时忘掉了它存的凭据。',
+        removedOrphan: '已删除，但没能清掉它存的凭据。',
         copyDetail: '复制诊断',
         copied: '已复制。',
         copyFailed: '浏览器拒绝了剪贴板写入。',
+        askpassUnavailable: '这台 Host 上准备不出 ssh 的 askpass 助手，已保存的密码或口令暂时用不了；ssh-agent 方式的探测不受影响。',
+        legacyHost: '当前正在运行的 Host 还是重启前的旧版本，重启之后才会出现登录方式与凭据输入框。在此之前，目标只能用 ssh-agent 或无口令私钥连接。',
         stIdle: '未测试',
         stRunning: '测试中…',
         stReachable: '可连通',
@@ -190,12 +240,13 @@ window.__ModuleLoader__.load({
         took: '{ms} 毫秒',
         hintUnknownHost: 'OpenSSH 还没有这台主机被信任的主机密钥。请在终端先手动连接一次（ssh <主机>）记录下来；本页面从不写入 known_hosts。',
         hintSshMissing: '无法解析设置里的 ssh 可执行文件。请安装 OpenSSH，或在客户端参数里填写它的路径。',
-        hintAuthFailed: '已经连上服务端，但没有凭据被接受。探测能用的是 ssh-agent 或无口令私钥。',
+        hintAuthFailed: '已经连上服务端，但没有凭据被接受。密码或带口令的私钥请填写对应的凭据输入框；用 agent 的密钥请确认 agent 在运行。',
         hintUnreachable: '主机没有接受这次会话：请检查地址、端口以及跳板主机。',
         hintTimeout: '探测用时耗尽。若这台主机响应较慢，请调大探测超时。',
         hintBadInput: '请检查高亮的字段。',
         hintBusy: '同时在跑的探测太多，请等待当前探测结束。',
         hintStorage: '插件读不到自己保存的连接记录，具体存储错误见 Host 日志。',
+        hintSecret: '插件没能访问这台主机对应的凭据库。',
         hintInternal: '插件报告了未预期的失败。',
       },
     }
@@ -240,6 +291,7 @@ window.__ModuleLoader__.load({
       'bad-input': 'hintBadInput',
       busy: 'hintBusy',
       'storage-error': 'hintStorage',
+      'secret-error': 'hintSecret',
       'not-found': 'hintInternal',
       internal: 'hintInternal',
     }
@@ -258,12 +310,21 @@ window.__ModuleLoader__.load({
 .dshssh-input,.dshssh-textarea{box-sizing:border-box;width:100%;padding:6px 8px;font:inherit;font-size:13px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:6px}
 .dshssh-textarea{min-height:64px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .dshssh-input:focus-visible,.dshssh-textarea:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.dshssh-input-inline{display:flex;align-items:stretch;gap:6px}
+.dshssh-input-inline .dshssh-input{flex:1 1 auto}
+.dshssh-eye{flex:0 0 auto;padding:0 10px;font:inherit;font-size:12px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;cursor:pointer}
+.dshssh-eye:hover{color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-brand-primary)}
+.dshssh-eye:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.dshssh-check{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary)}
 .dshssh-list{display:flex;flex-direction:column;gap:8px}
 .dshssh-row{display:flex;align-items:flex-start;gap:10px;padding:10px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-2)}
 .dshssh-row-main{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1 1 auto}
 .dshssh-row-title{font-size:13px;font-weight:600;overflow-wrap:anywhere}
 .dshssh-row-meta{font-size:12px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
-.dshssh-actions{display:flex;align-items:center;gap:6px;flex:0 0 auto}
+.dshssh-chips{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.dshssh-chip{display:inline-flex;align-items:center;padding:1px 7px;font-size:11.5px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base)}
+.dshssh-chip[data-tone="secret"]{color:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary)}
+.dshssh-actions{display:flex;align-items:center;gap:6px;flex:0 0 auto;flex-wrap:wrap}
 .dshssh-btn{padding:5px 10px;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;cursor:pointer}
 .dshssh-btn:hover:not(:disabled){border-color:var(--dsw-alias-brand-primary)}
 .dshssh-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
@@ -280,24 +341,30 @@ window.__ModuleLoader__.load({
 .dshssh-notice[data-tone="warn"]{border-color:var(--dsw-alias-state-warn-primary)}
 .dshssh-notice[data-tone="ok"]{border-color:var(--dsw-alias-state-success-primary)}
 .dshssh-detail{margin:0;padding:8px;max-height:180px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l1);border-radius:6px}
-.dshssh-form{display:flex;flex-direction:column;gap:10px;padding:12px;border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-base)}
+.dshssh-form{display:flex;flex-direction:column;gap:12px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-base)}
 .dshssh-foot{display:flex;align-items:center;gap:8px;justify-content:flex-end;flex-wrap:wrap}
 .dshssh-error{font-size:12px;color:var(--dsw-alias-state-error-primary)}
-.dshssh-sep{color:var(--dsw-alias-border-l2)}
+.dshssh-disclose{border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;padding:10px;display:flex;flex-direction:column;gap:10px}
+.dshssh-disclose>summary{font-size:12px;font-weight:600;cursor:pointer;color:var(--dsw-alias-label-secondary);list-style:none}
+.dshssh-disclose>summary::-webkit-details-marker{display:none}
+.dshssh-disclose>summary::before{content:"▸ ";color:var(--dsw-alias-label-secondary)}
+.dshssh-disclose[open]>summary::before{content:"▾ "}
+.dshssh-disclose[open]>summary{color:var(--dsw-alias-label-primary)}
+.dshssh-seg{position:relative;display:inline-grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:2px;padding:4px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-interactive-bg-hover);justify-self:start}
+.dshssh-seg-indicator{position:absolute;top:4px;left:4px;width:calc((100% - 8px - 2px * (var(--dshssh-segment-count) - 1)) / var(--dshssh-segment-count));height:calc(100% - 8px);border:0;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1);box-shadow:var(--dsw-elevation-soft);transform:translateX(calc(var(--dshssh-segment-index) * (100% + 2px)));transition:transform 160ms ease;pointer-events:none}
+.dshssh-seg-item{box-sizing:border-box;position:relative;z-index:1;height:28px;padding:0 16px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;font:inherit;font-size:13px;line-height:20px;font-weight:500;white-space:nowrap;cursor:pointer;color:var(--dsw-alias-label-secondary);transition:color 120ms ease}
+.dshssh-seg-item[aria-selected="true"],.dshssh-seg-item[aria-checked="true"]{color:var(--dsw-alias-label-primary)}
+.dshssh-seg-item:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
+.dshssh-seg-item:disabled{cursor:default;opacity:.4}
+.dshssh-seg-item:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:-2px}
+.dshssh-hidden{display:none}
+.dshssh-panel{display:flex;flex-direction:column;gap:16px}
+.dshssh-panel:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:2px}
 .dshssh-bounds{display:flex;flex-direction:column;gap:7px;margin:0}
 .dshssh-bound{display:flex;align-items:baseline;justify-content:space-between;gap:12px;border-bottom:1px solid var(--dsw-alias-border-l1);padding-bottom:6px}
 .dshssh-bound dt{font-size:12px;color:var(--dsw-alias-label-secondary)}
 .dshssh-bound dd{margin:0;font-size:12px;overflow-wrap:anywhere;color:var(--dsw-alias-label-primary)}
-.dshssh-tabs{position:relative;display:inline-grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:2px;padding:4px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-interactive-bg-hover);justify-self:start}
-.dshssh-tabs-indicator{position:absolute;top:4px;left:4px;width:calc((100% - 8px - 2px * (var(--dshssh-segment-count) - 1)) / var(--dshssh-segment-count));height:calc(100% - 8px);border:0;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1);box-shadow:var(--dsw-elevation-soft);transform:translateX(calc(var(--dshssh-segment-index) * (100% + 2px)));transition:transform 160ms ease;pointer-events:none}
-.dshssh-tab{box-sizing:border-box;position:relative;z-index:1;height:28px;padding:0 16px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;font:inherit;font-size:13px;line-height:20px;font-weight:500;white-space:nowrap;cursor:pointer;color:var(--dsw-alias-label-secondary);transition:color 120ms ease}
-.dshssh-tab[aria-selected="true"]{color:var(--dsw-alias-label-primary)}
-.dshssh-tab:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
-.dshssh-tab:disabled{cursor:default;opacity:.4}
-.dshssh-tab:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:-2px}
-.dshssh-panel{display:flex;flex-direction:column;gap:16px}
-.dshssh-panel:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:2px}
-@media (prefers-reduced-motion: reduce){.dshssh-tabs-indicator,.dshssh-tab{transition:none}}
+@media (prefers-reduced-motion: reduce){.dshssh-seg-indicator,.dshssh-seg-item{transition:none}}
 `
 
     /**
@@ -330,7 +397,7 @@ window.__ModuleLoader__.load({
     /**
      * Call one plugin operation over the shared `/api` channel.
      * @param method - an operation name the route allowlists.
-     * @param params - its parameters.
+     * @param params - its parameters, secrets included (never read back).
      * @returns the decoded result.
      */
     async function rpc(method: string, params?: Record<string, unknown>): Promise<any> {
@@ -352,10 +419,7 @@ window.__ModuleLoader__.load({
         body = undefined
       }
       if (body?.ok === true) return body.result
-      const failure: SshFailure = body?.error ?? {
-        code: 'internal',
-        message: `HTTP ${String(response.status)}`,
-      }
+      const failure: SshFailure = body?.error ?? { code: 'internal', message: `HTTP ${String(response.status)}` }
       throw failure
     }
 
@@ -370,12 +434,59 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Split the extra-flags textarea into argv entries, one per line.
+     * Split the one address field into its parts. Accepts `host`,
+     * `[user@]host[:port]`, bracketed IPv6, and an `ssh://` prefix.
+     * @param text - what the user typed.
+     * @returns the parsed pieces; an empty host means the address was unusable.
+     */
+    function parseAddress(text: string): { user: string; host: string; port: string } {
+      let value = (text ?? '').trim()
+      if (value.startsWith('ssh://')) value = value.slice('ssh://'.length)
+      const slash = value.indexOf('/')
+      if (slash >= 0) value = value.slice(0, slash)
+      let user = ''
+      const at = value.lastIndexOf('@')
+      if (at >= 0) {
+        user = value.slice(0, at)
+        value = value.slice(at + 1)
+      }
+      let port = ''
+      if (value.startsWith('[')) {
+        const close = value.indexOf(']')
+        if (close > 0) {
+          const tail = value.slice(close + 1)
+          port = tail.startsWith(':') ? tail.slice(1) : ''
+          value = value.slice(1, close)
+        }
+      } else {
+        const colon = value.indexOf(':')
+        if (colon >= 0) {
+          port = value.slice(colon + 1)
+          value = value.slice(0, colon)
+        }
+      }
+      return { user: user.trim(), host: value.trim(), port: port.trim() }
+    }
+
+    /**
+     * Compose the one field's text out of stored parts.
+     * @param record - the stored target.
+     * @returns the address the field shows.
+     */
+    function addressOf(record: ConnectionRecord): string {
+      const authority = record.user === undefined || record.user === '' ? record.host : `${record.user}@${record.host}`
+      const host = record.host.includes(':') && !record.host.startsWith('[') ? `[${record.host}]` : record.host
+      const base = record.user === undefined || record.user === '' ? host : `${record.user}@${host}`
+      return record.port === undefined ? base : `${base}:${String(record.port)}`
+    }
+
+    /**
+     * Split the extra-arguments textarea into argv entries, one per line.
      * @param text - the raw textarea value.
-     * @returns the flags, or `undefined` when none were given.
+     * @returns the entries, or `undefined` when none were given.
      */
     function flagsOf(text: string): string[] | undefined {
-      const lines = text
+      const lines = (text ?? '')
         .split('\n')
         .map(line => line.trim())
         .filter(line => line !== '')
@@ -383,88 +494,95 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Read one stored record back into the form's draft shape.
-     * @param record - the stored target.
+     * Read one stored target back into the form's draft shape.
+     * @param record - the stored target, or `null` for a new one.
      * @returns the draft the form edits.
      */
-    function draftOf(record: ConnectionRecord | null, fallback?: any): any {
+    function draftOf(record: ConnectionView | null): any {
       if (record === null) {
         return {
           id: undefined,
+          address: '',
           label: '',
-          host: '',
-          user: '',
-          port: '',
+          auth: 'key',
           identityFile: '',
+          passphrase: '',
+          password: '',
+          clearPassphrase: false,
+          clearPassword: false,
+          showPassphrase: false,
+          showPassword: false,
           proxyJump: '',
           extraArgsText: '',
           note: '',
+          hadPassphrase: false,
+          hadPassword: false,
         }
       }
       return {
         id: record.id,
-        label: record.label,
-        host: record.host,
-        user: record.user ?? '',
-        port: record.port === undefined ? '' : String(record.port),
+        address: addressOf(record),
+        label: record.label === addressOf(record) ? '' : record.label,
+        auth: record.auth ?? 'key',
         identityFile: record.identityFile ?? '',
+        passphrase: '',
+        password: '',
+        clearPassphrase: false,
+        clearPassword: false,
+        showPassphrase: false,
+        showPassword: false,
         proxyJump: record.proxyJump ?? '',
         extraArgsText: (record.extraArgs ?? []).join('\n'),
         note: record.note ?? '',
+        hadPassphrase: record.secrets?.passphrase === true,
+        hadPassword: record.secrets?.password === true,
       }
     }
 
     /**
      * Turn the edited draft into the payload the Host validates.
      * @param draft - the form state.
+     * @param parsed - the parsed address field.
      * @returns a `save` connection payload, with blank fields dropped.
      */
-    function payloadOf(draft: any): ConnectionInput {
+    function payloadOf(draft: any, parsed: { user: string; host: string; port: string }, withAuth: boolean): ConnectionInput {
       const optional = (value: string): string | undefined => {
-        const trimmed = value.trim()
+        const trimmed = (value ?? '').trim()
         return trimmed === '' ? undefined : trimmed
       }
-      const port = optional(draft.port ?? '')
       const args = flagsOf(draft.extraArgsText ?? '')
-      const user = optional(draft.user ?? '')
+      const user = optional(draft.user ?? '') ?? (parsed.user === '' ? undefined : parsed.user)
       const identityFile = optional(draft.identityFile ?? '')
       const proxyJump = optional(draft.proxyJump ?? '')
       const note = optional(draft.note ?? '')
-      const host = optional(draft.host ?? '') ?? ''
+      const portText = parsed.port === '' ? optional(draft.port ?? '') : parsed.port
       return {
         ...(draft.id === undefined || draft.id === '' ? {} : { id: draft.id }),
-        label: optional(draft.label ?? '') ?? host,
-        host,
-        ...(user === undefined ? {} : { user }),
-        ...(port === undefined ? {} : { port: Number(port) }),
+        label: optional(draft.label ?? '') ?? parsed.host,
+        host: parsed.host,
+        ...(user === undefined || user === '' ? {} : { user }),
+        ...(portText === undefined || portText === '' ? {} : { port: Number(portText) }),
         ...(identityFile === undefined ? {} : { identityFile }),
         ...(proxyJump === undefined ? {} : { proxyJump }),
         ...(args === undefined ? {} : { extraArgs: args }),
         ...(note === undefined ? {} : { note }),
+        ...(withAuth ? { auth: draft.auth ?? 'key' } : {}),
       }
     }
 
     /**
-     * The draft fields a probe can use before the record is saved.
+     * The secret intent of the edited form: typed values write, checked
+     * clear-outs forget, and anything untouched is left alone.
      * @param draft - the form state.
-     * @returns the probe draft payload, or `undefined` when no host is typed yet.
+     * @returns the secrets payload, or `undefined` when nothing changed.
      */
-    function probeDraftOf(draft: any): Record<string, unknown> | undefined {
-      const host = (draft.host ?? '').trim()
-      if (host === '') return undefined
-      const port = (draft.port ?? '').trim()
-      const user = (draft.user ?? '').trim()
-      const identityFile = (draft.identityFile ?? '').trim()
-      const proxyJump = (draft.proxyJump ?? '').trim()
-      const args = flagsOf(draft.extraArgsText ?? '')
-      return {
-        host,
-        ...(user === '' ? {} : { user }),
-        ...(port === '' ? {} : { port: Number(port) }),
-        ...(identityFile === '' ? {} : { identityFile }),
-        ...(proxyJump === '' ? {} : { proxyJump }),
-        ...(args === undefined ? {} : { extraArgs: args }),
-      }
+    function secretsOf(draft: any): Record<string, unknown> | undefined {
+      const patch: Record<string, unknown> = {}
+      if (draft.clearPassphrase) patch.passphrase = null
+      else if ((draft.passphrase ?? '') !== '') patch.passphrase = draft.passphrase
+      if (draft.clearPassword) patch.password = null
+      else if ((draft.password ?? '') !== '') patch.password = draft.password
+      return Object.keys(patch).length === 0 ? undefined : patch
     }
 
     /**
@@ -477,54 +595,75 @@ window.__ModuleLoader__.load({
       return Number.isNaN(date.getTime()) ? iso : date.toLocaleString()
     }
 
+    /**
+     * Byte and millisecond counts the way a settings reader expects.
+     * @param value - the number to state.
+     * @param unit - `bytes` or `ms`.
+     * @returns the human sentence.
+     */
+    function measure(value: number | undefined, unit: 'bytes' | 'ms'): string {
+      if (value === undefined || !Number.isFinite(value)) return '—'
+      if (unit === 'ms') return value % 1000 === 0 ? `${String(value / 1000)} s` : `${String(value)} ms`
+      const mib = 1024 * 1024
+      if (value >= mib && value % mib === 0) return `${String(value / mib)} MiB`
+      if (value >= 1024 && value % 1024 === 0) return `${String(value / 1024)} KiB`
+      return `${String(value)} B`
+    }
+
     /** One state dot and its label. */
     function Badge(props: { tone: string; text: string }): any {
       return h('span', { class: 'dshssh-badge', 'data-tone': props.tone }, props.text)
     }
 
-    /** A labelled single-line input. */
+    /** A labelled single-line input, optionally with a reveal button for secrets. */
     function TextField(props: {
       label: string
       value: string
       onChange: (value: string) => void
       placeholder?: string
-      optionalText?: string
+      hint?: string
       type?: string
       disabled?: boolean
       errorText?: string
+      reveal?: { shown: boolean; onToggle: () => void; showLabel: string; hideLabel: string }
     }): any {
+      const inputType = props.reveal === undefined ? (props.type ?? 'text') : (props.reveal.shown ? 'text' : 'password')
       return h('label', { class: 'dshssh-field' },
-        h('span', { class: 'dshssh-label' },
-          props.label,
-          props.optionalText === undefined ? null : h('span', { class: 'dshssh-muted' }, ` (${props.optionalText})`),
+        h('span', { class: 'dshssh-label' }, props.label),
+        h('span', { class: 'dshssh-input-inline' },
+          h('input', {
+            class: 'dshssh-input',
+            type: inputType,
+            value: props.value,
+            placeholder: props.placeholder ?? '',
+            disabled: props.disabled === true,
+            autocomplete: props.reveal === undefined ? 'off' : 'new-password',
+            spellcheck: 'false',
+            'aria-invalid': props.errorText === undefined ? 'false' : 'true',
+            onChange: (event: any) => { props.onChange(String(event.target.value ?? '')) },
+          }),
+          props.reveal === undefined ? null : h('button', {
+            class: 'dshssh-eye',
+            type: 'button',
+            'aria-label': props.reveal.shown ? props.reveal.hideLabel : props.reveal.showLabel,
+            'aria-pressed': props.reveal.shown,
+            onClick: props.reveal.onToggle,
+          }, props.reveal.shown ? props.reveal.hideLabel : props.reveal.showLabel),
         ),
-        h('input', {
-          class: 'dshssh-input',
-          type: props.type ?? 'text',
-          value: props.value,
-          placeholder: props.placeholder ?? '',
-          disabled: props.disabled === true,
-          'aria-invalid': props.errorText === undefined ? 'false' : 'true',
-          onChange: (event: any) => { props.onChange(String(event.target.value ?? '')) },
-        }),
+        props.hint === undefined ? null : h('span', { class: 'dshssh-muted' }, props.hint),
         props.errorText === undefined ? null : h('span', { class: 'dshssh-error' }, props.errorText),
       )
     }
 
     /** A labelled multi-line input. */
-    function TextAreaField(props: {
-      label: string
-      value: string
-      onChange: (value: string) => void
-      hint?: string
-      disabled?: boolean
-    }): any {
+    function TextAreaField(props: { label: string; value: string; onChange: (value: string) => void; hint?: string; disabled?: boolean }): any {
       return h('label', { class: 'dshssh-field' },
         h('span', { class: 'dshssh-label' }, props.label),
         h('textarea', {
           class: 'dshssh-textarea',
           value: props.value,
           rows: 3,
+          spellcheck: 'false',
           disabled: props.disabled === true,
           onChange: (event: any) => { props.onChange(String(event.target.value ?? '')) },
         }),
@@ -533,11 +672,10 @@ window.__ModuleLoader__.load({
     }
 
     /** A status line the page announces politely. */
-    function Notice(props: { tone: string; text: string; hint?: string; children?: any }): any {
+    function Notice(props: { tone: string; text: string; hint?: string }): any {
       return h('div', { class: 'dshssh-notice', 'data-tone': props.tone, role: 'status', 'aria-live': 'polite' },
         h('span', {}, props.text),
         props.hint === undefined ? null : h('span', { class: 'dshssh-muted' }, props.hint),
-        props.children ?? null,
       )
     }
 
@@ -563,10 +701,10 @@ window.__ModuleLoader__.load({
     /**
      * The enabled option one walk key lands on. Mirrors the host tablist:
      * arrows step to the nearest enabled neighbour and wrap, Home and End jump.
-     * @param options - the tabs in display order.
-     * @param from - index of the selected tab.
+     * @param options - the segments in display order.
+     * @param from - index of the selected segment.
      * @param key - the pressed key.
-     * @returns the tab the key asks for, or `undefined` when none does.
+     * @returns the segment the key asks for, or `undefined` when none does.
      */
     function walkTo(options: readonly { value: string; disabled?: boolean }[], from: number, key: string): { value: string } | undefined {
       const enabled = options.filter(option => option.disabled !== true)
@@ -583,22 +721,22 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The tab switcher at the head of this page.
-     *
-     * Its markup, keyboard walk, and sliding indicator are the host's
-     * `SegmentedControl` copied rather than imported: a plugin must not load
-     * another Harness client package as a module, so the behavior is vendored
-     * and the classes are renamed under this plugin's prefix.
+     * The host's segmented strip, vendored rather than imported: equal segments
+     * under one sliding indicator, a roving tabindex, and the Arrow / Home / End
+     * walk. `role: 'radio'` switches the markup to a radiogroup, which is what an
+     * authentication choice is; the visual strip is identical.
      */
-    function SshTabs(props: {
+    function SshSegment(props: {
       id: string
+      role: 'tab' | 'radio'
       value: string
-      options: readonly { value: string; label: string }[]
-      label: string
+      options: readonly { value: string; label: string; hint?: string; disabled?: boolean }[]
+      groupLabel: string
       onChange: (next: string) => void
     }): any {
       const list = React.useRef(null)
       const selected = Math.max(0, props.options.findIndex(option => option.value === props.value))
+      const isTab = props.role === 'tab'
 
       // A walk key reports the next value and the owner re-renders with it; the
       // keyboard follows the selection so the roving tabindex stays usable.
@@ -607,8 +745,8 @@ window.__ModuleLoader__.load({
         if (root === null || root === undefined) return
         const doc = typeof document === 'object' && document !== undefined ? document : undefined
         if (doc === undefined || !root.contains(doc.activeElement)) return
-        const tab = root.querySelector('[role="tab"][aria-selected="true"]')
-        if (tab !== null && tab !== undefined) tab.focus()
+        const active = root.querySelector(isTab ? '[role="tab"][aria-selected="true"]' : '[role="radio"][aria-checked="true"]')
+        if (active !== null && active !== undefined) active.focus()
       }, [props.value])
 
       const onKeyDown = (event: any): void => {
@@ -621,26 +759,29 @@ window.__ModuleLoader__.load({
 
       return h('div', {
         ref: list,
-        role: 'tablist',
-        'aria-label': props.label,
-        class: 'dshssh-tabs',
+        role: isTab ? 'tablist' : 'radiogroup',
+        'aria-label': props.groupLabel,
+        class: 'dshssh-seg',
         style: {
           '--dshssh-segment-count': String(props.options.length),
           '--dshssh-segment-index': String(selected),
         },
       },
-        h('span', { 'aria-hidden': 'true', class: 'dshssh-tabs-indicator' }),
+        h('span', { 'aria-hidden': 'true', class: 'dshssh-seg-indicator' }),
         props.options.map(option => {
           const active = option.value === props.value
           return h('button', {
             key: option.value,
             id: `${props.id}-${option.value}`,
             type: 'button',
-            role: 'tab',
-            'aria-selected': active,
-            'aria-controls': `${props.id}-${option.value}-panel`,
+            role: props.role,
+            ...(isTab
+              ? { 'aria-selected': active, 'aria-controls': `${props.id}-${option.value}-panel` }
+              : { 'aria-checked': active }),
             tabIndex: active ? 0 : -1,
-            class: 'dshssh-tab',
+            disabled: option.disabled === true,
+            title: option.hint,
+            class: 'dshssh-seg-item',
             onClick: () => { if (!active) props.onChange(option.value) },
             onKeyDown,
           }, option.label)
@@ -651,18 +792,23 @@ window.__ModuleLoader__.load({
     /**
      * The page this plugin contributes.
      *
-     * The SSH target list and the client settings share one page as two tabs,
-     * because the settings shell gives a plugin exactly one navigation entry per
-     * section; both tabs read and write the same Host state through one `list`.
+     * Two tabs share one page — the target list and the client settings — over
+     * one state object and one `list` read, because the settings shell gives a
+     * plugin exactly one navigation row per section.
      * @param props - seat props: the localized reader and the panel `close`.
      * @returns the rendered page.
      */
     function SshSection(props: any): any {
       const t = translator(props)
       const [tab, setTab] = React.useState('list')
-      const [connections, setConnections] = React.useState([] as ConnectionRecord[])
-      const [settings, setSettings] = React.useState(null as SshSettings | null)
-      const [limits, setLimits] = React.useState({ maxConnections: 64, concurrentProbes: 4, probeAllLimit: 12 })
+      const [connections, setConnections] = React.useState([] as ConnectionView[])
+      const [settings, setSettings] = React.useState(null as { command: string; probeTimeoutMs: number; maxOutputBytes: number } | null)
+      const [limits, setLimits] = React.useState({ maxConnections: 64, concurrentProbes: 4, probeAllLimit: 12, probeTimeoutMinMs: 1000, probeTimeoutMaxMs: 120000, outputMinBytes: 1024, outputMaxBytes: 4194304 })
+      const [askpass, setAskpass] = React.useState('ready')
+      // Whether the loaded Host half knows about authentication modes at all:
+      // an in-place package swap needs a Host restart, and the page keeps working
+      // without the secret controls until then.
+      const [modern, setModern] = React.useState(false)
       const [probing, setProbing] = React.useState(0)
       const [loading, setLoading] = React.useState(true)
       const [busy, setBusy] = React.useState(null as string | null)
@@ -696,6 +842,8 @@ window.__ModuleLoader__.load({
             maxOutputBytes: String(result.settings?.maxOutputBytes ?? ''),
           })
           if (result.limits !== undefined) setLimits(result.limits)
+          setAskpass(result.askpass ?? 'ready')
+          setModern(result.askpass !== undefined)
           setProbing(result.probing ?? 0)
           setFailure(null)
         } catch (error: unknown) {
@@ -712,11 +860,11 @@ window.__ModuleLoader__.load({
       }, [])
 
       /**
-       * Run one mutation with the shared busy, failure, and notice handling.
+       * Run one operation with the shared busy, failure, and notice handling.
        * @param key - what is running, so the right control is disabled.
-       * @param run - the mutation.
+       * @param run - the operation.
        * @param done - the success copy to announce.
-       * @returns resolution once the mutation settled.
+       * @returns resolution once the operation settled.
        */
       async function act(key: string, run: () => Promise<void>, done?: string): Promise<void> {
         setBusy(key)
@@ -736,18 +884,34 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Save the edited draft as a new or updated target.
+       * The parsed address of the edited draft, with a local complaint when it
+       * cannot be read at all.
+       * @returns the parsed parts, or `undefined` when the host is empty.
+       */
+      function parsedAddress(): { user: string; host: string; port: string } | undefined {
+        const parsed = parseAddress(draft?.address ?? '')
+        if (parsed.host === '' || /\s/u.test(parsed.host)) {
+          setFieldError('address')
+          return undefined
+        }
+        return parsed
+      }
+
+      /**
+       * Save the edited draft as a new or updated target, storing any secret the
+       * reader typed or cleared.
        * @returns resolution once it landed.
        */
       async function saveDraft(): Promise<void> {
-        const payload = payloadOf(draft)
-        if (payload.host.trim() === '') {
-          setFieldError('host')
-          setFailure({ code: 'bad-input', message: t('fRequired'), field: 'host' })
-          return
-        }
-        await act(draft?.id ?? 'new', async () => {
-          const result = await rpc('save', { connection: payload })
+        const parsed = parsedAddress()
+        if (draft === null || parsed === undefined) return
+        const payload = payloadOf(draft, parsed, modern)
+        const secrets = modern ? secretsOf(draft) : undefined
+        await act(draft.id ?? 'new', async () => {
+          const result = await rpc('save', {
+            connection: payload,
+            ...(secrets === undefined ? {} : { secrets }),
+          })
           if (!alive.current) return
           setConnections(result.connections ?? [])
           setDraft(null)
@@ -757,18 +921,36 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Probe the draft before it is worth storing.
+       * Probe the draft before it is worth storing, using the typed secrets
+       * transiently: a password that has not been saved still works here.
        * @returns resolution once the outcome landed.
        */
       async function testDraft(): Promise<void> {
-        const probe = probeDraftOf(draft)
-        if (probe === undefined) {
-          setFieldError('host')
-          setFailure({ code: 'bad-input', message: t('fRequired'), field: 'host' })
-          return
+        const parsed = parsedAddress()
+        if (draft === null || parsed === undefined) return
+        const payload = payloadOf(draft, parsed, modern)
+        const secrets = modern ? secretsOf(draft) : undefined
+        const draftBody = {
+          host: payload.host,
+          ...(payload.user === undefined ? {} : { user: payload.user }),
+          ...(payload.port === undefined ? {} : { port: payload.port }),
+          ...(payload.identityFile === undefined ? {} : { identityFile: payload.identityFile }),
+          ...(payload.proxyJump === undefined ? {} : { proxyJump: payload.proxyJump }),
+          ...(payload.extraArgs === undefined ? {} : { extraArgs: payload.extraArgs }),
+          ...(modern ? { auth: payload.auth ?? 'key' } : {}),
         }
+        const secretBody: Record<string, unknown> = {}
+        if (typeof secrets?.passphrase === 'string') secretBody.passphrase = secrets.passphrase
+        else if (draft.hadPassphrase && !draft.clearPassphrase) secretBody.passphrase = undefined
+        if (typeof secrets?.password === 'string') secretBody.password = secrets.password
+        else if (draft.hadPassword && !draft.clearPassword) secretBody.password = undefined
+        // An unsaved form can only probe a secret it holds itself: a stored
+        // secret belongs to a saved id, so the typed value is the only source.
         await act('draftProbe', async () => {
-          const result = await rpc('probe', { draft: probe })
+          const result = await rpc('probe', {
+            draft: draftBody,
+            ...(Object.keys(secretBody).length === 0 ? {} : { secrets: secretBody }),
+          })
           if (alive.current) setDraftProbe(result.probe ?? null)
         })
       }
@@ -778,7 +960,7 @@ window.__ModuleLoader__.load({
        * @param record - the stored target.
        * @returns resolution once the row updated.
        */
-      async function testOne(record: ConnectionRecord): Promise<void> {
+      async function testOne(record: ConnectionView): Promise<void> {
         await act(`probe:${record.id}`, async () => {
           const result = await rpc('probe', { id: record.id })
           if (!alive.current) return
@@ -802,21 +984,22 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Delete one stored target.
+       * Delete one stored target and forget its secrets.
        * @param record - the stored target.
        * @returns resolution once the row disappeared.
        */
-      async function remove(record: ConnectionRecord): Promise<void> {
+      async function remove(record: ConnectionView): Promise<void> {
         await act(`remove:${record.id}`, async () => {
-          await rpc('remove', { id: record.id })
+          const result = await rpc('remove', { id: record.id })
           if (!alive.current) return
-          setConnections((current: ConnectionRecord[]) => current.filter(row => row.id !== record.id))
+          setConnections(result.connections ?? [])
           setConfirmId(null)
           if (draft?.id === record.id) {
             setDraft(null)
             setDraftProbe(null)
           }
-        }, t('removed'))
+          setNotice({ tone: 'ok', text: result.orphanSecrets === true ? t('removedOrphan') : t('removed') })
+        })
       }
 
       /**
@@ -825,16 +1008,18 @@ window.__ModuleLoader__.load({
        */
       async function saveSettings(): Promise<void> {
         const whole = (value: string): number | undefined => {
-          const trimmed = value.trim()
+          const trimmed = (value ?? '').trim()
           return trimmed === '' ? undefined : Number(trimmed)
         }
         await act('settings', async () => {
-          const command = settingsDraft.command.trim()
+          const command = (settingsDraft.command ?? '').trim()
+          const timeout = whole(settingsDraft.probeTimeoutMs)
+          const output = whole(settingsDraft.maxOutputBytes)
           const result = await rpc('configUpdate', {
             settings: {
               ...(command === '' ? {} : { command }),
-              ...(() => { const value = whole(settingsDraft.probeTimeoutMs); return value === undefined || Number.isNaN(value) ? {} : { probeTimeoutMs: value } })(),
-              ...(() => { const value = whole(settingsDraft.maxOutputBytes); return value === undefined || Number.isNaN(value) ? {} : { maxOutputBytes: value } })(),
+              ...(timeout === undefined || Number.isNaN(timeout) ? {} : { probeTimeoutMs: timeout }),
+              ...(output === undefined || Number.isNaN(output) ? {} : { maxOutputBytes: output }),
             },
           })
           if (!alive.current) return
@@ -854,19 +1039,19 @@ window.__ModuleLoader__.load({
        * @param record - the stored target.
        * @returns resolution once the browser accepted the write.
        */
-      async function copyDiagnostics(record: ConnectionRecord): Promise<void> {
+      async function copyDiagnostics(record: ConnectionView): Promise<void> {
         const payload = JSON.stringify({
           id: record.id,
           label: record.label,
-          host: record.host,
-          ...(record.user === undefined ? {} : { user: record.user }),
-          ...(record.port === undefined ? {} : { port: record.port }),
+          address: addressOf(record),
+          auth: record.auth,
           ...(record.identityFile === undefined ? {} : { identityFile: record.identityFile }),
           ...(record.proxyJump === undefined ? {} : { proxyJump: record.proxyJump }),
           ...(record.extraArgs === undefined ? {} : { extraArgs: record.extraArgs }),
           ...(record.lastProbe === undefined ? {} : { lastProbe: record.lastProbe }),
+          secrets: record.secrets,
         }, null, 2)
-        const clipboard = (typeof navigator === 'object' && navigator !== undefined ? navigator.clipboard : undefined)
+        const clipboard = typeof navigator === 'object' && navigator !== undefined ? navigator.clipboard : undefined
         if (clipboard === undefined) {
           setNotice({ tone: 'warn', text: t('copyFailed') })
           return
@@ -880,8 +1065,8 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Render one probe result: when it ran, how long it took, the fix-up
-       * hint for its status, and the captured output tail.
+       * Render one probe result: when it ran, how long it took, the fix-up hint
+       * for its status, and the captured output tail.
        * @param outcome - the stored or freshly probed result.
        * @returns the result region, or `null` when nothing was probed yet.
        */
@@ -901,20 +1086,19 @@ window.__ModuleLoader__.load({
       }
 
       /** One row of the stored list. */
-      function rowOf(record: ConnectionRecord): any {
+      function rowOf(record: ConnectionView): any {
         const testing = busy === `probe:${record.id}`
         const removing = busy === `remove:${record.id}`
         const editing = draft?.id === record.id
-        const address = `${record.user ?? ''}${record.user === undefined ? '' : '@'}${record.host}${record.port === undefined ? '' : `:${String(record.port)}`}`
-        const meta = [
-          address,
-          record.proxyJump === undefined ? '' : `via ${record.proxyJump}`,
-          record.identityFile === undefined ? '' : `-i ${record.identityFile}`,
-        ].filter(value => value !== '')
+        const chips: any[] = record.auth === undefined ? [] : [h('span', { class: 'dshssh-chip', key: 'auth' }, t(AUTH_LABEL[record.auth] ?? 'authKey'))]
+        if (record.secrets?.passphrase === true) chips.push(h('span', { class: 'dshssh-chip', 'data-tone': 'secret', key: 'passphrase' }, t('passphraseSet')))
+        if (record.secrets?.password === true) chips.push(h('span', { class: 'dshssh-chip', 'data-tone': 'secret', key: 'password' }, t('secretSet')))
+        if (record.proxyJump !== undefined) chips.push(h('span', { class: 'dshssh-chip', key: 'jump' }, `via ${record.proxyJump}`))
         return h('div', { class: 'dshssh-row', key: record.id },
           h('div', { class: 'dshssh-row-main' },
             h('div', { class: 'dshssh-row-title' }, record.label),
-            h('div', { class: 'dshssh-row-meta' }, meta.join(' ')),
+            h('div', { class: 'dshssh-row-meta' }, addressOf(record)),
+            h('div', { class: 'dshssh-chips' }, ...chips),
             record.note === undefined ? null : h('div', { class: 'dshssh-muted' }, record.note),
             testing
               ? h(Badge, { tone: 'idle', text: t('stRunning') })
@@ -975,74 +1159,162 @@ window.__ModuleLoader__.load({
         )
       }
 
-      /** The new/edit form. */
+      /**
+       * One secret field with its stored-state affordances: the placeholder says
+       * what is already kept, the checkbox forgets it, and the typed value is
+       * what a probe or a save will write.
+       */
+      function secretField(props: {
+        label: string
+        value: string
+        had: boolean
+        cleared: boolean
+        shown: boolean
+        disabled: boolean
+        errorText?: string
+        onChange: (value: string) => void
+        onToggleClear: (checked: boolean) => void
+        onToggleShow: () => void
+      }): any {
+        return h('div', { class: 'dshssh-field' },
+          h(TextField, {
+            label: props.label,
+            value: props.value,
+            disabled: props.disabled,
+            errorText: props.errorText,
+            placeholder: props.had && !props.cleared ? t('secretStored') : '',
+            reveal: {
+              shown: props.shown,
+              onToggle: props.onToggleShow,
+              showLabel: t('showSecret'),
+              hideLabel: t('hideSecret'),
+            },
+            onChange: props.onChange,
+          }),
+          props.had ? h('label', { class: 'dshssh-check' },
+            h('input', {
+              type: 'checkbox',
+              checked: props.cleared,
+              disabled: props.disabled,
+              onChange: (event: any) => { props.onToggleClear(event.target.checked === true) },
+            }),
+            h('span', {}, t('secretClear')),
+          ) : null,
+        )
+      }
+
+      /** The new/edit form: one address, one mode choice, the secrets it needs. */
       function formRegion(): any {
         if (draft === null) return null
+        const mode: AuthMode = draft.auth ?? 'key'
+        const locked = busy !== null
+        const atLimit = draft.id === undefined && connections.length >= limits.maxConnections
+        const disabled = locked || atLimit
         const patch = (key: string) => (value: string): void => {
           setDraft((current: any) => ({ ...current, [key]: value }))
           if (fieldError === key) setFieldError(null)
         }
-        const atLimit = draft.id === undefined && connections.length >= limits.maxConnections
+        const showAuth = modern
+        const showKey = showAuth && (mode === 'key' || mode === 'key+password')
+        const showKeyPassphrase = showAuth && (mode === 'key' || mode === 'key+password')
+        const showPassword = showAuth && (mode === 'password' || mode === 'key+password')
+        const parsed = parseAddress(draft.address ?? '')
+        const summary = parsed.host === '' ? '' : `${parsed.user === '' ? '' : `${parsed.user}@`}${parsed.host}${parsed.port === '' ? '' : `:${parsed.port}`}`
         return h('div', { class: 'dshssh-form' },
           h('div', { class: 'dshssh-card-title' }, draft.id === undefined ? t('newTitle') : t('editTitle')),
-          h('div', { class: 'dshssh-grid' },
-            h(TextField, {
-              label: `${t('fLabel')} (${t('fOptional')})`,
-              value: draft.label ?? '',
-              onChange: patch('label'),
-              errorText: fieldError === 'label' ? t('fRequired') : undefined,
-              disabled: busy !== null || atLimit,
+          h(TextField, {
+            label: t('addrLabel'),
+            value: draft.address ?? '',
+            placeholder: t('addrPlaceholder'),
+            hint: summary === '' ? t('addrHint') : `${t('addrHint')} → ${summary}`,
+            disabled,
+            errorText: fieldError === 'address' || fieldError === 'host' ? t('addrBad') : undefined,
+            onChange: (value: string) => {
+              setDraft((current: any) => ({ ...current, address: value }))
+              if (fieldError === 'address' || fieldError === 'host') setFieldError(null)
+            },
+          }),
+          showAuth ? null : h('p', { class: 'dshssh-muted' }, t('legacyHost')),
+          h('div', { class: showAuth ? 'dshssh-field' : 'dshssh-hidden' },
+            h(SshSegment, {
+              id: AUTH_BASE,
+              role: 'radio',
+              value: mode,
+              groupLabel: t('authTitle'),
+              disabled,
+              options: AUTH_OPTIONS.map(option => ({ value: option.value, label: t(option.labelKey), hint: t(option.hintKey), disabled })),
+              onChange: (next: string) => { setDraft((current: any) => ({ ...current, auth: next })) },
             }),
+            h('span', { class: 'dshssh-muted' }, t(AUTH_OPTIONS.find(option => option.value === mode)?.hintKey ?? 'authKeyHint')),
+          ),
+          showKey ? h('div', { class: 'dshssh-grid' },
             h(TextField, {
-              label: t('fHost'),
-              value: draft.host ?? '',
-              onChange: patch('host'),
-              errorText: fieldError === 'host' ? t('fRequired') : undefined,
-              disabled: busy !== null || atLimit,
-            }),
-            h(TextField, {
-              label: `${t('fUser')} (${t('fOptional')})`,
-              value: draft.user ?? '',
-              onChange: patch('user'),
-              errorText: fieldError === 'user' ? t('hintBadInput') : undefined,
-              disabled: busy !== null || atLimit,
-            }),
-            h(TextField, {
-              label: `${t('fPort')} (${t('fOptional')})`,
-              value: draft.port ?? '',
-              type: 'number',
-              onChange: patch('port'),
-              errorText: fieldError === 'port' ? t('hintBadInput') : undefined,
-              disabled: busy !== null || atLimit,
-            }),
-            h(TextField, {
-              label: `${t('fIdentity')} (${t('fOptional')})`,
+              label: `${t('keyFileLabel')} (${t('fOptional')})`,
               value: draft.identityFile ?? '',
-              onChange: patch('identityFile'),
+              disabled,
               errorText: fieldError === 'identityFile' ? t('hintBadInput') : undefined,
-              disabled: busy !== null || atLimit,
+              onChange: patch('identityFile'),
+            }),
+          ) : null,
+          showKeyPassphrase ? h(secretField, {
+            label: `${t('passphraseLabel')} (${t('fOptional')})`,
+            value: draft.passphrase ?? '',
+            had: draft.hadPassphrase === true,
+            cleared: draft.clearPassphrase === true,
+            shown: draft.showPassphrase === true,
+            disabled,
+            errorText: fieldError === 'passphrase' ? t('hintBadInput') : undefined,
+            onChange: patch('passphrase'),
+            onToggleClear: (checked: boolean) => { setDraft((current: any) => ({ ...current, clearPassphrase: checked })) },
+            onToggleShow: () => { setDraft((current: any) => ({ ...current, showPassphrase: !(current.showPassphrase === true) })) },
+          }) : null,
+          showPassword ? h(secretField, {
+            label: t('passwordLabel'),
+            value: draft.password ?? '',
+            had: draft.hadPassword === true,
+            cleared: draft.clearPassword === true,
+            shown: draft.showPassword === true,
+            disabled,
+            errorText: fieldError === 'password' ? t('hintBadInput') : undefined,
+            onChange: patch('password'),
+            onToggleClear: (checked: boolean) => { setDraft((current: any) => ({ ...current, clearPassword: checked })) },
+            onToggleShow: () => { setDraft((current: any) => ({ ...current, showPassword: !(current.showPassword === true) })) },
+          }) : null,
+          h(TextField, {
+            label: `${t('labelField')} (${t('fOptional')})`,
+            value: draft.label ?? '',
+            placeholder: summary,
+            hint: t('labelHint'),
+            disabled,
+            errorText: fieldError === 'label' ? t('hintBadInput') : undefined,
+            onChange: patch('label'),
+          }),
+          h('details', { class: 'dshssh-disclose' },
+            h('summary', {}, t('advanced')),
+            h('p', { class: 'dshssh-muted' }, t('advancedHint')),
+            h('div', { class: 'dshssh-grid' },
+              h(TextField, {
+                label: `${t('fProxy')} (${t('fOptional')})`,
+                value: draft.proxyJump ?? '',
+                disabled,
+                errorText: fieldError === 'proxyJump' ? t('hintBadInput') : undefined,
+                onChange: patch('proxyJump'),
+              }),
+            ),
+            h(TextAreaField, {
+              label: `${t('fArgs')} (${t('fOptional')})`,
+              value: draft.extraArgsText ?? '',
+              hint: t('fArgsHint'),
+              disabled,
+              onChange: patch('extraArgsText'),
             }),
             h(TextField, {
-              label: `${t('fProxy')} (${t('fOptional')})`,
-              value: draft.proxyJump ?? '',
-              onChange: patch('proxyJump'),
-              errorText: fieldError === 'proxyJump' ? t('hintBadInput') : undefined,
-              disabled: busy !== null || atLimit,
+              label: `${t('fNote')} (${t('fOptional')})`,
+              value: draft.note ?? '',
+              disabled,
+              onChange: patch('note'),
             }),
           ),
-          h(TextField, {
-            label: `${t('fNote')} (${t('fOptional')})`,
-            value: draft.note ?? '',
-            onChange: patch('note'),
-            disabled: busy !== null || atLimit,
-          }),
-          h(TextAreaField, {
-            label: `${t('fArgs')} (${t('fOptional')})`,
-            value: draft.extraArgsText ?? '',
-            onChange: patch('extraArgsText'),
-            hint: t('fArgsHint'),
-            disabled: busy !== null || atLimit,
-          }),
           atLimit ? h('span', { class: 'dshssh-error' }, format(t('listCount'), { count: String(connections.length), limit: String(limits.maxConnections) })) : null,
           draftProbe === null ? null : h('div', { class: 'dshssh-field' },
             h(Badge, {
@@ -1055,13 +1327,13 @@ window.__ModuleLoader__.load({
             h('button', {
               class: 'dshssh-btn',
               type: 'button',
-              disabled: busy !== null,
+              disabled,
               onClick: () => { void testDraft() },
             }, t('testDraft')),
             h('button', {
               class: 'dshssh-btn',
               type: 'button',
-              disabled: busy !== null,
+              disabled,
               onClick: () => {
                 setDraft(null)
                 setDraftProbe(null)
@@ -1071,7 +1343,7 @@ window.__ModuleLoader__.load({
             h('button', {
               class: 'dshssh-btn dshssh-btn-primary',
               type: 'button',
-              disabled: busy !== null || atLimit,
+              disabled: disabled || atLimit,
               onClick: () => { void saveDraft() },
             }, busy === 'new' || busy === draft.id ? t('saving') : t('save')),
           ),
@@ -1079,6 +1351,7 @@ window.__ModuleLoader__.load({
       }
 
       const storageFailure = failure !== null && failure.code === 'storage-error'
+
       const header = h('div', { class: 'dshssh-field' },
         h('h2', { class: 'dshssh-title' }, t('title')),
         h('p', { class: 'dshssh-intro' }, t('intro')),
@@ -1093,6 +1366,11 @@ window.__ModuleLoader__.load({
           ...(FAILURE_HINT_KEY[failure.code] === undefined ? {} : { hint: t(FAILURE_HINT_KEY[failure.code] ?? '') }),
         })
 
+      /** A standing warning when this Host cannot answer a prompt for a secret. */
+      const askpassNotice = askpass === 'unavailable'
+        ? h(Notice, { tone: 'warn', text: t('askpassUnavailable') })
+        : null
+
       const settingsCard = h('section', { class: 'dshssh-card' },
         h('div', { class: 'dshssh-card-head' },
           h('h3', { class: 'dshssh-card-title' }, t('settingsTitle')),
@@ -1106,37 +1384,22 @@ window.__ModuleLoader__.load({
         h('p', { class: 'dshssh-muted' }, t('settingsHint')),
         h('p', { class: 'dshssh-muted' }, t('commandHint')),
         h('div', { class: 'dshssh-grid' },
-          h(TextField, { label: t('settingsCommand'), value: settingsDraft.command, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, command: value })) }, disabled: busy !== null || settings === null }),
-          h(TextField, { label: t('settingsProbeTimeout'), value: settingsDraft.probeTimeoutMs, type: 'number', onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, probeTimeoutMs: value })) }, disabled: busy !== null || settings === null }),
-          h(TextField, { label: t('settingsMaxOutput'), value: settingsDraft.maxOutputBytes, type: 'number', onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, maxOutputBytes: value })) }, disabled: busy !== null || settings === null }),
+          h(TextField, { label: t('settingsCommand'), value: settingsDraft.command, disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, command: value })) } }),
+          h(TextField, { label: t('settingsProbeTimeout'), value: settingsDraft.probeTimeoutMs, type: 'number', disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, probeTimeoutMs: value })) } }),
+          h(TextField, { label: t('settingsMaxOutput'), value: settingsDraft.maxOutputBytes, type: 'number', disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, maxOutputBytes: value })) } }),
         ),
         settings === null ? h('span', { class: 'dshssh-muted' }, loading ? t('listProbing') : t('listLoadFailed')) : null,
       )
 
-      /** What the plugin fixes in code, so a value on this page never surprises the reader. */
+      /** What the plugin fixes in code, so a value is never a surprise. */
       const boundsCard = h('section', { class: 'dshssh-card' },
         h('h3', { class: 'dshssh-card-title' }, t('boundsTitle')),
         h('dl', { class: 'dshssh-bounds' },
-          h('div', { class: 'dshssh-bound', key: 'targets' },
-            h('dt', {}, t('boundsTargets')),
-            h('dd', {}, String(limits.maxConnections)),
-          ),
-          h('div', { class: 'dshssh-bound', key: 'lanes' },
-            h('dt', {}, t('boundsConcurrency')),
-            h('dd', {}, String(limits.concurrentProbes)),
-          ),
-          h('div', { class: 'dshssh-bound', key: 'round' },
-            h('dt', {}, t('boundsPerRound')),
-            h('dd', {}, String(limits.probeAllLimit)),
-          ),
-          h('div', { class: 'dshssh-bound', key: 'timeout' },
-            h('dt', {}, t('boundsTimeout')),
-            h('dd', {}, `${String(BOUNDS.probeTimeoutMinMs / 1000)} s – ${String(BOUNDS.probeTimeoutMaxMs / 1000)} s`),
-          ),
-          h('div', { class: 'dshssh-bound', key: 'output' },
-            h('dt', {}, t('boundsOutput')),
-            h('dd', {}, `1 KiB – 4 MiB`),
-          ),
+          h('div', { class: 'dshssh-bound', key: 'targets' }, h('dt', {}, t('boundsTargets')), h('dd', {}, String(limits.maxConnections))),
+          h('div', { class: 'dshssh-bound', key: 'lanes' }, h('dt', {}, t('boundsConcurrency')), h('dd', {}, String(limits.concurrentProbes))),
+          h('div', { class: 'dshssh-bound', key: 'round' }, h('dt', {}, t('boundsPerRound')), h('dd', {}, String(limits.probeAllLimit))),
+          h('div', { class: 'dshssh-bound', key: 'timeout' }, h('dt', {}, t('boundsTimeout')), h('dd', {}, `${measure(limits.probeTimeoutMinMs, 'ms')} – ${measure(limits.probeTimeoutMaxMs, 'ms')}`)),
+          h('div', { class: 'dshssh-bound', key: 'output' }, h('dt', {}, t('boundsOutput')), h('dd', {}, `${measure(limits.outputMinBytes, 'bytes')} – ${measure(limits.outputMaxBytes, 'bytes')}`)),
         ),
       )
 
@@ -1147,6 +1410,7 @@ window.__ModuleLoader__.load({
             h('span', { class: 'dshssh-muted' }, format(t('listCount'), { count: String(connections.length), limit: String(limits.maxConnections) })),
           ),
           h('div', { class: 'dshssh-actions' },
+            probing > 0 ? h(Badge, { tone: 'idle', text: t('stRunning') }) : null,
             h('button', {
               class: 'dshssh-btn',
               type: 'button',
@@ -1175,16 +1439,18 @@ window.__ModuleLoader__.load({
         formRegion(),
       )
 
-      const tabs = h(SshTabs, {
+      const tabs = h(SshSegment, {
         id: TAB_BASE,
+        role: 'tab',
         value: tab,
-        label: t('tabsLabel'),
+        groupLabel: t('tabsLabel'),
         options: [
           { value: 'list', label: t('tabList') },
           { value: 'settings', label: t('tabSettings') },
         ],
         onChange: (next: string) => { setTab(next) },
       })
+
       const panel = h('div', {
         id: `${TAB_BASE}-${tab}-panel`,
         role: 'tabpanel',
@@ -1197,6 +1463,7 @@ window.__ModuleLoader__.load({
         h('style', {}, CSS),
         header,
         noticeRegion,
+        askpassNotice,
         tabs,
         panel,
       )

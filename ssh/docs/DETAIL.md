@@ -1,10 +1,11 @@
 # SSH manager
 
 Manages the SSH targets this machine reaches: a named list of hosts and OpenSSH
-aliases, the settings each one connects with, and a connectivity test you can
-run from the browser. Version **0.3.0** keeps the same operations and splits them
-into two tabs inside one settings page; the agent still runs nothing on your
-behalf.
+aliases, how each one logs in, and a connectivity test you can run from the
+browser. Version **0.4.0** adds authentication — a key, a key that falls back to a
+password, or a password alone — and a new target now takes one address field plus
+the secrets that mode asks for. The page keeps its two tabs, and the agent still
+runs nothing on your behalf.
 
 ## Where the page is
 
@@ -19,16 +20,23 @@ General settings. Across its top sit two tabs:
 Both tabs read and write one page state, so a probe you started on the first tab
 keeps running while you edit values on the second.
 
-## What version 0.3.0 does
+## What version 0.4.0 does
 
-- **SSH target list.** Add, edit, and delete named targets. Each one carries a
-  display name, a host name or an existing OpenSSH host alias, and optionally a
-  remote user, a port, an identity file, a jump host, extra `ssh` arguments (one
-  argv entry per line), and a note. The list holds up to 64 targets.
+- **SSH target list.** Add, edit, and delete named targets. One field takes the
+  address — `[user@]host[:port]`, an `ssh://` form, an IPv6 literal in brackets,
+  or a bare name read as an OpenSSH host alias — while a collapsed **Advanced
+  options** section holds the jump host, extra `ssh` arguments (one `ssh` argv
+  entry per line), and a note. The display name is optional and falls back to the
+  address. The list holds up to 64 targets.
+- **Three ways to log in.** Pick **Key** (ssh-agent, or an unencrypted key, with
+  an optional passphrase for an encrypted one), **Key + password** (the key is
+  tried first and a password answers as the fallback), or **Password** (publickey
+  offers are skipped). The choice is remembered per target and shown on its row.
 - **Connectivity test.** `Test` runs one probe per target; `Test all` covers the
-  first 12 in one round. A probe is
-  `ssh -o BatchMode=yes -o ConnectTimeout=<n> … <host> true`, so it never waits
-  for a passphrase and never runs a command on the remote machine beyond `true`.
+  first 12 in one round. A probe connects with the same options and secrets the
+  target will use and runs only `true` on the far side: a key target keeps
+  `BatchMode=yes` and never waits, while a secret-backed target answers its prompt
+  through the plugin's own askpass helper and is allowed exactly one prompt.
   Results are classified as reachable, authentication failed, unreachable, host
   key not trusted, timed out, or `ssh` not found, and the last result is kept
   with its timestamp and the captured output tail.
@@ -51,7 +59,28 @@ Two consequences worth knowing:
 - Backing up `$DSH_HOME/storages/` covers this plugin's data; the patch file
   alone does not.
 
-No secret is stored or displayed. A private key is referenced by path only.
+## Passwords and passphrases
+
+A secret a target logs in with is kept in the Harness credential store — the
+private file `$DSH_HOME/.credentials.yaml`, mode readable by your owner only —
+addressed `ssh/<target>-password` and `ssh/<target>-passphrase`. It never enters
+this plugin's own JSON, never enters the profile patch file, and never travels
+back to the browser:
+
+- Leaving a secret field empty means “keep what is stored”; ticking **Forget the
+  stored value** removes it.
+- The list states only whether a slot is filled, never its contents.
+- Deleting a target forgets both of its secrets.
+- A password typed into an unsaved form is used once, by **Test before saving**,
+  and is stored only if you save.
+- `ssh` reads the secret through the plugin's askpass helper instead of a terminal
+  or a command line, so it never appears in the process list. A private key is
+  still referenced by path only.
+
+Two honest limits: the store is readable by your own OS user, and agent tool
+processes run as that same user, so a stored secret is private from other users
+rather than hidden from the agent. And a stored secret still only ever runs `true`
+on the remote machine — the plugin executes nothing else there yet.
 
 ## What the page never touches
 
@@ -67,25 +96,32 @@ No secret is stored or displayed. A private key is referenced by path only.
 
 1. An agent tool over the same operations, so a model can ask whether a target
    answers and run bounded commands on it.
-2. Remote command execution under host and command allowlists.
-3. A passphrase stored in the Harness credential store, never in a file.
+2. Remote command execution under host and command allowlists, reusing the
+   secrets stored here.
+3. `ssh -G` resolved settings per target, so a row can show the user, port, and
+   identity file the OpenSSH client would actually pick.
 4. Reading the aliases in `~/.ssh/config` as a suggested inventory.
 
 None of these exist yet, and the interface may still change.
 
 ## Configuration
 
-The bundle inserts one plugin row with `config: {}` and 0.3.0 declares no
-configuration fields: everything the pages edit lives in the plugin's own
-storage. Any key you add to that row is currently ignored.
+The bundle inserts one plugin row with `config: {}` and 0.4.0 declares no
+configuration fields: everything the page edits lives either in the plugin's own
+storage or in the credential store. Any key you add to that row is currently
+ignored.
 
 ## Limits of this release
 
 - The page and its two tabs are the only surface; the agent cannot see or use
   this list yet.
-- A probe can authenticate only with what a non-interactive `ssh` can use today:
-  an agent, or a key without a passphrase.
-- The page needs the Host's `/api` carrier, the subprocess provider, and the
-  storage-domain facility; in a profile without any of them the plugin stays
-  inactive instead of failing.
+- A probe authenticates but executes nothing beyond `true`; running a real remote
+  command with these secrets is the next step.
+- After the plugin package is replaced in place, the running Host keeps its old
+  module until it restarts. The page notices that and hides the authentication
+  choice with an explanation, rather than rejecting a field the old Host does not
+  know.
+- The page needs the Host's `/api` carrier, the subprocess provider, the
+  storage-domain facility, and the credential store; in a profile missing any of
+  them the plugin stays inactive instead of failing.
 - No Web UI beyond the settings page.

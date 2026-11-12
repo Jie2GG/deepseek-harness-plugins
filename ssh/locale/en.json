@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "SSH manager",
-    "description": "Adds a Remote connections page to the settings panel: SSH targets you can edit and test, and the ssh settings those probes honour, as two tabs.",
+    "description": "Adds a Remote connections page to the settings panel: SSH targets you edit from one address field and test from the browser, authenticating with a key, a password, or both.",
     "detail": "docs/DETAIL.md"
   }
 }

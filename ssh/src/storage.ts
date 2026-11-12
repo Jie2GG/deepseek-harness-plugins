@@ -17,8 +17,15 @@ import type { ConnectionRecord, SshSettings } from './types.ts'
 /** Domain name, and the backend unit name it doubles as (`^[a-z][a-z0-9_]*$`). */
 export const DOMAIN_NAME = 'ssh_targets'
 
-/** Current record format version. */
-export const DOMAIN_VERSION = 1
+/**
+ * Current record format version. 2 added the `auth` mode; version 1 records stay
+ * readable because the current schema defaults `auth` to `key`, which is what
+ * every 0.2.0 target meant.
+ */
+export const DOMAIN_VERSION = 2
+
+/** Older stored records the current schemas still accept. */
+export const COMPATIBLE_VERSIONS = [1] as const
 
 /** Ceiling on how many targets the page may keep. */
 export const MAX_CONNECTIONS = 64
@@ -63,6 +70,9 @@ const flagSchema = z.string().min(1).max(256).refine(
   { message: 'Expected an ssh option flag starting with "-"' },
 )
 
+/** How one target authenticates. */
+export const authModeSchema = z.enum(['password', 'key', 'key+password'])
+
 /** One classified probe result kept beside a target. */
 export const probeOutcomeSchema = z.object({
   at: instantSchema,
@@ -86,6 +96,7 @@ export const connectionRecordSchema = z.object({
   createdAt: instantSchema,
   updatedAt: instantSchema,
   lastProbe: probeOutcomeSchema.optional(),
+  auth: authModeSchema.default('key'),
 }).strict()
 
 /** The domain's global slot: settings the whole page shares. */
@@ -116,6 +127,13 @@ export const connectionInputSchema = z.object({
   proxyJump: hostSchema.optional(),
   extraArgs: z.array(flagSchema).max(16).optional(),
   note: z.string().trim().min(1).max(512).optional(),
+  auth: authModeSchema.optional(),
+}).strict()
+
+/** What a `save` may write into the credential store. */
+export const secretPatchSchema = z.object({
+  password: z.string().min(1).max(4096).nullable().optional(),
+  passphrase: z.string().min(1).max(4096).nullable().optional(),
 }).strict()
 
 /** What the page may send for one unsaved draft target: no label, no id. */
@@ -126,6 +144,13 @@ export const probeDraftSchema = z.object({
   identityFile: pathSchema.optional(),
   proxyJump: hostSchema.optional(),
   extraArgs: z.array(flagSchema).max(16).optional(),
+  auth: authModeSchema.optional(),
+}).strict()
+
+/** Secrets typed into an unsaved form: used for one probe, never stored. */
+export const draftSecretSchema = z.object({
+  password: z.string().min(1).max(4096).optional(),
+  passphrase: z.string().min(1).max(4096).optional(),
 }).strict()
 
 /** What the page may send for the global settings; every field is optional. */
@@ -139,6 +164,7 @@ export const settingsInputSchema = z.object({
 export const sshTargetsDomain = defineDomain({
   name: DOMAIN_NAME,
   version: DOMAIN_VERSION,
+  compatibleVersions: COMPATIBLE_VERSIONS,
   global: { schema: settingsRecordSchema, initial: DEFAULT_SETTINGS },
   tables: { connections: domainTable<string, ConnectionRecord>(connectionRecordSchema) },
 })

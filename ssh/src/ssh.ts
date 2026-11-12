@@ -96,17 +96,38 @@ function tail(stdout: string, stderr: string): string | undefined {
   return text.length <= DETAIL_LIMIT ? text : `${text.slice(-DETAIL_LIMIT)}`
 }
 
+/** The credentials one probe may need, supplied per call and never stored here. */
+export interface ProbeAuth {
+  /** How the target authenticates; omission keeps the agent-or-key probe. */
+  mode?: 'password' | 'key' | 'key+password'
+  /** Login password, for the modes that use one. */
+  password?: string | undefined
+  /** Private-key passphrase, handed to the askpass helper. */
+  passphrase?: string | undefined
+}
+
+/** Reads and writes a target's secrets in the credential store. */
+export interface AskPassSource {
+  /** Absolute path of the ssh askpass helper, or `undefined` when unavailable. */
+  readonly path: string | undefined
+  /** Why the helper could not be prepared. */
+  readonly failure: string | undefined
+}
+
 /** Runs probes through `ctx.subprocess`, one executable lookup at a time. */
 export class SshRunner {
   readonly #ctx: Context
+  readonly #askpass: AskPassSource | undefined
   #inFlight = 0
   readonly #controllers = new Set<AbortController>()
 
   /**
    * @param ctx - Host context that carries `subprocess`.
+   * @param askpass - the helper that answers a password or passphrase prompt.
    */
-  constructor(ctx: Context) {
+  constructor(ctx: Context, askpass?: AskPassSource) {
     this.#ctx = ctx
+    this.#askpass = askpass
   }
 
   /** How many probes are running right now. */
@@ -136,12 +157,14 @@ export class SshRunner {
   }
 
   /**
-   * Probe one target: `ssh -o BatchMode=yes … <host> true`.
+   * Probe one target: `ssh -o BatchMode=<yes|no> … <host> true`.
    * @param target - the identity fields to connect with.
    * @param settings - the executable, deadline, and capture ceiling to honour.
-   * @returns the classified outcome; only a concurrency refusal throws.
+   * @param auth - the mode and any secret this probe should answer with.
+   * @returns the classified outcome; only a concurrency or secret-plumbing
+   *   refusal throws.
    */
-  async probe(target: ProbeTarget, settings: SshSettings): Promise<ProbeOutcome> {
+  async probe(target: ProbeTarget, settings: SshSettings, auth?: ProbeAuth): Promise<ProbeOutcome> {
     if (this.#inFlight >= MAX_CONCURRENT_PROBES) {
       throw new SshError('busy', `At most ${String(MAX_CONCURRENT_PROBES)} probes may run at once.`, {
         hint: 'Wait for the running probes to finish.',
@@ -153,6 +176,18 @@ export class SshRunner {
     const startedAt = Date.now()
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
+      const mode = auth?.mode ?? 'key'
+      const password = auth?.password
+      const passphrase = auth?.passphrase
+      // A secret can only be answered through the askpass helper: stdin is
+      // ignored, so an interactive prompt would just burn the whole deadline.
+      const needsSecret = mode === 'password' || mode === 'key+password' || (mode === 'key' && passphrase !== undefined)
+      const helper = this.#askpass?.path
+      if (needsSecret && helper === undefined) {
+        throw new SshError('secret-error', 'This Host cannot run the ssh askpass helper, so a stored password or passphrase cannot be used.', {
+          hint: this.#askpass?.failure === undefined ? 'The helper is not prepared yet.' : this.#askpass.failure.slice(0, 512),
+        })
+      }
       const connectTimeoutSeconds = Math.max(1, Math.round(settings.probeTimeoutMs / 1000))
       const executable = await this.#resolve(settings.command, controller.signal)
       if (executable === undefined) {
@@ -165,15 +200,32 @@ export class SshRunner {
       }
       const argv: string[] = [
         executable,
-        '-o', `BatchMode=yes`,
+        '-o', `BatchMode=${needsSecret ? 'no' : 'yes'}`,
         '-o', `ConnectTimeout=${String(connectTimeoutSeconds)}`,
         '-o', `ServerAliveInterval=${String(Math.max(1, Math.floor(connectTimeoutSeconds / 2)))}`,
       ]
+      if (needsSecret) argv.push('-o', 'NumberOfPasswordPrompts=1')
+      if (mode === 'password') {
+        argv.push('-o', 'PubkeyAuthentication=no', '-o', 'PreferredAuthentications=password,keyboard-interactive')
+      } else if (mode === 'key') {
+        argv.push('-o', 'PreferredAuthentications=publickey')
+      }
       if (target.port !== undefined) argv.push('-p', String(target.port))
       if (target.identityFile !== undefined) argv.push('-i', target.identityFile)
       if (target.proxyJump !== undefined) argv.push('-J', target.proxyJump)
       if (target.extraArgs !== undefined) argv.push(...target.extraArgs)
       argv.push(target.user === undefined ? target.host : `${target.user}@${target.host}`, 'true')
+
+      // Explicit entries merge after the provider's environment scrub, which is
+      // how the helper path and the secret reach the child at all.
+      const env: NodeJS.ProcessEnv | undefined = needsSecret && helper !== undefined
+        ? {
+            SSH_ASKPASS: helper,
+            SSH_ASKPASS_REQUIRE: 'force',
+            DSH_SSH_ASKPASS_PASSWORD: password ?? '',
+            DSH_SSH_ASKPASS_PASSPHRASE: passphrase ?? '',
+          }
+        : undefined
 
       const handle = this.#ctx.subprocess.spawn({
         argv,
@@ -184,6 +236,7 @@ export class SshRunner {
           stderr: { maxBytes: settings.maxOutputBytes },
         },
         graceMs: 2_000,
+        ...(env === undefined ? {} : { env }),
         signal: controller.signal,
       })
 

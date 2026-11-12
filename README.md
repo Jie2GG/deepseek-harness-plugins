@@ -14,7 +14,7 @@ commit 同步本表。「状态」列仅限 `stable` / `experimental` / `depreca
 
 | 插件目录 | 包名（`@jie2gg/dsh-plugin-*`） | 简介 | 状态 |
 | --- | --- | --- | --- |
-| `ssh/` | `@jie2gg/dsh-plugin-ssh` | 在设置面板新增「远程连接」页（顶部两个选项卡：SSH 目标清单、客户端参数），管理命名目标并测试连通性 | experimental |
+| `ssh/` | `@jie2gg/dsh-plugin-ssh` | 在设置面板新增「远程连接」页（两个选项卡）：一个地址框管理命名 SSH 目标，支持密钥 / 密钥+密码 / 密码登录并测试连通性 | experimental |
 
 ## 使用
 

@@ -1,10 +1,11 @@
 /**
  * SSH target manager — Host half.
  *
- * The plugin owns one storage domain (`ssh_targets`) and one browser route
- * (`/api/ssh/rpc`); the settings page in `src/client.ts` is its only surface.
- * Nothing is written to the user's profile patch file, and saving never
- * restarts this plugin: the domain absorbs every change.
+ * The plugin owns three pieces of state: a storage domain for the target list
+ * and its settings, credential records for the passwords and passphrases, and a
+ * private askpass helper that lets a spawned `ssh` answer a prompt without a
+ * terminal. Its only surface is the settings page, which reaches all three over
+ * one browser route.
  *
  * @module @jie2gg/dsh-plugin-ssh
  */
@@ -14,31 +15,36 @@ import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-subprocess'
 import { sshTargetsDomain } from './storage.ts'
 import { TargetStore } from './store.ts'
+import { TargetSecrets } from './secrets.ts'
+import { AskPassHelper } from './askpass.ts'
 import { SshRunner } from './ssh.ts'
 import { createOps } from './ops.ts'
 import { createRpcHandler } from './rpc.ts'
 import { RPC_ROUTE_PATH, SshError } from './types.ts'
 
-/** Cordis plugin name used by loader diagnostics. */
+/** Cordis plugin name used by loader diagnostics, and the credential scope. */
 export const name = 'ssh'
 
 /**
  * Services this plugin needs. Each one is a hard requirement because the
  * settings page is the plugin's only product surface: a profile without the
- * `/api` carrier, the subprocess provider, or the domain facility has nothing
- * for this plugin to do, so the plugin stays inactive there instead of throwing.
+ * `/api` carrier, a subprocess provider, the domain facility, or the credential
+ * store has nothing for this plugin to do, so it stays inactive there instead of
+ * throwing.
  */
-export const inject = ['connection', 'subprocess', 'storageDomain'] as const
+export const inject = ['connection', 'subprocess', 'storageDomain', 'credentials'] as const
 
 /**
- * Activate the plugin: open the storage domain, then publish the route the
- * settings page calls.
+ * Activate the plugin: open the storage domain, prepare the askpass helper, then
+ * publish the route the settings page calls.
  *
- * @param ctx - Host plugin context carrying `connection`, `subprocess`, and
- *   `storageDomain`.
+ * @param ctx - Host plugin context carrying `connection`, `subprocess`,
+ *   `storageDomain`, and `credentials`.
  */
 export function apply(ctx: Context): void {
-  const runner = new SshRunner(ctx)
+  const askpass = new AskPassHelper()
+  const runner = new SshRunner(ctx, askpass)
+  const secrets = new TargetSecrets(ctx.credentials)
 
   let store: TargetStore | undefined
   let openFailure: string | undefined
@@ -68,8 +74,23 @@ export function apply(ctx: Context): void {
     }
   }
 
-  const ops = createOps({ runner, store: requireStore })
+  const ops = createOps({
+    runner,
+    store: requireStore,
+    secrets: () => secrets,
+    askpass: () => ({ ready: askpass.ready, ...(askpass.failure === undefined ? {} : { failure: askpass.failure }) }),
+  })
   const handler = createRpcHandler(ops)
+
+  ctx.effect(async () => {
+    const helper = await askpass.prepare()
+    if (helper === undefined) {
+      ctx.logger.warn(`ssh: no askpass helper could be prepared, so a stored password or passphrase cannot be used: ${askpass.failure ?? 'unknown reason'}`)
+    }
+    return async () => {
+      await askpass.dispose()
+    }
+  }, 'ssh: askpass helper')
 
   ctx.effect(() => {
     const api = ctx.connection.fetch
@@ -92,10 +113,9 @@ export function apply(ctx: Context): void {
   }, `ssh: ${RPC_ROUTE_PATH}`)
 
   ctx.effect(() => async (): Promise<void> => {
-    const current = store
-    if (current === undefined) {
-      // The domain may still be opening; closing it as soon as it lands is the
-      // facility's own job, so a late open here needs no second disposer.
+    if (store === undefined) {
+      // The domain may still be opening; the facility closes any domain it opens
+      // when it unmounts, so a late open needs no second disposer.
       await opened.catch(() => undefined)
     }
     await store?.close()

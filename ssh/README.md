@@ -1,9 +1,11 @@
 # @jie2gg/dsh-plugin-ssh
 
 Manage the SSH targets this machine reaches from the Harness settings panel: a
-named inventory, per-target connectivity probes, and the client settings those
-probes honour. User-facing wording lives in [docs/DETAIL.md](docs/DETAIL.md)
-(and [docs/DETAIL.zh.md](docs/DETAIL.zh.md) for Chinese).
+named inventory written in one address field, three authentication modes (key, key
++ password, password) whose secrets live in the credential store, and the
+connectivity probes and client settings that use them. User-facing wording lives
+in [docs/DETAIL.md](docs/DETAIL.md) (and
+[docs/DETAIL.zh.md](docs/DETAIL.zh.md) for Chinese).
 
 ## Layout
 
@@ -24,9 +26,11 @@ ssh/
     ├── storage.ts            # the `ssh_targets` domain: zod schemas, bounds, limits
     ├── store.ts              # typed reads/writes over the opened domain
     ├── ssh.ts                # SshRunner: executable lookup, spawn, result classes
+    ├── secrets.ts            # password and passphrase records in the credential store
+    ├── askpass.ts            # the private helper that answers an ssh prompt
     ├── ops.ts                # one method per RPC name, transport-agnostic
     ├── rpc.ts                # Request → Response, failure code → HTTP status
-    ├── client.ts             # browser half: the settings section + its icon
+    ├── client.ts             # browser half: the page, its tabs, and its icon
     └── client-globals.d.ts   # ambient window/navigator; never emitted to lib/
 ```
 
@@ -67,7 +71,7 @@ fresh module generation.
 | Export | Shape | Notes |
 | --- | --- | --- |
 | `name` | `'ssh'` | Cordis plugin name for loader diagnostics. |
-| `inject` | `['connection', 'subprocess', 'storageDomain']` | Hard requirements: without them the row stays inactive rather than throwing. |
+| `inject` | `['connection', 'subprocess', 'storageDomain', 'credentials']` | Hard requirements: without them the row stays inactive rather than throwing. |
 | `apply(ctx)` | `(ctx: Context) => void` | Opens the domain, then registers `/api/ssh/rpc` inside `ctx.effect`; both disposers run on unload. |
 
 No `Config` is declared: every editable value lives in the plugin's storage
@@ -83,15 +87,24 @@ Body `{ method, params? }`, result `{ ok: true, result }` or
 
 | Method | Params | Returns |
 | --- | --- | --- |
-| `list` | – | `{ connections, settings, limits, probing }` |
-| `save` | `{ connection }` (no `id` = create) | `{ connection, connections }` |
-| `remove` | `{ id }` | `{ removed, connections }` |
-| `probe` | `{ id }` or `{ draft }` | `{ connection?, probe?, connections }` |
+| `list` | – | `{ connections, settings, limits, askpass, askpassFailure?, probing }` |
+| `save` | `{ connection, secrets? }` (no `id` = create) | `{ connection, connections }` |
+| `remove` | `{ id }` | `{ removed, orphanSecrets, connections }` |
+| `probe` | `{ id }` or `{ draft, secrets? }` | `{ connection?, probe?, connections }` |
 | `probeAll` | – | `{ connections, probed, skipped, failures }` |
 | `configUpdate` | `{ settings }` | `{ settings }` |
 
 `GET` reaches only `list`; the route rides the shared `/api` channel, so only the
 owner peer of the served page is admitted and every other principal is refused.
+
+A connection row is `{ id, label, host, user?, port?, identityFile?, proxyJump?,
+extraArgs?, note?, createdAt, updatedAt, lastProbe?, auth }` plus
+`secrets: { password, passphrase }`. `auth` is `key`, `key+password`, or
+`password`; `secrets` is presence only — no response ever carries a stored value,
+and a `secrets` patch writes a string, forgets a `null`, and leaves an absent key
+alone. `limits` carries the fixed bounds including the accepted ranges, so the
+settings tab states them without mirroring them in browser code. Failure codes now
+include `secret-error` (500).
 
 ### Storage
 
@@ -113,6 +126,28 @@ backend:
 
 Bounds live in `src/storage.ts`: 64 targets, 4 concurrent probes, 12 per
 `probeAll` round, 1 s–120 s probe timeout, 1 KiB–4 MiB output ceiling.
+
+Record format is `version: 2` with `compatibleVersions: [1]`: version 1 records
+carry no `auth`, and the current schema defaults that to `key`, which is what
+every 0.2.0 and 0.3.0 target meant, so an existing file keeps opening.
+
+### Credentials
+
+Passwords and key passphrases do not live in the storage domain. `secrets.ts`
+keeps them as `grant` records in the credential store — `credentialKey('ssh',
+'<target-id>-password')` and `…-passphrase`, so `$DSH_HOME/.credentials.yaml`
+under `records:` — written with `modifyRecord`, removed with `deleteRecord`
+(deleting a target forgets both slots), and read back only when a probe needs a
+value. The seam's rules that matter here: each key segment must match
+`^[a-z][a-z0-9-]*$` (which is why target ids are `ssh-<10 hex>`), a mutate
+callback returns a promise, an empty value is absent rather than blank, and the
+store file must carry no permission bits outside its owner.
+
+`askpass.ts` materializes the helper that lets `ssh` ask for one of those secrets
+with no terminal: `mkdtemp($TMPDIR/dsh-ssh-askpass-)` at mode `0700`, one
+`askpass.sh` at mode `0700`, removed by the plugin's disposer. It reads the
+prompt text `ssh` passes as `$1` and answers from `DSH_SSH_ASKPASS_PASSPHRASE` or
+`DSH_SSH_ASKPASS_PASSWORD`, falling back to whichever slot is filled.
 
 ### Client (`src/client.ts`)
 
@@ -190,7 +225,21 @@ re-derive them:
 - Child processes start from the parent environment minus names matching
   `/KEY|PASSWORD|SECRET|TOKEN/i` and minus every `DSH_*` name, so
   `SSH_AUTH_SOCK` reaches `ssh` (an agent keeps working) while a
-  passphrase-shaped variable would not.
+  passphrase-shaped variable would not — a secret therefore has to be handed to
+  `spawn` explicitly, which is what the askpass plumbing does.
+- OpenSSH on this machine is `OpenSSH_10.0p2`, and `SSH_ASKPASS_REQUIRE=force`
+  (8.4+) is what makes an askpass answer possible with no tty and no `DISPLAY`.
+  Verified end to end by running the generated helper with `/bin/sh`: a
+  `Enter passphrase for key …` prompt returns the passphrase, a `password:`
+  prompt returns the password, and an empty environment answers an empty line
+  instead of hanging.
+- Mode-to-command mapping, asserted against a fake subprocess provider: `key`
+  keeps `BatchMode=yes -o PreferredAuthentications=publickey`; `key` with a
+  passphrase and `key+password` set `BatchMode=no`, `NumberOfPasswordPrompts=1`,
+  and export the helper; `password` adds `PubkeyAuthentication=no` with
+  `PreferredAuthentications=password,keyboard-interactive` and no key
+  restriction. A mode that needs a secret while the helper is unavailable is
+  refused as `secret-error` rather than left to burn the deadline.
 - The probe command line, asserted by the offline smoke run:
   `ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -p 22022
   -i /home/j/.ssh/id -J jump -o PreferredAuthentications=publickey jiegg@build-box true`.
@@ -202,16 +251,24 @@ re-derive them:
    rendered string, and why the probe classification is a pure function.
 2. Remote command execution under host and command allowlists, reusing
    `SshRunner` with a different argv tail.
-3. A passphrase through `ctx.credentials.modifyRecord()`, which keeps it out of
-   both the storage domain and the patch file; `BatchMode=yes` stays until then.
+3. The stored secrets driving real remote commands, once `run` exists: the
+   authentication plumbing and the secret slots are already the same ones.
 4. Optional: read `~/.ssh/config` aliases as a suggested inventory (`ctx.fs`).
 
-## Limits of 0.3.0
+## Limits of 0.4.0
 
-- One settings page, its two tabs, is the only surface; the agent cannot see the list yet.
-- A probe can only use what a non-interactive `ssh` already has: an agent or a
-  key without a passphrase.
-- Deleting the bundle leaves `storages/ssh_targets.json` behind.
+- One settings page, its two tabs, is the only surface; the agent cannot see the
+  list yet.
+- A probe authenticates and then runs only `true`; nothing else executes remotely,
+  so a stored password is used for authentication checks alone.
+- The credential store is private to other OS users, not to the agent: tool
+  processes run as the same user that can read `.credentials.yaml`.
+- Deleting the bundle leaves both `storages/ssh_targets.json` and the plugin's
+  `ssh/…` records in `.credentials.yaml` in place until you remove them.
+- After an in-place package replacement the running Host keeps its previous module
+  until restart. The page detects that (`list` reports no `askpass`) and hides the
+  authentication controls with an explanation instead of sending a field the old
+  module would reject.
 - `private: true`: not published to npm while the status is `experimental`.
 
 ## License

@@ -17,12 +17,34 @@ export const RPC_METHODS = ['list', 'save', 'remove', 'probe', 'probeAll', 'conf
 /** One RPC name as it travels on the wire. */
 export type RpcMethod = (typeof RPC_METHODS)[number]
 
-/**
- * Closed failure vocabulary for the route. A probe never fails for an
+/** Closed failure vocabulary for the route. A probe never fails for an
  * authentication, network, or timeout reason — those are {@link ProbeStatus}
- * outcomes — so these codes stay reserved for request and storage faults.
+ * outcomes — so these codes stay reserved for request, storage and secret faults.
  */
-export type SshErrorCode = 'bad-input' | 'not-found' | 'busy' | 'storage-error' | 'internal'
+export type SshErrorCode = 'bad-input' | 'not-found' | 'busy' | 'storage-error' | 'secret-error' | 'internal'
+
+/** How one target authenticates. */
+export type AuthMode = 'password' | 'key' | 'key+password'
+
+/** The three modes the page offers, in display order. */
+export const AUTH_MODES: readonly AuthMode[] = ['key', 'key+password', 'password']
+
+/** Which secret slots a target has, reported without any value. */
+export interface SecretStatus {
+  /** Whether a login password is stored. */
+  password: boolean
+  /** Whether a private-key passphrase is stored. */
+  passphrase: boolean
+}
+
+/** One secret write: a string stores, `null` forgets, absence leaves as-is. */
+export type SecretPatch = { password?: string | null | undefined; passphrase?: string | null | undefined }
+
+/** A stored target as the page reads it: the record plus its secret presence. */
+export interface ConnectionView extends ConnectionRecord {
+  /** Presence of each secret slot, never a value. */
+  secrets: SecretStatus
+}
 
 /** One failure as the browser reads it. */
 export interface SshFailure {
@@ -83,6 +105,8 @@ export interface ConnectionInput {
   extraArgs?: readonly string[] | undefined
   /** Free-form remark for the reader of the list. */
   note?: string | undefined
+  /** How to authenticate; omission keeps the agent-or-unencrypted-key probe. */
+  auth?: AuthMode | undefined
 }
 
 /** One SSH target as the plugin's storage domain keeps it. */
@@ -97,6 +121,8 @@ export interface ConnectionRecord extends ConnectionInput {
   readonly updatedAt: string
   /** Most recent probe, kept so the list shows an honest “as of”. */
   readonly lastProbe?: ProbeOutcome | undefined
+  /** How this target authenticates; `key` also covers a bare ssh-agent probe. */
+  readonly auth: AuthMode
 }
 
 /** Plugin-wide settings, held in the domain's global slot. */

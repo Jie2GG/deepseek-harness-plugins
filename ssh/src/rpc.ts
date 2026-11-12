@@ -21,6 +21,7 @@ const STATUS_OF: Record<SshErrorCode, number> = {
   'not-found': 404,
   busy: 409,
   'storage-error': 500,
+  'secret-error': 500,
   internal: 500,
 }
 

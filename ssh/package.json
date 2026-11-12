@@ -1,8 +1,8 @@
 {
   "name": "@jie2gg/dsh-plugin-ssh",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
-  "description": "Adds a Remote connections page to the settings panel: SSH targets you can edit and test, and the ssh settings those probes honour, as two tabs.",
+  "description": "Adds a Remote connections page to the settings panel: SSH targets you edit from one address field and test from the browser, authenticating with a key, a password, or both.",
   "keywords": [
     "dsh",
     "dsh-bundle",
@@ -10,7 +10,8 @@
     "openssh",
     "remote",
     "shell",
-    "settings"
+    "settings",
+    "credentials"
   ],
   "license": "Apache-2.0",
   "repository": {
@@ -44,6 +45,7 @@
     "dsh": ">=0.2.2-rc.1 <0.3.0"
   },
   "dependencies": {
+    "@deepseek-ai/dsh-credentials": "0.2.2-rc.1",
     "@deepseek-ai/dsh-storage-domain": "0.2.2-rc.1",
     "zod": "4.4.3"
   },
