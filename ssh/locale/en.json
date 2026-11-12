@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "SSH manager",
+    "description": "Scaffold for a plugin that will inventory SSH hosts and run commands on them; it changes nothing yet.",
+    "detail": "docs/DETAIL.md"
+  }
+}

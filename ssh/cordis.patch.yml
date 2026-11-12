@@ -1,0 +1,5 @@
+# Bundle entry: one Host plugin row, inert in 0.1.0.
+- insert:
+    - id: ssh
+      name: '@jie2gg/dsh-plugin-ssh'
+      config: {}

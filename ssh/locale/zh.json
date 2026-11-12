@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "SSH 管理",
+    "description": "盘点 SSH 主机并在其上执行命令的插件脚手架，当前不产生任何行为。",
+    "detail": "docs/DETAIL.zh.md"
+  }
+}
