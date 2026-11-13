@@ -199,6 +199,7 @@ tool-authoring docs prescribe for deployment policy:
 | `run`, program in the target's `allowedCommands` | allow |
 | `run`, program not allowlisted | **ask** |
 | `run`, a pipeline / redirection / substitution (no single leading program) | **ask** |
+| any `ask`, in a conversation whose approval policy is `never` | **allow** — the core rejects unanswered asks by policy, so asking there is a self-inflicted refusal |
 | `write`, `upload` | **ask** |
 | `download` | allow (it reads the server and writes inside the session workspace, which the file pipeline already governs) |
 | any action on a target with `agentAccess: off` | deny, naming the settings page |
@@ -268,6 +269,14 @@ the 0.5.1 fix, so the next round does not have to re-derive them:
   A size and type pre-check (`stat -c '%s %F' -- '<path>'`, GNU coreutils here) runs
   before a download so an oversized or directory payload is refused without
   touching the disk. `rsync` is absent on this machine and is therefore not used.
+- Approval is two independent switches: the file sandbox (`read-only` /
+  `workspace-write` / `danger-full-access`) governs writes, while
+  `ApprovalPolicy = 'ask' | 'never'` governs whether a person is consulted at all.
+  `'never'` is decided inside `ApprovalService.decide` **before** the
+  `approval/request` waterfall is dispatched (`packages/interaction/user-approval`),
+  so a plugin listener cannot rescue an ask there; the effective policy is
+  `overrideOf(session) ?? config.policy ?? 'ask'`, both reachable on the public
+  service surface, and `ctx.get('approval')` reads it without injecting.
 - Claiming a `tool.call.toolview` key replaces the generic row **completely**, so the card
   must cover every phase (`preparing` / `start` / `result`) and every action; both possible
   wire names are claimed and the unregistered one never renders. The seat supplies

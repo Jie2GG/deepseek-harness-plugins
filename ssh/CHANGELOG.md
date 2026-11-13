@@ -4,6 +4,32 @@ All notable changes to `@jie2gg/dsh-plugin-ssh` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project uses [semantic versioning](https://semver.org/).
 
+## 0.10.0
+
+### Changed
+
+- **A session that cannot ask you no longer refuses itself.** Full workspace
+  permission and the approval prompt are two different switches: a conversation
+  whose approval policy is `never` resolves every request as *rejected*, and the
+  core decides that before dispatching `approval/request`, so no listener — the
+  plugin's gate included — can turn it into a consent. Previously `run`, `write`,
+  and `upload` were therefore refused in exactly those sessions, which read as a
+  connection problem rather than a policy one.
+- The gate now reads the same policy the approval service would apply — the
+  session's logged override, then the service default, then `ask` — through an
+  optional `ctx.get('approval')`, so a profile without the service still gets the
+  tool. When nobody could answer, the call runs; a `deny` stays a `deny`, because
+  that one is your own switch on the target, and a policy read that throws falls
+  back to asking.
+
+### Notes
+
+- Consequence worth stating: in a session that will not ask, a command allowlist
+  becomes advisory — it decides nothing you can observe. `agent access off` per
+  target is the switch that still means no.
+- New module `src/approval.ts` holds the precedence read, exported so the ordering
+  is asserted directly instead of being assumed from the service's source.
+
 ## 0.9.0
 
 ### Changed

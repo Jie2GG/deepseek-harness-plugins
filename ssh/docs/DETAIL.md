@@ -63,6 +63,14 @@ names a server, that conversation keeps using it, so a follow-up like "now the d
 usage" does not repeat the host. Add or remove a target and the choices the agent
 sees follow on the next turn, with no conversation restart.
 
+A note on the two switches that are easy to confuse: full workspace permission
+governs how freely files may be written, and the approval prompt governs whether
+you are asked at all. A conversation set to *never ask* answers every request as a
+rejection, decided before anyone can weigh in — so in that kind of conversation the
+plugin runs the asking calls rather than refusing them on your behalf. Turning a
+target's **agent access** off is still a hard no, and a conversation that does ask
+you still gets the confirmation.
+
 What runs without interrupting you:
 
 | The call | What happens |

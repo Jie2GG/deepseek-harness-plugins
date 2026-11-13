@@ -20,6 +20,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import type { ApprovalAnswer } from './approval.ts'
 
 /**
  * The pending-call fields this module reads, taken structurally: two copies of the
@@ -87,6 +88,13 @@ export interface RemoteToolDeps {
   targetsOf?: (() => TargetBrief[]) | undefined
   /** The conversation workspace one transfer call may touch. */
   local?: RemoteLocalBridge | undefined
+  /**
+   * Whether this conversation can answer a request at all. A session whose approval
+   * policy is `never` resolves every ask as rejected — decided inside the approval
+   * service before any listener runs — so asking there is not a question, it is a
+   * refusal the plugin authored itself.
+   */
+  approvalPolicyOf?: ((exec: Readonly<PendingCall>) => ApprovalAnswer | undefined) | undefined
 }
 
 /** One saved target as the tool description presents it to the model. */
@@ -282,6 +290,21 @@ export function decideAccess(target: TargetSnapshot | undefined, args: RemoteCal
  * @param next - the waterfall's pass-through.
  * @returns the decision the pipeline applies.
  */
+/**
+ * Whether an ask would reach someone who can answer it.
+ * @param deps - the tool dependencies.
+ * @param exec - the pending call.
+ * @returns true when the conversation has a live approval surface.
+ */
+function awaitable(deps: RemoteToolDeps, exec: Readonly<PendingCall>): boolean {
+  if (deps.approvalPolicyOf === undefined) return true
+  try {
+    return deps.approvalPolicyOf(exec) === 'ask'
+  } catch {
+    return true
+  }
+}
+
 export async function gateRemoteCall(deps: RemoteToolDeps, exec: Readonly<PendingCall>, next: () => Promise<GateDecision>): Promise<GateDecision> {
   const args = readArgs(exec)
   if (!REMOTE_TOOL_ACTIONS.includes(args.action)) return await next()
@@ -298,6 +321,12 @@ export async function gateRemoteCall(deps: RemoteToolDeps, exec: Readonly<Pendin
   const verdict = decideAccess(target, args)
   if (verdict.verdict === 'allow') return await next()
   if (verdict.verdict === 'deny') return { kind: 'deny', reason: verdict.reason }
+  if (!awaitable(deps, exec)) {
+    // Nobody is going to answer: run it, and let the deployment's standing decision
+    // be the consent. A `deny` stays a deny — that one is the user's own setting on
+    // the target, not a question.
+    return await next()
+  }
   return { kind: 'ask', reason: verdict.reason, ...(verdict.display === undefined ? {} : { displayReason: verdict.display }) }
 }
 

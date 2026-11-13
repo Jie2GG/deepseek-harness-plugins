@@ -17,6 +17,7 @@ import type {} from '@deepseek-ai/dsh-fs'
 import type {} from '@deepseek-ai/dsh-working-directory'
 import { sshTargetsDomain } from './storage.ts'
 import { resolveLocalInside } from './local-path.ts'
+import { effectiveApprovalPolicy } from './approval.ts'
 import { TargetStore } from './store.ts'
 import { TargetSecrets } from './secrets.ts'
 import { AskPassHelper } from './askpass.ts'
@@ -171,6 +172,9 @@ export function apply(ctx: Context): void {
       sessionOf: exec => (exec.agent as { id?: string } | undefined)?.id,
       sessionTargetOf: sessionId => store?.getSessionTarget(sessionId)?.targetId,
       targetsOf: () => briefs,
+      // Read without injecting: a profile with no approval service must still get the
+      // tool, it simply cannot be asked anything.
+      approvalPolicyOf: exec => effectiveApprovalPolicy(ctx.get('approval'), exec.agent),
     }
   }
 
