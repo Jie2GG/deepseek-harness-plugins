@@ -74,14 +74,20 @@ project uses [semantic versioning](https://semver.org/).
   succeeded. The far end is now named the same way in both directions, and the
   suite asserts the download argv (remote spec, then the workspace destination)
   instead of only the upload one.
+- Transfer reporting: a successful download now states the byte size it had
+  already measured in the pre-check, an upload omits `bytes` rather than inventing
+  it, and the "an existing destination was replaced" note no longer rides on the
+  byte line (so it appeared only when a size happened to be known). Live use showed
+  a replaced download rendering without any hint that it had overwritten.
 - The offline suites had asserted the payload *values* without ever validating
   them against the projected JSON Schema, which is how this survived 71 tool
   assertions. Section 5b of the tool suite and 5b of the transfer suite now run
   every action's payload through the registry's own `validateJsonSchemaValue`,
   plus two negative cases (an undeclared field and an unknown action must still be
-  rejected), and both transfer directions now assert the built command line. A
-  refusal that never reached a target no longer invents a host name in the
-  transcript line. 379 assertions across seven suites.
+  rejected), and both transfer directions now assert the built command line, a
+  successful download asserts its reported size, and the replaced-destination line
+  is asserted on its own. A refusal that never reached a target no longer invents a
+  host name in the transcript line. 383 assertions across seven suites.
 
 ### Notes
 

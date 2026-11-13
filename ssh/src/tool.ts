@@ -629,7 +629,9 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
       const known = value.target !== undefined || args.target !== undefined
       const head = known ? `${String(value.action)} ${value.action === 'upload' ? 'up to' : 'down from'} ${where}` : String(value.action)
       lines.push(`${head}: ${String(value.localPath)} <-> ${String(value.remotePath)}`)
-      if (typeof value.bytes === 'number') lines.push(`${String(value.bytes)} bytes${value.recursive === true ? ' (directory)' : ''}${value.overwrote === true ? ', replaced an existing file' : ''}`)
+      if (typeof value.bytes === 'number') lines.push(`${String(value.bytes)} bytes${value.recursive === true ? ' (directory)' : ''}`)
+      else if (value.recursive === true) lines.push('directory')
+      if (value.overwrote === true) lines.push('an existing destination was replaced')
       if (typeof value.message === 'string') lines.push(String(value.message))
       if (typeof value.hint === 'string') lines.push(`hint: ${String(value.hint)}`)
       lines.push(`status=${String(value.status)}${typeof value.durationMs === 'number' ? ` · ${String(value.durationMs)} ms` : ''}`)

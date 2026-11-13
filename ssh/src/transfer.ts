@@ -106,11 +106,14 @@ export async function transfer(
   const dst = request.direction === 'upload' ? remote : request.localPath
 
   // A pre-check beats discovering an oversized copy at the end: the destination
-  // is untouched when the copy has not started.
+  // is untouched when the copy has not started. The stated size is also the only
+  // byte count a download can report, so it is kept for the success path.
+  let knownBytes: number | undefined
   if (request.recursive !== true) {
     const stated = request.direction === 'download'
       ? await remoteStat(transport, target, settings, auth, request.remotePath)
       : undefined
+    if (stated !== undefined) knownBytes = stated.bytes
     if (request.direction === 'download') {
       if (stated === undefined) {
         return { status: 'missing', durationMs: Date.now() - startedAt, message: `Nothing at ${request.remotePath} on ${target.host}.` }
@@ -166,6 +169,7 @@ export async function transfer(
     status: 'moved',
     durationMs: Date.now() - startedAt,
     overwrote: request.overwrite === true,
+    ...(knownBytes === undefined ? {} : { bytes: knownBytes }),
     ...(request.recursive === true ? { kind: 'directory' } : {}),
   }
 }
