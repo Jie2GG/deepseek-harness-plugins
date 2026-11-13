@@ -17,7 +17,7 @@ import { sshTargetsDomain } from './storage.ts'
 import { TargetStore } from './store.ts'
 import { TargetSecrets } from './secrets.ts'
 import { AskPassHelper } from './askpass.ts'
-import { SshRunner } from './ssh.ts'
+import { SshTransport } from './transport.ts'
 import { createOps } from './ops.ts'
 import { createRpcHandler } from './rpc.ts'
 import { RPC_ROUTE_PATH, SshError } from './types.ts'
@@ -43,7 +43,7 @@ export const inject = ['connection', 'subprocess', 'storageDomain', 'credentials
  */
 export function apply(ctx: Context): void {
   const askpass = new AskPassHelper()
-  const runner = new SshRunner(ctx, askpass)
+  const runner = new SshTransport(ctx, askpass)
   const secrets = new TargetSecrets(ctx.credentials)
 
   let store: TargetStore | undefined

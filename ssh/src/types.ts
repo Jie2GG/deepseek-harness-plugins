@@ -12,7 +12,7 @@
 export const RPC_ROUTE_PATH = '/api/ssh/rpc'
 
 /** RPC names the page may invoke; every other name is refused before dispatch. */
-export const RPC_METHODS = ['list', 'save', 'remove', 'probe', 'probeAll', 'configUpdate'] as const
+export const RPC_METHODS = ['list', 'save', 'remove', 'probe', 'probeAll', 'run', 'configUpdate'] as const
 
 /** One RPC name as it travels on the wire. */
 export type RpcMethod = (typeof RPC_METHODS)[number]
@@ -114,6 +114,14 @@ export interface ConnectionInput {
   note?: string | undefined
   /** How to authenticate; omission keeps the agent-or-unencrypted-key probe. */
   auth?: AuthMode | undefined
+  /** Whether the agent may reach this target at all. */
+  agentAccess?: 'on' | 'off' | undefined
+  /** Program names runnable without an approval; empty asks for every command. */
+  allowedCommands?: readonly string[] | undefined
+  /** Per-target command deadline; `null` clears the override. */
+  remoteTimeoutMs?: number | null | undefined
+  /** Per-target output ceiling; `null` clears the override. */
+  maxOutputBytes?: number | null | undefined
 }
 
 /** One SSH target as the plugin's storage domain keeps it. */
@@ -130,6 +138,32 @@ export interface ConnectionRecord extends ConnectionInput {
   readonly lastProbe?: ProbeOutcome | undefined
   /** How this target authenticates; `key` also covers a bare ssh-agent probe. */
   readonly auth: AuthMode
+  /** Whether the agent may reach this target at all. */
+  readonly agentAccess: 'on' | 'off'
+  /** Program names runnable without an approval. */
+  readonly allowedCommands: readonly string[]
+  /** Per-target command deadline; absence follows the shared setting. */
+  readonly remoteTimeoutMs?: number | undefined
+  /** Per-target output ceiling; absence follows the shared setting. */
+  readonly maxOutputBytes?: number | undefined
+}
+
+/** One remote command result, kept on the record and returned to the model. */
+export interface RemoteRunResult {
+  /** Classified outcome of the whole call. */
+  status: RemoteStatus
+  /** When it finished, as a canonical UTC instant. */
+  at: string
+  /** Child exit code; `null` when a signal ended it. */
+  exitCode?: number | null | undefined
+  /** Captured stdout, already trimmed to the ceiling. */
+  stdout?: string | undefined
+  /** Captured stderr, already trimmed to the ceiling. */
+  stderr?: string | undefined
+  /** Whether either stream lost bytes to the ceiling. */
+  truncated?: boolean | undefined
+  /** Wall-clock duration in whole milliseconds. */
+  durationMs?: number | undefined
 }
 
 /** Plugin-wide settings, held in the domain's global slot. */
@@ -138,15 +172,46 @@ export interface SshSettings {
   command: string
   /** Deadline for one probe, in whole milliseconds. */
   probeTimeoutMs: number
-  /** Per-stream capture ceiling for one probe, in bytes. */
+  /** Per-stream capture ceiling for a probe or a remote command, in bytes. */
   maxOutputBytes: number
+  /** Deadline for one agent-issued remote command, in whole milliseconds. */
+  remoteTimeoutMs: number
+  /** Largest file or tree one transfer may move, in bytes. */
+  maxTransferBytes: number
 }
+
+/** One conversation's chosen target, kept in the plugin's own storage. */
+export interface SessionTarget {
+  /** The DSH Session this choice belongs to. */
+  sessionId: string
+  /** The chosen target id. */
+  targetId: string
+  /** When it was chosen, as a canonical UTC instant. */
+  setAt: string
+}
+
+/** Outcome of one remote command, classified the same way a probe is. */
+export type RemoteStatus =
+  | 'succeeded'
+  | 'exit-nonzero'
+  | 'auth-failed'
+  | 'unreachable'
+  | 'unknown-host'
+  | 'timeout'
+  | 'cancelled'
+  | 'ssh-missing'
+  | 'failed'
+
+/** How a call reached its target. */
+export type TargetSource = 'argument' | 'session' | 'only-target'
 
 /** The page's settings write, with every field optional. */
 export interface SettingsInput {
   command?: string | undefined
   probeTimeoutMs?: number | undefined
   maxOutputBytes?: number | undefined
+  remoteTimeoutMs?: number | undefined
+  maxTransferBytes?: number | undefined
 }
 
 /** A failure carrying one {@link SshErrorCode} for the route layer to map. */

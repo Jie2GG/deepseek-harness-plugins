@@ -60,6 +60,10 @@ window.__ModuleLoader__.load({
         settingsCommand: 'ssh executable',
         settingsProbeTimeout: 'Probe timeout (ms)',
         settingsMaxOutput: 'Output ceiling (bytes)',
+        settingsRemoteTimeout: 'Command timeout (ms)',
+        settingsMaxTransfer: 'Transfer ceiling (bytes)',
+        settingsRemoteHint: 'A command runs under its own deadline; the target may override it. Output beyond the ceiling is cut and marked as truncated.',
+        settingsTransferHint: 'One upload or download moves at most this much. A directory goes through scp -r, and nothing overwrites without being told to.',
         settingsSave: 'Save settings',
         settingsSaved: 'Saved.',
         settingsHint: 'A probe runs with BatchMode=yes unless it needs a secret, in which case the askpass helper answers the prompt for it.',
@@ -72,6 +76,8 @@ window.__ModuleLoader__.load({
         boundsPerRound: 'Targets per “Test all” round',
         boundsTimeout: 'Probe timeout accepts',
         boundsOutput: 'Output ceiling accepts',
+        boundsRemoteTimeout: 'Command timeout accepts',
+        boundsTransfer: 'Transfer ceiling accepts',
         listTitle: 'SSH targets',
         listCount: '{count} of {limit} saved',
         listAdd: 'New connection',
@@ -163,6 +169,10 @@ window.__ModuleLoader__.load({
         settingsCommand: 'ssh 可执行文件',
         settingsProbeTimeout: '探测超时（毫秒）',
         settingsMaxOutput: '输出上限（字节）',
+        settingsRemoteTimeout: '命令超时（毫秒）',
+        settingsMaxTransfer: '传输上限（字节）',
+        settingsRemoteHint: '远程命令按自己的时限运行，目标可以单独覆盖；超出上限的输出会被截断并标注。',
+        settingsTransferHint: '单次上传或下载最多搬这么多；目录用 scp -r，未被明确要求时不会覆盖已有文件。',
         settingsSave: '保存参数',
         settingsSaved: '已保存。',
         settingsHint: '不需要凭据的探测以 BatchMode=yes 运行；需要用凭据时，由 askpass 助手应答提示。',
@@ -175,6 +185,8 @@ window.__ModuleLoader__.load({
         boundsPerRound: '「全部测试」单轮覆盖的目标数',
         boundsTimeout: '探测超时可填范围',
         boundsOutput: '输出上限可填范围',
+        boundsRemoteTimeout: '命令超时可填范围',
+        boundsTransfer: '传输上限可填范围',
         listTitle: 'SSH 目标清单',
         listCount: '已保存 {count} / {limit}',
         listAdd: '新建连接',
@@ -808,7 +820,7 @@ window.__ModuleLoader__.load({
       const [tab, setTab] = React.useState('list')
       const [connections, setConnections] = React.useState([] as ConnectionView[])
       const [settings, setSettings] = React.useState(null as { command: string; probeTimeoutMs: number; maxOutputBytes: number } | null)
-      const [limits, setLimits] = React.useState({ maxConnections: 64, concurrentProbes: 4, probeAllLimit: 12, probeTimeoutMinMs: 1000, probeTimeoutMaxMs: 120000, outputMinBytes: 1024, outputMaxBytes: 4194304 })
+      const [limits, setLimits] = React.useState({ maxConnections: 64, concurrentProbes: 4, probeAllLimit: 12, probeTimeoutMinMs: 1000, probeTimeoutMaxMs: 120000, remoteTimeoutMinMs: 1000, remoteTimeoutMaxMs: 300000, outputMinBytes: 1024, outputMaxBytes: 4194304, transferMinBytes: 1024, transferMaxBytes: 536870912 })
       const [askpass, setAskpass] = React.useState('ready')
       // Whose ~/.ssh the probes read: reported by the Host, never inferred here.
       const [runsAs, setRunsAs] = React.useState(null as { uid: number | null; user: string; home: string } | null)
@@ -825,7 +837,7 @@ window.__ModuleLoader__.load({
       const [draftProbe, setDraftProbe] = React.useState(null as ProbeOutcome | null)
       const [fieldError, setFieldError] = React.useState(null as string | null)
       const [confirmId, setConfirmId] = React.useState(null as string | null)
-      const [settingsDraft, setSettingsDraft] = React.useState({ command: '', probeTimeoutMs: '', maxOutputBytes: '' })
+      const [settingsDraft, setSettingsDraft] = React.useState({ command: '', probeTimeoutMs: '', maxOutputBytes: '', remoteTimeoutMs: '', maxTransferBytes: '' })
       const alive = React.useRef(true)
 
       React.useEffect(() => {
@@ -847,6 +859,8 @@ window.__ModuleLoader__.load({
             command: result.settings?.command ?? '',
             probeTimeoutMs: String(result.settings?.probeTimeoutMs ?? ''),
             maxOutputBytes: String(result.settings?.maxOutputBytes ?? ''),
+            remoteTimeoutMs: String(result.settings?.remoteTimeoutMs ?? ''),
+            maxTransferBytes: String(result.settings?.maxTransferBytes ?? ''),
           })
           if (result.limits !== undefined) setLimits(result.limits)
           setAskpass(result.askpass ?? 'ready')
@@ -1023,11 +1037,15 @@ window.__ModuleLoader__.load({
           const command = (settingsDraft.command ?? '').trim()
           const timeout = whole(settingsDraft.probeTimeoutMs)
           const output = whole(settingsDraft.maxOutputBytes)
+          const remote = whole(settingsDraft.remoteTimeoutMs)
+          const transfer = whole(settingsDraft.maxTransferBytes)
           const result = await rpc('configUpdate', {
             settings: {
               ...(command === '' ? {} : { command }),
               ...(timeout === undefined || Number.isNaN(timeout) ? {} : { probeTimeoutMs: timeout }),
               ...(output === undefined || Number.isNaN(output) ? {} : { maxOutputBytes: output }),
+              ...(remote === undefined || Number.isNaN(remote) ? {} : { remoteTimeoutMs: remote }),
+              ...(transfer === undefined || Number.isNaN(transfer) ? {} : { maxTransferBytes: transfer }),
             },
           })
           if (!alive.current) return
@@ -1037,6 +1055,8 @@ window.__ModuleLoader__.load({
               command: result.settings.command ?? '',
               probeTimeoutMs: String(result.settings.probeTimeoutMs ?? ''),
               maxOutputBytes: String(result.settings.maxOutputBytes ?? ''),
+              remoteTimeoutMs: String(result.settings.remoteTimeoutMs ?? ''),
+              maxTransferBytes: String(result.settings.maxTransferBytes ?? ''),
             })
           }
         }, t('settingsSaved'))
@@ -1406,7 +1426,11 @@ window.__ModuleLoader__.load({
           h(TextField, { label: t('settingsCommand'), value: settingsDraft.command, disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, command: value })) } }),
           h(TextField, { label: t('settingsProbeTimeout'), value: settingsDraft.probeTimeoutMs, type: 'number', disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, probeTimeoutMs: value })) } }),
           h(TextField, { label: t('settingsMaxOutput'), value: settingsDraft.maxOutputBytes, type: 'number', disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, maxOutputBytes: value })) } }),
+          h(TextField, { label: t('settingsRemoteTimeout'), value: settingsDraft.remoteTimeoutMs, type: 'number', disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, remoteTimeoutMs: value })) } }),
+          h(TextField, { label: t('settingsMaxTransfer'), value: settingsDraft.maxTransferBytes, type: 'number', disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, maxTransferBytes: value })) } }),
         ),
+        h('p', { class: 'dshssh-muted' }, t('settingsRemoteHint')),
+        h('p', { class: 'dshssh-muted' }, t('settingsTransferHint')),
         settings === null ? h('span', { class: 'dshssh-muted' }, loading ? t('listProbing') : t('listLoadFailed')) : null,
       )
 
@@ -1425,7 +1449,9 @@ window.__ModuleLoader__.load({
           h('div', { class: 'dshssh-bound', key: 'lanes' }, h('dt', {}, t('boundsConcurrency')), h('dd', {}, String(limits.concurrentProbes))),
           h('div', { class: 'dshssh-bound', key: 'round' }, h('dt', {}, t('boundsPerRound')), h('dd', {}, String(limits.probeAllLimit))),
           h('div', { class: 'dshssh-bound', key: 'timeout' }, h('dt', {}, t('boundsTimeout')), h('dd', {}, `${measure(limits.probeTimeoutMinMs, 'ms')} – ${measure(limits.probeTimeoutMaxMs, 'ms')}`)),
+          h('div', { class: 'dshssh-bound', key: 'remote' }, h('dt', {}, t('boundsRemoteTimeout')), h('dd', {}, `${measure(limits.remoteTimeoutMinMs, 'ms')} – ${measure(limits.remoteTimeoutMaxMs, 'ms')}`)),
           h('div', { class: 'dshssh-bound', key: 'output' }, h('dt', {}, t('boundsOutput')), h('dd', {}, `${measure(limits.outputMinBytes, 'bytes')} – ${measure(limits.outputMaxBytes, 'bytes')}`)),
+          h('div', { class: 'dshssh-bound', key: 'transfer' }, h('dt', {}, t('boundsTransfer')), h('dd', {}, `${measure(limits.transferMinBytes, 'bytes')} – ${measure(limits.transferMaxBytes, 'bytes')}`)),
         ),
       )
 

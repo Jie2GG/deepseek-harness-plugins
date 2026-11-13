@@ -10,9 +10,9 @@
 
 import { randomBytes } from 'node:crypto'
 import type { Domain } from '@deepseek-ai/dsh-storage-domain'
-import { connectionRecordSchema, MAX_CONNECTIONS, settingsRecordSchema, sshTargetsDomain } from './storage.ts'
+import { connectionRecordSchema, MAX_ALLOWED_COMMANDS, MAX_CONNECTIONS, settingsRecordSchema, sshTargetsDomain } from './storage.ts'
 import { SshError } from './types.ts'
-import type { ConnectionInput, ConnectionRecord, ProbeOutcome, SshSettings } from './types.ts'
+import type { ConnectionInput, ConnectionRecord, ProbeOutcome, SessionTarget, SshSettings } from './types.ts'
 
 /** The opened domain this store wraps. */
 type SshTargetsDomain = Domain<typeof sshTargetsDomain>
@@ -46,6 +46,10 @@ function identityOf(input: ConnectionInput): Omit<ConnectionRecord, 'id' | 'crea
     label: trimmed(input.label) ?? '',
     host: trimmed(input.host) ?? '',
     auth: input.auth ?? 'key',
+    agentAccess: input.agentAccess ?? 'on',
+    allowedCommands: [...(input.allowedCommands ?? [])].slice(0, MAX_ALLOWED_COMMANDS),
+    ...(input.remoteTimeoutMs === undefined || input.remoteTimeoutMs === null ? {} : { remoteTimeoutMs: input.remoteTimeoutMs }),
+    ...(input.maxOutputBytes === undefined || input.maxOutputBytes === null ? {} : { maxOutputBytes: input.maxOutputBytes }),
     ...(user === undefined ? {} : { user }),
     ...(input.port === undefined ? {} : { port: input.port }),
     ...(identityFile === undefined ? {} : { identityFile }),
@@ -190,6 +194,65 @@ export class TargetStore {
    */
   async remove(id: string): Promise<boolean> {
     return await this.#table().delete(id)
+  }
+
+  /** The conversation-target table handle. */
+  #sessions() {
+    return this.#domain.table('sessions')
+  }
+
+  /**
+   * Point one conversation at a target.
+   * @param sessionId - the DSH Session id.
+   * @param targetId - the chosen target, which must exist.
+   * @returns the stored row.
+   */
+  async setSessionTarget(sessionId: string, targetId: string): Promise<SessionTarget> {
+    if (this.get(targetId) === undefined) {
+      throw new SshError('not-found', `No stored SSH target carries the id "${targetId}".`, { field: 'targetId' })
+    }
+    const row: SessionTarget = { sessionId, targetId, setAt: new Date().toISOString() }
+    await this.#sessions().put(sessionId, row)
+    return row
+  }
+
+  /**
+   * The target one conversation chose, if any.
+   * @param sessionId - the DSH Session id.
+   * @returns the stored row, or `undefined` when the conversation has none.
+   */
+  getSessionTarget(sessionId: string): SessionTarget | undefined {
+    return this.#sessions().get(sessionId)
+  }
+
+  /**
+   * Every conversation choice, for the page's picker.
+   * @returns the stored rows.
+   */
+  listSessionTargets(): SessionTarget[] {
+    return Array.from(this.#sessions().entries(), ([, row]) => row)
+  }
+
+  /**
+   * Forget one conversation's choice.
+   * @param sessionId - the DSH Session id.
+   * @returns `true` when a row was removed.
+   */
+  async clearSessionTarget(sessionId: string): Promise<boolean> {
+    return await this.#sessions().delete(sessionId)
+  }
+
+  /**
+   * Forget every conversation choice pointing at one target, so a deleted target
+   * cannot leave a dangling id behind.
+   * @param targetId - the removed target.
+   * @returns how many conversations were cleared.
+   */
+  async forgetSessionTargetsFor(targetId: string): Promise<number> {
+    const stale = Array.from(this.#sessions().keys()).filter(sessionId => this.#sessions().get(sessionId)?.targetId === targetId)
+    if (stale.length === 0) return 0
+    await this.#sessions().deleteMany(stale)
+    return stale.length
   }
 
   /**

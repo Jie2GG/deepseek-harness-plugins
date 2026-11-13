@@ -129,6 +129,8 @@ async function dispatch(ops: Ops, method: RpcMethod, params: Params): Promise<un
       return await ops.probe(params)
     case 'probeAll':
       return await ops.probeAll()
+    case 'run':
+      return await ops.runCommand(params)
     case 'configUpdate':
       return await ops.configUpdate(params)
   }

@@ -25,7 +25,7 @@ ssh/
     ├── types.ts              # route path, method list, failure codes (client type-only)
     ├── storage.ts            # the `ssh_targets` domain: zod schemas, bounds, limits
     ├── store.ts              # typed reads/writes over the opened domain
-    ├── ssh.ts                # SshRunner: executable lookup, spawn, result classes
+    ├── transport.ts          # SshTransport: one option set, one child, run + probe
     ├── secrets.ts            # password and passphrase records in the credential store
     ├── askpass.ts            # the private helper that answers an ssh prompt
     ├── ops.ts                # one method per RPC name, transport-agnostic
@@ -91,6 +91,7 @@ Body `{ method, params? }`, result `{ ok: true, result }` or
 | `save` | `{ connection, secrets? }` (no `id` = create) | `{ connection, connections }` |
 | `remove` | `{ id }` | `{ removed, orphanSecrets, connections }` |
 | `probe` | `{ id }` or `{ draft, secrets? }` | `{ connection?, probe?, connections }` |
+| `run` | `{ command, target?, sessionId?, timeoutMs?, maxOutputBytes? }` | `{ run, connection?, connections }` |
 | `probeAll` | – | `{ connections, probed, skipped, failures }` |
 | `configUpdate` | `{ settings }` | `{ settings }` |
 
@@ -109,28 +110,41 @@ include `secret-error` (500).
 
 ### Storage
 
-One domain, `ssh_targets` (`version: 1`), on the backend the profile routes for
+One domain, `ssh_targets` (`version: 3`, reading `version: 1` and `2` records through
+`compatibleVersions`), on the backend the profile routes for
 it — the `json` backend writes one document per unit, at
 `$DSH_HOME/storages/ssh_targets.json`:
 
-- table `connections`: `{ id, label, host, user?, port?, identityFile?, proxyJump?, extraArgs?, note?, createdAt, updatedAt, lastProbe? }`, validated by zod on every read and write, so a hand-edited file cannot smuggle a bad record into the page (it surfaces as `storage-error` instead).
-- global slot: `{ command, probeTimeoutMs, maxOutputBytes }`.
+- table `connections`: `{ id, label, host, user?, port?, identityFile?, proxyJump?, extraArgs?, note?, createdAt, updatedAt, lastProbe?, auth, agentAccess, allowedCommands, remoteTimeoutMs?, maxOutputBytes? }`, validated by zod on every read and write, so a hand-edited file cannot smuggle a bad record into the page (it surfaces as `storage-error` instead).
+- table `sessions`: `{ sessionId, targetId, setAt }` — the target one conversation
+  picked, so a remote call can omit `target`. `remove` clears the rows that point
+  at a deleted target.
+- global slot: `{ command, probeTimeoutMs, maxOutputBytes, remoteTimeoutMs, maxTransferBytes }`.
+
+Format history: 1 = targets only, 2 = added `auth`, 3 = added the agent fields and
+the `sessions` table. Every added field is optional with a default that reproduces
+what the earlier version meant, so an existing file keeps opening — and the
+`json` backend stamps the unit with the version it last wrote.
 
 The file's shape, asserted by an integration run against the published json
 backend:
 
 ```json
-{ "unit": { "name": "ssh_targets", "version": 2 },
-  "global": { "command": "ssh", "probeTimeoutMs": 10000, "maxOutputBytes": 65536 },
-  "tables": { "connections": { "ssh-0123456789": { "id": "…", "label": "…", "host": "…", "auth": "password", "extraArgs": ["-4"], "createdAt": "…", "updatedAt": "…", "lastProbe": { "status": "auth-failed" } } } } }
+{ "unit": { "name": "ssh_targets", "version": 3 },
+  "global": { "command": "ssh", "probeTimeoutMs": 10000, "maxOutputBytes": 65536, "remoteTimeoutMs": 30000, "maxTransferBytes": 33554432 },
+  "tables": { "connections": { "ssh-0123456789": { "id": "…", "label": "…", "host": "…", "auth": "password", "agentAccess": "on", "allowedCommands": ["git"], "extraArgs": ["-4"], "createdAt": "…", "updatedAt": "…", "lastProbe": { "status": "auth-failed" } } }, "sessions": { "session-77": { "sessionId": "session-77", "targetId": "ssh-0123456789", "setAt": "…" } } }
 ```
 
-Bounds live in `src/storage.ts`: 64 targets, 4 concurrent probes, 12 per
-`probeAll` round, 1 s–120 s probe timeout, 1 KiB–4 MiB output ceiling.
+Bounds live in `src/storage.ts`: 64 targets, 4 concurrent remote operations
+shared by probes and commands, 12 per `probeAll` round, 1 s–120 s probe timeout,
+1 s–300 s command timeout, 1 KiB–4 MiB output ceiling, 1 KiB–512 MiB transfer
+ceiling, and at most 32 allowlisted program names of 64 characters each.
 
-Record format is `version: 2` with `compatibleVersions: [1]`: version 1 records
-carry no `auth`, and the current schema defaults that to `key`, which is what
-every 0.2.0 and 0.3.0 target meant, so an existing file keeps opening.
+Record format is `version: 3` with `compatibleVersions: [1, 2]`.
+
+The shared settings slot now carries five fields; the two ceilings the agent
+uses (`remoteTimeoutMs`, `maxTransferBytes`) are editable on the Client settings
+tab beside the probe ones.
 
 ### Credentials
 

@@ -10,10 +10,10 @@
  * @module @jie2gg/dsh-plugin-ssh/ops
  */
 
-import { connectionInputSchema, draftSecretSchema, MAX_CONCURRENT_PROBES, MAX_CONNECTIONS, MAX_MAX_OUTPUT_BYTES, MAX_PROBE_TIMEOUT_MS, MIN_MAX_OUTPUT_BYTES, MIN_PROBE_TIMEOUT_MS, probeDraftSchema, secretPatchSchema, settingsInputSchema } from './storage.ts'
+import { connectionInputSchema, draftSecretSchema, MAX_CONCURRENT_PROBES, MAX_CONNECTIONS, MAX_MAX_OUTPUT_BYTES, MAX_MAX_TRANSFER_BYTES, MAX_PROBE_TIMEOUT_MS, MAX_REMOTE_TIMEOUT_MS, MIN_MAX_OUTPUT_BYTES, MIN_MAX_TRANSFER_BYTES, MIN_PROBE_TIMEOUT_MS, MIN_REMOTE_TIMEOUT_MS, probeDraftSchema, remoteRunSchema, secretPatchSchema, settingsInputSchema } from './storage.ts'
 import { SshError } from './types.ts'
-import type { AuthMode, ConnectionRecord, ConnectionView, ProbeOutcome, SshSettings } from './types.ts'
-import type { ProbeAuth, ProbeTarget, SshRunner } from './ssh.ts'
+import type { AuthMode, ConnectionRecord, ConnectionView, ProbeOutcome, RemoteRunResult, SshSettings } from './types.ts'
+import type { RemoteAuth, RemoteTarget, SshTransport } from './transport.ts'
 import type { TargetStore } from './store.ts'
 import type { TargetSecrets } from './secrets.ts'
 
@@ -33,8 +33,12 @@ export interface ListResult {
     probeAllLimit: number
     probeTimeoutMinMs: number
     probeTimeoutMaxMs: number
+    remoteTimeoutMinMs: number
+    remoteTimeoutMaxMs: number
     outputMinBytes: number
     outputMaxBytes: number
+    transferMinBytes: number
+    transferMaxBytes: number
   }
   /** Whether this Host can answer a password or passphrase prompt at all. */
   askpass: 'ready' | 'unavailable'
@@ -57,14 +61,16 @@ export interface Ops {
   probe(params: Params): Promise<{ connection?: ConnectionView | undefined; probe?: ProbeOutcome | undefined; connections: ConnectionView[] }>
   /** Probe the stored targets, up to the built-in limit. */
   probeAll(): Promise<{ connections: ConnectionView[]; probed: number; skipped: number; failures: { id: string; message: string }[] }>
+  /** Run one remote command, resolving the target the same way the tool will. */
+  runCommand(params: Params): Promise<{ run: RemoteRunResult; connection?: ConnectionView | undefined; connections: ConnectionView[] }>
   /** Replace the shared settings. */
   configUpdate(params: Params): Promise<{ settings: SshSettings }>
 }
 
 /** Dependencies the plugin entry assembles. */
 export interface OpsDeps {
-  /** The probe runner. */
-  runner: SshRunner
+  /** The shared transport for probes, commands, and transfers. */
+  runner: SshTransport
   /** Awaited storage; rejects with a `storage-error` {@link SshError} when the domain is unavailable. */
   store: () => Promise<TargetStore>
   /** The credential-store face; `undefined` until the plugin is fully mounted. */
@@ -78,7 +84,7 @@ export interface OpsDeps {
  * @param source - a record, or a draft target as the page submitted it.
  * @returns the probe fields.
  */
-function targetOf(source: ProbeTarget): ProbeTarget {
+function targetOf(source: RemoteTarget): RemoteTarget {
   return {
     host: source.host,
     ...(source.user === undefined ? {} : { user: source.user }),
@@ -141,6 +147,50 @@ function readSecrets(params: Params): ReturnType<typeof secretPatchSchema.parse>
 }
 
 /**
+ * Resolve which stored target a call means: an explicit reference wins, then the
+ * conversation's chosen target, then the only target there is.
+ * @param state - the open storage.
+ * @param params - route parameters, optionally carrying `target` and `sessionId`.
+ * @returns the matching record.
+ */
+function pickTarget(state: TargetStore, params: Params): ConnectionRecord {
+  const records = state.list()
+  const ref = typeof params.target === 'string' ? params.target.trim() : ''
+  if (ref !== '') {
+    const direct = records.find(row => row.id === ref)
+      ?? records.find(row => row.label.toLowerCase() === ref.toLowerCase())
+      ?? records.find(row => row.host.toLowerCase() === ref.toLowerCase()
+        || (row.user !== undefined && `${row.user}@${row.host}`.toLowerCase() === ref.toLowerCase()))
+    if (direct !== undefined) return direct
+    const candidates = records.map(row => row.label).join(', ')
+    throw new SshError('not-found', `No stored SSH target matches "${ref}".`, {
+      field: 'target',
+      hint: candidates === '' ? 'Add a target in Settings → Remote connections first.' : `Known targets: ${candidates}.`,
+    })
+  }
+  const sessionId = typeof params.sessionId === 'string' ? params.sessionId : ''
+  if (sessionId !== '') {
+    const chosen = state.getSessionTarget(sessionId)
+    if (chosen !== undefined) {
+      const row = state.get(chosen.targetId)
+      if (row !== undefined) return row
+    }
+  }
+  if (records.length === 1) {
+    const only = records[0]
+    if (only !== undefined) return only
+  }
+  throw new SshError('bad-input', records.length === 0
+    ? 'No SSH target has been saved yet.'
+    : `${String(records.length)} targets are saved, so this call has to name one.`, {
+    field: 'target',
+    hint: records.length === 0
+      ? 'Add one in Settings → Remote connections.'
+      : `Pass a target (${records.map(row => row.label).join(', ')}), or pick a default for this conversation.`,
+  })
+}
+
+/**
  * Build the operations over one runner, one storage handle and one credential face.
  * @param deps - the assembled dependencies.
  * @returns the methods the route dispatches to.
@@ -161,7 +211,7 @@ export function createOps(deps: OpsDeps): Ops {
   }
 
   /** The credentials for one probe, transient values winning. */
-  async function authFor(id: string | undefined, mode: AuthMode, transient?: { password?: unknown; passphrase?: unknown }): Promise<ProbeAuth> {
+  async function authFor(id: string | undefined, mode: AuthMode, transient?: { password?: unknown; passphrase?: unknown }): Promise<RemoteAuth> {
     const holder = secrets()
     const password = typeof transient?.password === 'string' && transient.password !== '' ? transient.password : undefined
     const passphrase = typeof transient?.passphrase === 'string' && transient.passphrase !== '' ? transient.passphrase : undefined
@@ -191,6 +241,10 @@ export function createOps(deps: OpsDeps): Ops {
           probeTimeoutMaxMs: MAX_PROBE_TIMEOUT_MS,
           outputMinBytes: MIN_MAX_OUTPUT_BYTES,
           outputMaxBytes: MAX_MAX_OUTPUT_BYTES,
+          remoteTimeoutMinMs: MIN_REMOTE_TIMEOUT_MS,
+          remoteTimeoutMaxMs: MAX_REMOTE_TIMEOUT_MS,
+          transferMinBytes: MIN_MAX_TRANSFER_BYTES,
+          transferMaxBytes: MAX_MAX_TRANSFER_BYTES,
         },
         askpass: helper.ready ? 'ready' : 'unavailable',
         ...(helper.ready || helper.failure === undefined ? {} : { askpassFailure: helper.failure.slice(0, 512) }),
@@ -221,6 +275,8 @@ export function createOps(deps: OpsDeps): Ops {
       const id = typeof params.id === 'string' ? params.id : ''
       if (id === '') throw new SshError('bad-input', 'Remove needs the id of one stored SSH target.', { field: 'id' })
       if (!(await state.remove(id))) throw new SshError('not-found', `No stored SSH target carries the id "${id}".`, { field: 'id' })
+      // A removed target must not keep pointing conversations at a dangling id.
+      await state.forgetSessionTargetsFor(id)
       let orphanSecrets = false
       const holder = secrets()
       if (holder !== undefined) {
@@ -237,7 +293,7 @@ export function createOps(deps: OpsDeps): Ops {
       const state = await store()
       const settings = state.settings()
       if (params.draft !== undefined) {
-        let draft: ProbeTarget & { auth?: AuthMode | undefined }
+        let draft: RemoteTarget & { auth?: AuthMode | undefined }
         try {
           draft = probeDraftSchema.parse(params.draft)
         } catch (error: unknown) {
@@ -291,6 +347,32 @@ export function createOps(deps: OpsDeps): Ops {
       return { connections: await viewsOf(state), probed: chosen.length, skipped: all.length - chosen.length, failures }
     },
 
+    async runCommand(params: Params) {
+      const state = await store()
+      const globalSettings = state.settings()
+      let input: ReturnType<typeof remoteRunSchema.parse>
+      try {
+        input = remoteRunSchema.parse(params.command !== undefined ? params : { command: params })
+      } catch (error: unknown) {
+        throw new SshError('bad-input', messageOf(error), { field: fieldOf(error) ?? 'command', hint: 'Fix the reported value and try again.' })
+      }
+      const record = pickTarget(state, params)
+      if (record.agentAccess === 'off') {
+        throw new SshError('bad-input', `"${record.label}" is set to agent access off, so no remote command may run on it.`, { field: 'target', hint: 'Turn agent access on for this target in the settings page.' })
+      }
+      const settings: SshSettings = {
+        ...globalSettings,
+        ...(record.maxOutputBytes === undefined ? {} : { maxOutputBytes: record.maxOutputBytes }),
+      }
+      const auth = await authFor(record.id, record.auth)
+      const run = await runner.run(targetOf(record), settings, auth, input.command, {
+        ...(input.timeoutMs === undefined && record.remoteTimeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs ?? record.remoteTimeoutMs }),
+        ...(record.maxOutputBytes === undefined ? {} : { maxOutputBytes: record.maxOutputBytes }),
+      })
+      const connection = await viewOf(state, record)
+      return { run, connection, connections: await viewsOf(state) }
+    },
+
     async configUpdate(params: Params) {
       const state = await store()
       const current = state.settings()
@@ -305,6 +387,8 @@ export function createOps(deps: OpsDeps): Ops {
         command: patch.command ?? current.command,
         probeTimeoutMs: patch.probeTimeoutMs ?? current.probeTimeoutMs,
         maxOutputBytes: patch.maxOutputBytes ?? current.maxOutputBytes,
+        remoteTimeoutMs: patch.remoteTimeoutMs ?? current.remoteTimeoutMs,
+        maxTransferBytes: patch.maxTransferBytes ?? current.maxTransferBytes,
       })
       return { settings }
     },
