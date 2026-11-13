@@ -19,6 +19,8 @@ import { TargetSecrets } from './secrets.ts'
 import { AskPassHelper } from './askpass.ts'
 import { SshTransport } from './transport.ts'
 import { createOps } from './ops.ts'
+import { registerRemoteTool } from './tool.ts'
+import type { TargetSnapshot } from './tool.ts'
 import { createRpcHandler } from './rpc.ts'
 import { RPC_ROUTE_PATH, SshError } from './types.ts'
 
@@ -32,7 +34,7 @@ export const name = 'ssh'
  * store has nothing for this plugin to do, so it stays inactive there instead of
  * throwing.
  */
-export const inject = ['connection', 'subprocess', 'storageDomain', 'credentials'] as const
+export const inject = ['connection', 'subprocess', 'storageDomain', 'credentials', 'tools'] as const
 
 /**
  * Activate the plugin: open the storage domain, prepare the askpass helper, then
@@ -79,6 +81,26 @@ export function apply(ctx: Context): void {
     store: requireStore,
     secrets: () => secrets,
     askpass: () => ({ ready: askpass.ready, ...(askpass.failure === undefined ? {} : { failure: askpass.failure }) }),
+  })
+
+  /** The agent-facing view of the stored targets, for the gate and for `targets`. */
+  const catalog = async (): Promise<TargetSnapshot[]> => {
+    const state = await requireStore()
+    return state.list().map(row => ({
+      id: row.id,
+      label: row.label,
+      host: row.host,
+      ...(row.user === undefined ? {} : { user: row.user }),
+      ...(row.port === undefined ? {} : { port: row.port }),
+      agentAccess: row.agentAccess,
+      allowedCommands: row.allowedCommands,
+    }))
+  }
+  registerRemoteTool(ctx, {
+    ops: async () => ops,
+    catalog,
+    sessionOf: exec => (exec.agent as { id?: string } | undefined)?.id,
+    sessionTargetOf: sessionId => store?.getSessionTarget(sessionId)?.targetId,
   })
   const handler = createRpcHandler(ops)
 

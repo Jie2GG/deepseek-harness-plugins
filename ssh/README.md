@@ -28,6 +28,7 @@ ssh/
     ├── transport.ts          # SshTransport: one option set, one child, run + probe
     ├── secrets.ts            # password and passphrase records in the credential store
     ├── askpass.ts            # the private helper that answers an ssh prompt
+    ├── tool.ts               # the agent-facing `remote` tool and its policy gate
     ├── ops.ts                # one method per RPC name, transport-agnostic
     ├── rpc.ts                # Request → Response, failure code → HTTP status
     ├── client.ts             # browser half: the page, its tabs, and its icon
@@ -164,6 +165,46 @@ with no terminal: `mkdtemp($TMPDIR/dsh-ssh-askpass-)` at mode `0700`, one
 prompt text `ssh` passes as `$1` and answers from `DSH_SSH_ASKPASS_PASSPHRASE` or
 `DSH_SSH_ASKPASS_PASSWORD`, falling back to whichever slot is filled.
 
+### Tool (`src/tool.ts`)
+
+One tool, `remote`, registered through `ctx.tools.register(defineTool(…))` inside
+`ctx.effect` — a third-party bundle needs no preset entry: the registry feeds its
+schemas into the system-prompt assembly on its own (the installed `dsh-github-flow`
+bundle is the live proof of that).
+
+| Field | Shape |
+| --- | --- |
+| `action` | `targets` \| `run` \| `ls` \| `read` \| `write` (uploads and downloads join next) |
+| `target` | id, display name (any case), `host`, or `user@host`; omitted means this conversation's chosen target, then a lone saved target |
+| `command` / `path` / `content` | the remote command line, an absolute remote path, and the exact text to write |
+| `overwrite` / `append` / `mkdir` | write behaviour; `mkdir` defaults to true |
+| `timeoutMs` / `maxBytes` | per-call overrides of the shared ceilings |
+| `output` | `oneOf` per action, each `additionalProperties: false`; `execute` returns the canonical value and `output.render` writes the transcript text |
+
+Policy is decided in `tools/pre-execute`, not inside the tool, which is what the
+tool-authoring docs prescribe for deployment policy:
+
+| Call | Verdict |
+| --- | --- |
+| `targets`, `ls`, `read` | allow |
+| `run`, program in the target's `allowedCommands` | allow |
+| `run`, program not allowlisted | **ask** |
+| `run`, a pipeline / redirection / substitution (no single leading program) | **ask** |
+| `write` | **ask** |
+| any action on a target with `agentAccess: off` | deny, naming the settings page |
+| storage unreadable at gate time | deny — running blind on a remote host is worse |
+
+An `ask` is resolved by the harness approval UI (`ctx.approval`, answered through
+the standard tool-approval surface) with `displayReason` supplied in English and
+Chinese, and a missing approval service turns an `ask` into a denial rather than a
+pass. The tool body re-checks only the hard stop (`agentAccess`), because it
+cannot know whether the gate already obtained consent.
+
+The name `remote` is a shared extension point: the registry is probed with
+`ctx.tools.get` first, and a taken name falls back to `ssh_remote` with a warning
+instead of failing the fiber; a race between probe and registration retries once.
+An unrelated registration fault still propagates.
+
 ### Client (`src/client.ts`)
 
 One component owns the page and its two tabs: `SshSection` holds the state, the
@@ -195,6 +236,17 @@ Facts checked against the running DSH (`0.2.2-rc.1`, `web` profile) while 0.2.0
 was written and re-checked through 0.5.1, and reproduced against a live server for
 the 0.5.1 fix, so the next round does not have to re-derive them:
 
+- Tool authoring, as documented in `docs/cookbook/adding-a-tool.md` and
+  `packages/core/tools`: `output` with `{ schema, render }` is mandatory;
+  `execute` returns only the canonical JSON value that the registry validates,
+  freezes, and hands to `render`; a thrown or invalid value becomes `isError`.
+  `ToolRegistrationOptions` has exactly one field (`when`), scope comes from the
+  calling context (registering at profile root makes the tool global), and the
+  registration is effect-owned, so disposing the fiber unregisters it.
+  `presentCall` / `presentResult` are consumed by native presenters only — the Web
+  client renders from `tool/call` and `tool/result` events, and a plugin that wants
+  a custom chat card registers its wire name in `tool.call.toolview`. The reserved
+  name `run_code` cannot be taken.
 - `ctx.storageDomain.open(spec)` → `Domain` with `table(name)` (`get`, `keys()`,
   `entries()` as `[key, value]`, `size`, `put`, `delete`, `deleteMany`,
   `update(key, fn)` atomic read-modify-write), `global.get()` /
@@ -285,10 +337,10 @@ the 0.5.1 fix, so the next round does not have to re-derive them:
 1. An agent tool over the same `ops` methods (`hosts` / `probe` / `run`), which
    is why every operation already returns an explicit status rather than a
    rendered string, and why the probe classification is a pure function.
-2. Remote command execution under host and command allowlists, reusing
-   `SshRunner` with a different argv tail.
-3. The stored secrets driving real remote commands, once `run` exists: the
-   authentication plumbing and the secret slots are already the same ones.
+2. File transfer over the same transport (`upload`, `download`, directories
+   through `scp -r`), which is the remaining action pair of this tool.
+3. A `tool.call.toolview` card registered under the tool's wire name, so a remote
+   command reads like the built-in terminal card instead of a generic row.
 4. Optional: read `~/.ssh/config` aliases as a suggested inventory (`ctx.fs`).
 
 ## Limits of 0.5.1

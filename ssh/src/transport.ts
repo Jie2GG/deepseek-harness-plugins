@@ -102,6 +102,41 @@ const DRAIN_MS = 400
 export const HOST_KEY_SETTING = 'StrictHostKeyChecking=accept-new'
 
 /**
+ * Quote one value for the **remote** shell.
+ *
+ * The remote command reaches the server as a single argument and is then parsed
+ * by the login shell, so every path the plugin builds must arrive as one word.
+ * A single-quoted POSIX word with embedded quotes doubled is exactly that.
+ * @param value - the raw path or argument.
+ * @returns the quoted word.
+ */
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/gu, `'\\''`)}'`
+}
+
+/**
+ * The program name a remote command line starts with, used for the per-target
+ * allowlist. A pipeline, a subshell, or an assignment has no single program, so
+ * the caller must fall back to asking.
+ * @param command - the remote command line as written.
+ * @returns the leading program name, or `undefined` when the line is not one
+ *   plain invocation.
+ */
+export function leadingProgram(command: string): string | undefined {
+  const text = command.trim()
+  if (text === '') return undefined
+  // A redirection or a substitution is not a plain invocation either; keeping the
+  // test cheap and conservative is the point: when in doubt, ask.
+  if (/[|;&<>`$(){}\\]/u.test(text)) return undefined
+  const first = text.split(/\s+/u)[0]
+  if (first === undefined || first === '') return undefined
+  // Compare allowlists on the bare name, so `/usr/bin/git` and `git` are the same
+  // program to a reader who allowlisted `git`.
+  const name = first.includes('/') ? first.slice(first.lastIndexOf('/') + 1) : first
+  return /^[a-z0-9][a-z0-9._-]*$/u.test(name) ? name : undefined
+}
+
+/**
  * Pick the {@link ProbeStatus} for one finished probe.
  * @param exitCode - the child's exit code, or `null` when a signal ended it.
  * @param detail - the captured output tail.
@@ -298,6 +333,7 @@ export class SshTransport {
     deadlineMs: number,
     controller: AbortController,
     external?: AbortSignal,
+    stdin?: string,
   ): Promise<Collected> {
     const startedAt = Date.now()
     const maxBytes = settings.maxOutputBytes
@@ -305,7 +341,7 @@ export class SshTransport {
       argv: [program, ...argvTail],
       cwd: process.env.HOME ?? process.cwd(),
       stdio: {
-        stdin: 'ignore',
+        stdin: stdin === undefined ? 'ignore' : { data: stdin },
         stdout: { maxBytes },
         stderr: { maxBytes },
       },
@@ -471,7 +507,8 @@ export class SshTransport {
    * @param settings - the executable and shared ceilings.
    * @param auth - the mode and secrets to authenticate with.
    * @param command - the remote command line.
-   * @param options - per-call deadline, output ceiling, and cancellation.
+   * @param options - per-call deadline, output ceiling, stdin payload, and
+   *   cancellation.
    * @returns the classified run result; a concurrency refusal throws.
    */
   async run(
@@ -479,7 +516,13 @@ export class SshTransport {
     settings: SshSettings,
     auth: RemoteAuth,
     command: string,
-    options: { readonly timeoutMs?: number | undefined; readonly maxOutputBytes?: number | undefined; readonly signal?: AbortSignal | undefined } = {},
+    options: {
+      readonly timeoutMs?: number | undefined
+      readonly maxOutputBytes?: number | undefined
+      readonly signal?: AbortSignal | undefined
+      /** Text fed to the remote command's stdin, for a file write. */
+      readonly stdin?: string | undefined
+    } = {},
   ): Promise<RemoteRunResult> {
     const deadline = Math.max(MIN_REMOTE_TIMEOUT_MS, options.timeoutMs ?? settings.remoteTimeoutMs)
     const bounded: SshSettings = options.maxOutputBytes === undefined ? settings : { ...settings, maxOutputBytes: options.maxOutputBytes }
@@ -495,7 +538,7 @@ export class SshTransport {
           stderr: `Could not resolve the ssh executable "${bounded.command}".`,
         }
       }
-      const collected = await this.#collect(program, [...flags, this.authority(target), command], bounded, env, deadline, controller, options.signal)
+      const collected = await this.#collect(program, [...flags, this.authority(target), command], bounded, env, deadline, controller, options.signal, options.stdin)
       const result: RemoteRunResult = {
         at: new Date().toISOString(),
         status: collected.outcome === 'cancelled'

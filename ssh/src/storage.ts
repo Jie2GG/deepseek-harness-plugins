@@ -218,6 +218,19 @@ export const settingsInputSchema = z.object({
   maxTransferBytes: z.number().int().min(MIN_MAX_TRANSFER_BYTES).max(MAX_MAX_TRANSFER_BYTES).optional(),
 }).strict()
 
+/**
+ * A path on the remote machine. Absolute or `~/`-rooted, and free of the shell
+ * metacharacters this plugin would otherwise have to quote around: every path is
+ * passed to the remote shell inside single quotes, and a metacharacter there is
+ * more likely a typo than an intention.
+ */
+export const remotePathSchema = z.string().min(1).max(4096).refine(
+  value => (value.startsWith('/') || value.startsWith('~/'))
+    && !/[\n\r\0]/u.test(value)
+    && !/[;|&<>()${}\\`]/u.test(value),
+  { message: 'Expected an absolute remote path, or one starting with "~/", without shell metacharacters' },
+)
+
 /** The program reference one call may name a target with. */
 export const targetRefSchema = z.string().trim().min(1).max(256)
 

@@ -10,9 +10,10 @@
  * @module @jie2gg/dsh-plugin-ssh/ops
  */
 
-import { connectionInputSchema, draftSecretSchema, MAX_CONCURRENT_PROBES, MAX_CONNECTIONS, MAX_MAX_OUTPUT_BYTES, MAX_MAX_TRANSFER_BYTES, MAX_PROBE_TIMEOUT_MS, MAX_REMOTE_TIMEOUT_MS, MIN_MAX_OUTPUT_BYTES, MIN_MAX_TRANSFER_BYTES, MIN_PROBE_TIMEOUT_MS, MIN_REMOTE_TIMEOUT_MS, probeDraftSchema, remoteRunSchema, secretPatchSchema, settingsInputSchema } from './storage.ts'
+import { connectionInputSchema, draftSecretSchema, remotePathSchema, MAX_CONCURRENT_PROBES, MAX_CONNECTIONS, MAX_MAX_OUTPUT_BYTES, MAX_MAX_TRANSFER_BYTES, MAX_PROBE_TIMEOUT_MS, MAX_REMOTE_TIMEOUT_MS, MIN_MAX_OUTPUT_BYTES, MIN_MAX_TRANSFER_BYTES, MIN_PROBE_TIMEOUT_MS, MIN_REMOTE_TIMEOUT_MS, probeDraftSchema, remoteRunSchema, secretPatchSchema, settingsInputSchema } from './storage.ts'
 import { SshError } from './types.ts'
 import type { AuthMode, ConnectionRecord, ConnectionView, ProbeOutcome, RemoteRunResult, SshSettings } from './types.ts'
+import { shellQuote } from './transport.ts'
 import type { RemoteAuth, RemoteTarget, SshTransport } from './transport.ts'
 import type { TargetStore } from './store.ts'
 import type { TargetSecrets } from './secrets.ts'
@@ -22,6 +23,40 @@ const PROBE_ALL_LIMIT = 12
 
 /** Plain JSON parameters as the route decoded them. */
 export type Params = Record<string, unknown>
+
+/** One remote file operation's canonical result. */
+export interface RemoteFileResult {
+  /** `list`, `read`, or `write`. */
+  action: 'list' | 'read' | 'write'
+  /** Whether the remote side accepted and completed the call. */
+  ok: boolean
+  /** Classified transport and command outcome. */
+  status: RemoteRunResult['status']
+  /** The target that was used, named for the reader. */
+  target: { id: string; label: string; host: string }
+  /** The remote path the call addressed. */
+  path: string
+  /** Listing text or written confirmation. */
+  entriesText?: string
+  /** File text, for a read. */
+  content?: string
+  /** Bytes returned or sent. */
+  bytes?: number
+  /** Lines of content returned. */
+  lines?: number
+  /** Whether the ceiling clipped the text. */
+  truncated?: boolean
+  /** Whether an existing remote file was replaced. */
+  overwrote?: boolean
+  /** Exit code of the remote command. */
+  exitCode?: number | null
+  /** Duration of the whole call. */
+  durationMs?: number
+  /** Failure or refusal explanation. */
+  message?: string
+  /** Hint naming the next step for a reader. */
+  hint?: string
+}
 
 /** One JSON-safe result the route hands back to the page. */
 export interface ListResult {
@@ -63,6 +98,12 @@ export interface Ops {
   probeAll(): Promise<{ connections: ConnectionView[]; probed: number; skipped: number; failures: { id: string; message: string }[] }>
   /** Run one remote command, resolving the target the same way the tool will. */
   runCommand(params: Params): Promise<{ run: RemoteRunResult; connection?: ConnectionView | undefined; connections: ConnectionView[] }>
+  /** List one remote path. */
+  listRemote(params: Params): Promise<RemoteFileResult>
+  /** Read one remote file as text. */
+  readRemote(params: Params): Promise<RemoteFileResult>
+  /** Write one remote file from text, with the overwrite guard. */
+  writeRemote(params: Params): Promise<RemoteFileResult>
   /** Replace the shared settings. */
   configUpdate(params: Params): Promise<{ settings: SshSettings }>
 }
@@ -77,6 +118,8 @@ export interface OpsDeps {
   secrets: () => TargetSecrets | undefined
   /** Whether the askpass helper is usable, for the page to say so up front. */
   askpass: () => { ready: boolean; failure?: string | undefined }
+  /** Optional per-call overrides the tool layer passes down. */
+  options?: FileCallOptions
 }
 
 /**
@@ -190,6 +233,12 @@ function pickTarget(state: TargetStore, params: Params): ConnectionRecord {
   })
 }
 
+/** Options one remote file call may override. */
+export interface FileCallOptions {
+  /** Output ceiling for this call. */
+  maxOutputBytes?: number
+}
+
 /**
  * Build the operations over one runner, one storage handle and one credential face.
  * @param deps - the assembled dependencies.
@@ -197,6 +246,7 @@ function pickTarget(state: TargetStore, params: Params): ConnectionRecord {
  */
 export function createOps(deps: OpsDeps): Ops {
   const { runner, store, secrets, askpass } = deps
+  const options = deps.options ?? {}
 
   /** One stored record as the page sees it. */
   async function viewOf(state: TargetStore, record: ConnectionRecord): Promise<ConnectionView> {
@@ -224,6 +274,80 @@ export function createOps(deps: OpsDeps): Ops {
       ...(storedPassphrase === undefined ? {} : { passphrase: storedPassphrase }),
     }
   }
+
+  /**
+   * Resolve everything a remote file call shares: the target, its settings, the
+   * credentials, and a validated path.
+   * @param params - route or tool parameters.
+   * @param action - which file action is running, for the refusal message.
+   * @returns the resolved pieces.
+   */
+  async function fileCall(params: Params, action: 'list' | 'read' | 'write') {
+    const state = await store()
+    const globalSettings = state.settings()
+    const record = pickTarget(state, params)
+    if (record.agentAccess === 'off') {
+      throw new SshError('bad-input', `"${record.label}" is set to agent access off, so no remote file work may run on it.`, { field: 'target' })
+    }
+    const rawPath = typeof params.path === 'string' ? params.path.trim() : ''
+    let path: string
+    try {
+      path = remotePathSchema.parse(rawPath)
+    } catch (error: unknown) {
+      throw new SshError('bad-input', `A remote ${action} needs an absolute path.`, { field: 'path', hint: messageOf(error) })
+    }
+    const settings: SshSettings = {
+      ...globalSettings,
+      ...(record.maxOutputBytes === undefined ? {} : { maxOutputBytes: record.maxOutputBytes }),
+    }
+    const auth = await authFor(record.id, record.auth)
+    return { state, record, settings, auth, path }
+  }
+
+  /**
+   * Shape one remote file result, mapping the plugin's own guard exits to plain
+   * language a reader can act on.
+   * @param action - which operation produced it.
+   * @param record - the target used.
+   * @param path - the remote path addressed.
+   * @param run - the transport result.
+   * @param entriesText - listing text, for a list.
+   * @param content - file text, for a read.
+   * @param extra - additional fields (bytes written, overwrite marker).
+   * @returns the canonical result the route and the tool both return.
+   */
+  function fileResult(
+    action: 'list' | 'read' | 'write',
+    record: ConnectionRecord,
+    path: string,
+    run: RemoteRunResult,
+    entriesText: string | undefined,
+    content: string | undefined,
+    extra: Record<string, unknown> = {},
+  ): RemoteFileResult {
+    const stderr = run.stderr ?? ''
+    const missing = /no such file or directory/iu.test(stderr)
+    const refused = run.exitCode === 17 || /refusing to overwrite/iu.test(stderr)
+    const target = { id: record.id, label: record.label, host: record.host }
+    const base: RemoteFileResult = {
+      action,
+      ok: run.status === 'succeeded',
+      status: refused ? 'exit-nonzero' : run.status,
+      target,
+      path,
+      ...(run.durationMs === undefined ? {} : { durationMs: run.durationMs }),
+      ...(run.exitCode === undefined && run.status === 'succeeded' ? {} : { exitCode: run.exitCode ?? null }),
+      ...(run.truncated === undefined ? {} : { truncated: run.truncated }),
+      ...(entriesText === undefined || entriesText === '' ? {} : { entriesText }),
+      ...(content === undefined ? {} : { content, bytes: Buffer.byteLength(content, 'utf8'), lines: content === '' ? 0 : content.split('\n').length }),
+      ...extra,
+    }
+    if (refused) return { ...base, ok: false, message: 'The remote file already exists.', hint: 'Pass overwrite (or append) to replace it.' }
+    if (missing) return { ...base, ok: false, message: `Nothing at ${path} on ${record.host}.`, hint: 'Check the path, or list the parent directory.' }
+    if (!base.ok) return { ...base, ...(stderr === '' ? {} : { message: stderr.slice(0, 512) }) }
+    return base
+  }
+
 
   return {
     async list(): Promise<ListResult> {
@@ -371,6 +495,45 @@ export function createOps(deps: OpsDeps): Ops {
       })
       const connection = await viewOf(state, record)
       return { run, connection, connections: await viewsOf(state) }
+    },
+
+    async listRemote(params: Params): Promise<RemoteFileResult> {
+      const { state, record, settings, auth, path } = await fileCall(params, 'list')
+      const run = await runner.run(targetOf(record), settings, auth, `ls -la -- ${shellQuote(path)}`, {
+        maxOutputBytes: settings.maxOutputBytes,
+      })
+      return fileResult('list', record, path, run, run.stdout === undefined || run.stdout.trim() === '' ? undefined : run.stdout, undefined)
+    },
+
+    async readRemote(params: Params): Promise<RemoteFileResult> {
+      const { state, record, settings, auth, path } = await fileCall(params, 'read')
+      const run = await runner.run(targetOf(record), settings, auth, `cat -- ${shellQuote(path)}`, {
+        maxOutputBytes: options.maxOutputBytes ?? settings.maxOutputBytes,
+      })
+      const content = run.stdout ?? ''
+      return fileResult('read', record, path, run, undefined, content)
+    },
+
+    async writeRemote(params: Params): Promise<RemoteFileResult> {
+      const { state, record, settings, auth, path } = await fileCall(params, 'write')
+      const content = typeof params.content === 'string' ? params.content : ''
+      const append = params.append === true
+      const mkdir = params.mkdir !== false
+      const overwrite = params.overwrite === true
+      const quoted = shellQuote(path)
+      const guard = overwrite || append
+        ? ''
+        : `if [ -e ${quoted} ]; then echo 'ssh-plugin: refusing to overwrite an existing file' >&2; exit 17; fi; `
+      const parent = path.replace(/\\/gu, '/').replace(/\/+[^/]*$/u, '') || '/'
+      const prepare = mkdir && parent !== '' ? `mkdir -p -- ${shellQuote(parent)} && ` : ''
+      const run = await runner.run(targetOf(record), settings, auth, `${guard}${prepare}cat ${append ? '>>' : '>'} ${quoted}`, {
+        stdin: content,
+        maxOutputBytes: settings.maxOutputBytes,
+      })
+      return fileResult('write', record, path, run, undefined, undefined, {
+        bytes: Buffer.byteLength(content, 'utf8'),
+        overwrote: overwrite && !append,
+      })
     },
 
     async configUpdate(params: Params) {
