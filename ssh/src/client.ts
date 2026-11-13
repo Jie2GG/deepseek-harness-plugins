@@ -37,10 +37,13 @@ window.__ModuleLoader__.load({
     /** The three authentication modes, in display order. */
     const AUTH_OPTIONS: readonly { value: AuthMode; labelKey: string; hintKey: string }[] = [
       { value: 'key', labelKey: 'authKey', hintKey: 'authKeyHint' },
-      { value: 'key+password', labelKey: 'authBoth', hintKey: 'authBothHint' },
       { value: 'password', labelKey: 'authPassword', hintKey: 'authPasswordHint' },
     ]
-    /** Dictionary key naming each mode, for list rows. */
+    /**
+     * Dictionary key naming each mode for a list row. `key+password` was an
+     * offered choice in 0.4.0 only; a stored row that carries it still shows a
+     * label and still probes the way it always did.
+     */
     const AUTH_LABEL: Record<string, string> = { key: 'authKey', 'key+password': 'authBoth', password: 'authPassword' }
 
     /** Browser-facing copy. Both baseline locales are required by the locale service. */
@@ -87,10 +90,9 @@ window.__ModuleLoader__.load({
         labelHint: 'Left empty, the address is used.',
         authTitle: 'Authentication',
         authKey: 'Key',
-        authBoth: 'Key + password',
+        authBoth: 'Key + password (0.4.0)',
         authPassword: 'Password',
         authKeyHint: 'Uses ssh-agent or a private key with no passphrase. The passphrase field below covers an encrypted key.',
-        authBothHint: 'Tries the key first, then falls back to the account password.',
         authPasswordHint: 'Password only: publickey offers are skipped.',
         keyFileLabel: 'Private key file',
         passphraseLabel: 'Key passphrase',
@@ -189,10 +191,9 @@ window.__ModuleLoader__.load({
         labelHint: '留空就用地址当名称。',
         authTitle: '登录方式',
         authKey: '密钥',
-        authBoth: '密钥 + 密码',
+        authBoth: '密钥 + 密码（旧版）',
         authPassword: '密码',
         authKeyHint: '使用 ssh-agent 或无口令私钥；私钥带口令时填下面的口令框。',
-        authBothHint: '先试密钥，再退回账号密码。',
         authPasswordHint: '只用密码：不再提供 publickey。',
         keyFileLabel: '私钥文件',
         passphraseLabel: '私钥口令',
@@ -1215,9 +1216,9 @@ window.__ModuleLoader__.load({
           if (fieldError === key) setFieldError(null)
         }
         const showAuth = modern
-        const showKey = showAuth && (mode === 'key' || mode === 'key+password')
-        const showKeyPassphrase = showAuth && (mode === 'key' || mode === 'key+password')
-        const showPassword = showAuth && (mode === 'password' || mode === 'key+password')
+        const showKey = showAuth && mode === 'key'
+        const showKeyPassphrase = showAuth && mode === 'key'
+        const showPassword = showAuth && mode === 'password'
         const parsed = parseAddress(draft.address ?? '')
         const summary = parsed.host === '' ? '' : `${parsed.user === '' ? '' : `${parsed.user}@`}${parsed.host}${parsed.port === '' ? '' : `:${parsed.port}`}`
         return h('div', { class: 'dshssh-form' },

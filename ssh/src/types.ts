@@ -26,8 +26,15 @@ export type SshErrorCode = 'bad-input' | 'not-found' | 'busy' | 'storage-error' 
 /** How one target authenticates. */
 export type AuthMode = 'password' | 'key' | 'key+password'
 
-/** The three modes the page offers, in display order. */
-export const AUTH_MODES: readonly AuthMode[] = ['key', 'key+password', 'password']
+/** The modes the page may choose and a write may set, in display order. */
+export const AUTH_MODES: readonly AuthMode[] = ['key', 'password']
+
+/**
+ * Every mode this plugin still reads. `key+password` was an offered choice in
+ * 0.4.0 only: a stored row that carries it keeps its previous probe behaviour,
+ * but nothing new can select it.
+ */
+export const STORED_AUTH_MODES: readonly AuthMode[] = ['key', 'key+password', 'password']
 
 /** Which secret slots a target has, reported without any value. */
 export interface SecretStatus {

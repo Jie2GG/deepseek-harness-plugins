@@ -15,7 +15,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-subprocess'
 import { MAX_CONCURRENT_PROBES } from './storage.ts'
 import { SshError } from './types.ts'
-import type { ProbeOutcome, ProbeStatus, SshSettings } from './types.ts'
+import type { AuthMode, ProbeOutcome, ProbeStatus, SshSettings } from './types.ts'
 
 /** The identity fields one probe needs from a target. */
 export interface ProbeTarget {
@@ -99,7 +99,7 @@ function tail(stdout: string, stderr: string): string | undefined {
 /** The credentials one probe may need, supplied per call and never stored here. */
 export interface ProbeAuth {
   /** How the target authenticates; omission keeps the agent-or-key probe. */
-  mode?: 'password' | 'key' | 'key+password'
+  mode?: AuthMode
   /** Login password, for the modes that use one. */
   password?: string | undefined
   /** Private-key passphrase, handed to the askpass helper. */

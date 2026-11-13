@@ -1,8 +1,8 @@
 {
   "name": "@jie2gg/dsh-plugin-ssh",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
-  "description": "Adds a Remote connections page to the settings panel: SSH targets you edit from one address field and test from the browser, authenticating with a key, a password, or both.",
+  "description": "Adds a Remote connections page to the settings panel: SSH targets you edit from one address field and test from the browser, logging in with a key or with a password.",
   "keywords": [
     "dsh",
     "dsh-bundle",

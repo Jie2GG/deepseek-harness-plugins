@@ -4,6 +4,33 @@ All notable changes to `@jie2gg/dsh-plugin-ssh` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project uses [semantic versioning](https://semver.org/).
 
+## 0.5.0
+
+### Changed
+
+- **Two authentication modes instead of three.** The picker offers **Key** and
+  **Password**; the `Key + password` choice 0.4.0 introduced is gone, because it
+  was a middle ground OpenSSH already provides inside the key mode: fill the
+  passphrase field and the same askpass path answers it, leave it empty and the
+  agent or an unencrypted key is used with `BatchMode=yes`.
+- The write path rejects `key+password` (`save` and a draft probe both fail as
+  `bad-input` on the `auth` field), while the read path still accepts it, so a
+  record that carries it — from 0.4.0 or from a hand-edited JSON file — keeps its
+  row label and probes with exactly the options it always did, instead of turning
+  the whole list into a `storage-error`.
+- The form therefore shows the key file and passphrase fields only in key mode
+  and the password field only in password mode, and the strip has two segments.
+
+### Notes
+
+- The record format stays at `version: 2`; nothing is migrated. No target had
+  been saved when this shipped, so in practice no stored row carries the removed
+  mode — the tolerance is for hand-edited files and for the general rule that
+  other readers meet what was written earlier.
+- `askpass.ts` and the credential-record layout are untouched: a password still
+  lives as a `grant` record at `ssh/<target>-password`, and a passphrase at
+  `ssh/<target>-passphrase`.
+
 ## 0.4.0
 
 ### Added

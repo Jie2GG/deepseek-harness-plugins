@@ -1,9 +1,9 @@
 # @jie2gg/dsh-plugin-ssh
 
 Manage the SSH targets this machine reaches from the Harness settings panel: a
-named inventory written in one address field, three authentication modes (key, key
-+ password, password) whose secrets live in the credential store, and the
-connectivity probes and client settings that use them. User-facing wording lives
+named inventory written in one address field, two authentication modes (key or
+password) whose secrets live in the credential store, and the connectivity probes
+and client settings that use them. User-facing wording lives
 in [docs/DETAIL.md](docs/DETAIL.md) (and
 [docs/DETAIL.zh.md](docs/DETAIL.zh.md) for Chinese).
 
@@ -99,8 +99,9 @@ owner peer of the served page is admitted and every other principal is refused.
 
 A connection row is `{ id, label, host, user?, port?, identityFile?, proxyJump?,
 extraArgs?, note?, createdAt, updatedAt, lastProbe?, auth }` plus
-`secrets: { password, passphrase }`. `auth` is `key`, `key+password`, or
-`password`; `secrets` is presence only — no response ever carries a stored value,
+`secrets: { password, passphrase }`. `auth` is `key` or `password` on write;
+`key+password` is still read (it was offered in 0.4.0 only) and probes as it
+always did. `secrets` is presence only — no response ever carries a stored value,
 and a `secrets` patch writes a string, forgets a `null`, and leaves an absent key
 alone. `limits` carries the fixed bounds including the accepted ranges, so the
 settings tab states them without mirroring them in browser code. Failure codes now
@@ -240,6 +241,11 @@ re-derive them:
   `PreferredAuthentications=password,keyboard-interactive` and no key
   restriction. A mode that needs a secret while the helper is unavailable is
   refused as `secret-error` rather than left to burn the deadline.
+- Since 0.5.0 the page offers two modes: `connectionInputSchema` and
+  `probeDraftSchema` accept `key | password`, while `connectionRecordSchema` still
+  accepts the 0.4.0-only `key+password` and `SshRunner` still implements its
+  branch, so a legacy or hand-edited record reads and probes without turning the
+  list into a `storage-error`. The record format stays at version 2.
 - The probe command line, asserted by the offline smoke run:
   `ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -p 22022
   -i /home/j/.ssh/id -J jump -o PreferredAuthentications=publickey jiegg@build-box true`.

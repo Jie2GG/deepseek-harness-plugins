@@ -70,8 +70,11 @@ const flagSchema = z.string().min(1).max(256).refine(
   { message: 'Expected an ssh option flag starting with "-"' },
 )
 
-/** How one target authenticates. */
+/** How one target authenticates, including the mode 0.4.0 alone offered. */
 export const authModeSchema = z.enum(['password', 'key', 'key+password'])
+
+/** The modes a page may send: key, or password. */
+export const authChoiceSchema = z.enum(['key', 'password'])
 
 /** One classified probe result kept beside a target. */
 export const probeOutcomeSchema = z.object({
@@ -127,7 +130,7 @@ export const connectionInputSchema = z.object({
   proxyJump: hostSchema.optional(),
   extraArgs: z.array(flagSchema).max(16).optional(),
   note: z.string().trim().min(1).max(512).optional(),
-  auth: authModeSchema.optional(),
+  auth: authChoiceSchema.optional(),
 }).strict()
 
 /** What a `save` may write into the credential store. */
@@ -144,7 +147,7 @@ export const probeDraftSchema = z.object({
   identityFile: pathSchema.optional(),
   proxyJump: hostSchema.optional(),
   extraArgs: z.array(flagSchema).max(16).optional(),
-  auth: authModeSchema.optional(),
+  auth: authChoiceSchema.optional(),
 }).strict()
 
 /** Secrets typed into an unsaved form: used for one probe, never stored. */

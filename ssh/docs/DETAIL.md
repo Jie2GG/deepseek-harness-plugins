@@ -2,10 +2,10 @@
 
 Manages the SSH targets this machine reaches: a named list of hosts and OpenSSH
 aliases, how each one logs in, and a connectivity test you can run from the
-browser. Version **0.4.0** adds authentication — a key, a key that falls back to a
-password, or a password alone — and a new target now takes one address field plus
-the secrets that mode asks for. The page keeps its two tabs, and the agent still
-runs nothing on your behalf.
+browser. Version **0.5.0** settles the authentication choice at two modes — **key**
+or **password** — after dropping the third one 0.4.0 offered; a new target still
+takes one address field plus the secrets that mode asks for, the page keeps its
+two tabs, and the agent still runs nothing on your behalf.
 
 ## Where the page is
 
@@ -20,7 +20,7 @@ General settings. Across its top sit two tabs:
 Both tabs read and write one page state, so a probe you started on the first tab
 keeps running while you edit values on the second.
 
-## What version 0.4.0 does
+## What version 0.5.0 does
 
 - **SSH target list.** Add, edit, and delete named targets. One field takes the
   address — `[user@]host[:port]`, an `ssh://` form, an IPv6 literal in brackets,
@@ -28,10 +28,12 @@ keeps running while you edit values on the second.
   options** section holds the jump host, extra `ssh` arguments (one `ssh` argv
   entry per line), and a note. The display name is optional and falls back to the
   address. The list holds up to 64 targets.
-- **Three ways to log in.** Pick **Key** (ssh-agent, or an unencrypted key, with
-  an optional passphrase for an encrypted one), **Key + password** (the key is
-  tried first and a password answers as the fallback), or **Password** (publickey
-  offers are skipped). The choice is remembered per target and shown on its row.
+- **Two ways to log in.** Pick **Key** (ssh-agent or a private key, with an
+  optional passphrase when the key is encrypted) or **Password** (publickey offers
+  are skipped). The choice is remembered per target and shown on its row. The
+  **Key + password** choice 0.4.0 offered is gone from the picker: a saved target
+  that still carries it keeps its label and still probes exactly as before, it can
+  only no longer be selected or written anew.
 - **Connectivity test.** `Test` runs one probe per target; `Test all` covers the
   first 12 in one round. A probe connects with the same options and secrets the
   target will use and runs only `true` on the far side: a key target keeps
@@ -106,7 +108,7 @@ None of these exist yet, and the interface may still change.
 
 ## Configuration
 
-The bundle inserts one plugin row with `config: {}` and 0.4.0 declares no
+The bundle inserts one plugin row with `config: {}` and 0.5.0 declares no
 configuration fields: everything the page edits lives either in the plugin's own
 storage or in the credential store. Any key you add to that row is currently
 ignored.
