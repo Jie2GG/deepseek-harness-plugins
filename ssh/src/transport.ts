@@ -562,8 +562,16 @@ export class SshTransport {
       readonly timeoutMs?: number | undefined
       readonly maxOutputBytes?: number | undefined
       readonly signal?: AbortSignal | undefined
-      /** Text fed to the remote command's stdin, for a file write. */
+      /** Text fed to the remote command's stdin, for a file write or a prompt answer. */
       readonly stdin?: string | undefined
+      /**
+       * Ask the server for a pseudo-terminal (`-tt`). This is what a command that
+       * inspects its stdout — `sudo` reading a password, `ssh` hopping again, a
+       * colourised `ls` — needs in order to stop waiting for a terminal that was
+       * never there. The trade is that the server then merges stderr into stdout
+       * and ends lines with CRLF, so the answer arrives noisier.
+       */
+      readonly tty?: boolean | undefined
     } = {},
   ): Promise<RemoteRunResult> {
     const deadline = Math.max(MIN_REMOTE_TIMEOUT_MS, options.timeoutMs ?? settings.remoteTimeoutMs)
@@ -580,7 +588,11 @@ export class SshTransport {
           stderr: `Could not resolve the ssh executable "${bounded.command}".`,
         }
       }
-      const collected = await this.#collect(program, [...flags, this.authority(target), command], bounded, env, deadline, controller, options.signal, options.stdin)
+      // `-tt` must precede the destination, like every other ssh option. Two t's,
+      // not one: a single `-t` defers to the local side having a terminal, which a
+      // spawned child never does.
+      const ttyFlags = options.tty === true ? ['-tt'] : []
+      const collected = await this.#collect(program, [...flags, ...ttyFlags, this.authority(target), command], bounded, env, deadline, controller, options.signal, options.stdin)
       const result: RemoteRunResult = {
         at: new Date().toISOString(),
         status: collected.outcome === 'cancelled'
@@ -591,6 +603,8 @@ export class SshTransport {
               ? 'failed'
               : classifyRun(collected.exitCode, `${collected.stdout}\n${collected.stderr}`),
         durationMs: collected.durationMs,
+        ...(options.tty === true ? { tty: true } : {}),
+        ...(options.stdin === undefined ? {} : { stdinBytes: Buffer.byteLength(options.stdin, 'utf8') }),
         ...(collected.exitCode === null && collected.outcome !== 'exit' ? {} : { exitCode: collected.exitCode }),
         ...(collected.stdout === '' ? {} : { stdout: collected.stdout }),
         ...(collected.stderr === '' && collected.error === undefined ? {} : {

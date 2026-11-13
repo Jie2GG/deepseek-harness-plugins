@@ -187,9 +187,11 @@ ignored.
 - A page probe authenticates and then runs only `true` on the server; real commands
   come from the agent's `exec` action, and nothing on the server is installed or
   upgraded by this plugin.
-- A remote call is waited for: no interactive session, no PTY, no background job to
-  poll, so a command that needs terminal input or outlives one reply hits its
-  deadline.
+- A remote call is waited for: there is no terminal to type into live and no
+  background job to poll. A command that needs a terminal can be given one
+  (`tty: true`), and one that needs an answer can be handed it (`input: "…"`), but the
+  call still runs to completion or its deadline — a session you converse with, and a
+  job you leave and come back to, are what is missing.
 - After the plugin package is replaced, the running Host keeps its previous module
   until it restarts: before that, the agent has no `ssh` tool and new ceilings
   are not in effect. The settings page follows the browser bundle and updates on its

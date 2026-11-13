@@ -760,6 +760,8 @@ export function createOps(deps: OpsDeps): Ops {
       const run = await runner.run(targetOf(record), settings, auth, input.command, {
         ...(input.timeoutMs === undefined && record.remoteTimeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs ?? record.remoteTimeoutMs }),
         ...(record.maxOutputBytes === undefined ? {} : { maxOutputBytes: record.maxOutputBytes }),
+        ...(input.tty === undefined ? {} : { tty: input.tty }),
+        ...(input.input === undefined ? {} : { stdin: input.input }),
       })
       const connection = await viewOf(state, record)
       return { run, connection, connections: await viewsOf(state) }

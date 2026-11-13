@@ -187,6 +187,8 @@ bundle is the live proof of that).
 | `localPath`, `recursive` | the local side of a transfer; relative paths resolve inside the conversation workspace |
 | `target` | id, display name (any case), `host`, or `user@host`; omitted means this conversation's chosen target, then a lone saved target |
 | `command` / `path` / `content` | the remote command line, an absolute remote path, and the exact text to write |
+| `tty` / `input` | for `exec`: run under `ssh -tt` (for a command that inspects its own output), and text fed to its stdin |
+| `localPath` / `recursive` | for `upload` and `download`: the workspace-side path, and whether a directory moves |
 | `oldText` / `newText` | for `edit`: the exact text to find (copied from a read) and its replacement; an empty `newText` deletes |
 | `all` / `replaceFirst` / `backup` | for `edit`: replace every occurrence / only the first / skip the `<path>.dsh-bak` copy |
 | `overwrite` / `append` / `mkdir` | write behaviour; `mkdir` defaults to true |

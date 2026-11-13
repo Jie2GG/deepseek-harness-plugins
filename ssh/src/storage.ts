@@ -263,6 +263,10 @@ export const remoteRunSchema = z.object({
   sessionId: z.string().min(1).max(256).optional(),
   timeoutMs: z.number().int().min(MIN_REMOTE_TIMEOUT_MS).max(MAX_REMOTE_TIMEOUT_MS).optional(),
   maxOutputBytes: z.number().int().min(MIN_MAX_OUTPUT_BYTES).max(MAX_MAX_OUTPUT_BYTES).optional(),
+  /** Ask the server for a pseudo-terminal, for a command that needs one. */
+  tty: z.boolean().optional(),
+  /** Text sent to the command's stdin, for a prompt answer or a piped body. */
+  input: z.string().max(1_000_000).optional(),
 }).strict()
 
 /** The one domain this plugin owns. */

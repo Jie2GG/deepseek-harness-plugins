@@ -180,6 +180,10 @@ export interface RemoteRunResult {
   truncated?: boolean | undefined
   /** Wall-clock duration in whole milliseconds. */
   durationMs?: number | undefined
+  /** Whether the call ran under a requested pseudo-terminal (`-tt`). */
+  tty?: boolean | undefined
+  /** Bytes handed to the command's stdin, when stdin was used. */
+  stdinBytes?: number | undefined
 }
 
 /** Plugin-wide settings, held in the domain's global slot. */

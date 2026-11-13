@@ -4,6 +4,37 @@ All notable changes to `@jie2gg/dsh-plugin-ssh` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project uses [semantic versioning](https://semver.org/).
 
+## 0.15.0
+
+### Added
+
+- **`exec` can give the command a terminal and an answer.** `tty: true` runs it under
+  `ssh -tt`, which is what a command that inspects its own output needs — `sudo`
+  typing a password, a colourised listing, another ssh hop — instead of waiting for a
+  terminal that was never there. `input: "…"` feeds the command's stdin, so a prompt
+  can be answered or a body piped in without a shell heredoc. Both are reported on the
+  result (`tty`, `stdinBytes`) and stated in the transcript line, including the trade:
+  under a pseudo-terminal the server merges stderr into stdout and ends lines with
+  CR-LF.
+
+### Fixed
+
+- **Arguments the caller sent were silently dropped.** The defensive reader mapped
+  only part of the surface it declares, so a field added later — a transfer's
+  `localPath`, an `edit`'s `oldText`, the new `tty` and `input` — arrived as though the
+  caller had omitted it: an upload prompt rendered `Upload <local path>`, and a
+  well-formed `edit` would have been refused for a missing needle the caller had in
+  fact passed. Only a live call could show it, because the offline suites handed the
+  dispatch pre-built arguments. `readArgs` now maps every declared field, and a new
+  suite section calls the reader directly: each field is checked to survive, an explicit
+  `false` stays `false`, an empty `input` stays distinguishable from an omitted one, a
+  wrongly typed value is dropped rather than coerced, and the upload and edit prompts
+  are asserted to name what the caller actually passed.
+
+### Changed
+
+- Two parameter descriptions in the tool schema still spoke of `run`; they say `exec`.
+
 ## 0.14.0
 
 ### Added

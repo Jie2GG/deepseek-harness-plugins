@@ -158,6 +158,10 @@ export interface RemoteCallArgs {
   recursive?: boolean | undefined
   timeoutMs?: number | undefined
   maxBytes?: number | undefined
+  /** For `exec`: ask the server for a pseudo-terminal. */
+  tty?: boolean | undefined
+  /** For `exec`: text fed to the command's stdin. */
+  input?: string | undefined
   /** For `upload`/`download`: the path on this machine, relative to the session workspace. */
   localPath?: string | undefined
 }
@@ -191,6 +195,18 @@ export function readArgs(exec: Readonly<PendingCall>): RemoteCallArgs {
     mkdir: typeof raw.mkdir === 'boolean' ? raw.mkdir : undefined,
     timeoutMs: number(raw.timeoutMs),
     maxBytes: number(raw.maxBytes),
+    // Every field the interface declares is mapped here: the dispatch and the gate
+    // both read this one view, and a field left out silently arrives as "missing"
+    // with a message that blames the caller for something it did pass.
+    localPath: text(raw.localPath),
+    recursive: typeof raw.recursive === 'boolean' ? raw.recursive : undefined,
+    oldText: text(raw.oldText),
+    newText: typeof raw.newText === 'string' ? raw.newText : undefined,
+    all: typeof raw.all === 'boolean' ? raw.all : undefined,
+    replaceFirst: typeof raw.replaceFirst === 'boolean' ? raw.replaceFirst : undefined,
+    backup: typeof raw.backup === 'boolean' ? raw.backup : undefined,
+    tty: typeof raw.tty === 'boolean' ? raw.tty : undefined,
+    input: typeof raw.input === 'string' ? raw.input : undefined,
   }
 }
 
@@ -577,6 +593,8 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           params.command = call.command
           if (call.timeoutMs !== undefined) params.timeoutMs = call.timeoutMs
           if (call.maxBytes !== undefined) params.maxOutputBytes = call.maxBytes
+          if (call.tty === true) params.tty = true
+          if (call.input !== undefined) params.input = call.input
           const result = await operations.runCommand(params)
           // Remembered from the mapped payload: that is where the target this call
           // actually used is spelled out.
