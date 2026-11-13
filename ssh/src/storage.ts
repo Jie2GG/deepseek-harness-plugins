@@ -234,6 +234,25 @@ export const remotePathSchema = z.string().min(1).max(4096).refine(
 /** The program reference one call may name a target with. */
 export const targetRefSchema = z.string().trim().min(1).max(256)
 
+/** What one file transfer call may send. */
+export const transferInputSchema = z.object({
+  target: targetRefSchema.optional(),
+  sessionId: z.string().min(1).max(256).optional(),
+  path: remotePathSchema,
+  localPath: z.string().min(1).max(4096),
+  localDir: z.string().min(1).max(4096).optional(),
+  recursive: z.boolean().optional(),
+  overwrite: z.boolean().optional(),
+  maxBytes: z.number().int().min(MIN_MAX_TRANSFER_BYTES).max(MAX_MAX_TRANSFER_BYTES).optional(),
+  timeoutMs: z.number().int().min(MIN_REMOTE_TIMEOUT_MS).max(MAX_REMOTE_TIMEOUT_MS).optional(),
+}).strict()
+
+/** What one conversation-target call may send. */
+export const sessionTargetInputSchema = z.object({
+  sessionId: z.string().min(1).max(256),
+  targetId: idSchema.optional(),
+}).strict()
+
 /** What the page or the tool layer may send for one remote command. */
 export const remoteRunSchema = z.object({
   command: z.string().trim().min(1).max(8192).refine(

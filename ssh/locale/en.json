@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "SSH manager",
-    "description": "Adds a Remote connections page to the settings panel: SSH targets you edit from one address field and test from the browser, logging in with a key or with a password.",
+    "description": "Runs commands and moves files on stored SSH servers: a Remote connections settings page for the inventory and credentials, plus a `remote` tool the conversation uses.",
     "detail": "docs/DETAIL.md"
   }
 }

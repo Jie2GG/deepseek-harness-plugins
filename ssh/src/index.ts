@@ -13,7 +13,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-subprocess'
+import type {} from '@deepseek-ai/dsh-fs'
+import type {} from '@deepseek-ai/dsh-working-directory'
 import { sshTargetsDomain } from './storage.ts'
+import { resolveLocalInside } from './local-path.ts'
 import { TargetStore } from './store.ts'
 import { TargetSecrets } from './secrets.ts'
 import { AskPassHelper } from './askpass.ts'
@@ -34,7 +37,7 @@ export const name = 'ssh'
  * store has nothing for this plugin to do, so it stays inactive there instead of
  * throwing.
  */
-export const inject = ['connection', 'subprocess', 'storageDomain', 'credentials', 'tools'] as const
+export const inject = ['connection', 'subprocess', 'storageDomain', 'credentials', 'tools', 'fs', 'workingDirectory'] as const
 
 /**
  * Activate the plugin: open the storage domain, prepare the askpass helper, then
@@ -80,7 +83,8 @@ export function apply(ctx: Context): void {
     runner,
     store: requireStore,
     secrets: () => secrets,
-    askpass: () => ({ ready: askpass.ready, ...(askpass.failure === undefined ? {} : { failure: askpass.failure }) }),
+    askpass: () => ({ ready: askpass.ready, ...(askpass.path === undefined ? {} : { path: askpass.path }), ...(askpass.failure === undefined ? {} : { failure: askpass.failure }) }),
+    localExists: path => existsLocally(path),
   })
 
   /** The agent-facing view of the stored targets, for the gate and for `targets`. */
@@ -96,9 +100,27 @@ export function apply(ctx: Context): void {
       allowedCommands: row.allowedCommands,
     }))
   }
+  /** Whether a local path is already taken, asked through the mounted provider. */
+  async function existsLocally(localPath: string): Promise<boolean> {
+    try {
+      return (await ctx.fs.stat(await ctx.fs.resolve(localPath))) !== undefined
+    } catch {
+      return false
+    }
+  }
+
   registerRemoteTool(ctx, {
     ops: async () => ops,
     catalog,
+    local: {
+      async dirOf(exec) {
+        const agent = exec.agent
+        if (agent === undefined) return undefined
+        return await ctx.workingDirectory.ensure(agent as never)
+      },
+      exists: existsLocally,
+      resolve: (localPath, dir) => resolveLocalInside(localPath, dir),
+    },
     sessionOf: exec => (exec.agent as { id?: string } | undefined)?.id,
     sessionTargetOf: sessionId => store?.getSessionTarget(sessionId)?.targetId,
   })

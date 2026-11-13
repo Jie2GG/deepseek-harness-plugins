@@ -2,11 +2,11 @@
 
 Manages the SSH targets this machine reaches: a named list of hosts and OpenSSH
 aliases, how each one logs in, and a connectivity test you can run from the
-browser. Version **0.5.1** settles the authentication choice at two modes — **key**
-or **password** — and fixes first contact with an unknown host key, which used to
-stall until the probe timed out. A new target still takes one address field plus
-the secrets that mode asks for, the page keeps its two tabs, and the agent still
-runs nothing on your behalf.
+browser. From **0.6.0** the conversation can use that server too: the agent gets
+one `remote` tool that runs commands, lists and reads files, writes text, and moves
+files with `scp` — all against the target you picked for the conversation, with the
+credentials you stored on this page. Nothing is installed or upgraded on either
+side.
 
 ## Where the page is
 
@@ -48,6 +48,30 @@ keeps running while you edit values on the second.
   ceiling. That tab also states the bounds the plugin fixes in code, so a value
   outside a range is not a surprise.
 
+## Using it from the chat
+
+Open a conversation and choose the server in the composer's session menu (the row
+labelled **Remote server**, next to the model and reasoning controls). From then on
+the agent can call `remote` without naming a host: it lists what is saved, runs a
+command, lists or reads a remote path, writes a file, and uploads or downloads one.
+
+What runs without interrupting you:
+
+| The call | What happens |
+| --- | --- |
+| list, read, download, or show the saved targets | runs immediately |
+| a command whose program is in that target's **command allowlist** | runs immediately |
+| any other command, and any write or upload | asks you first, in your language, showing the server and the exact command or path |
+| anything against a target with **agent access** turned off | refused |
+
+An allowlisted program is a bare name (`git`, `systemctl`); a pipeline, a redirect,
+or a substitution is never treated as one program, so it is always shown to you. A
+profile without an approval surface refuses the asking calls rather than running
+them unattended.
+
+Local files live inside that conversation's workspace: a transfer path outside it,
+including one that walks up with `..`, is refused before anything moves.
+
 ## Where your data is kept
 
 The plugin owns its data: targets and settings are stored in its own storage
@@ -61,6 +85,8 @@ Two consequences worth knowing:
 - Deleting the plugin leaves that JSON file in place until you remove it.
 - Backing up `$DSH_HOME/storages/` covers this plugin's data; the patch file
   alone does not.
+- The list also remembers which target each conversation picked, in the same file;
+  delete a target and those choices go away with it.
 
 ## Passwords and passphrases
 
@@ -115,13 +141,11 @@ an unanswerable question.
 
 ## Planned behaviour
 
-1. An agent tool over the same operations, so a model can ask whether a target
-   answers and run bounded commands on it.
-2. Remote command execution under host and command allowlists, reusing the
-   secrets stored here.
-3. `ssh -G` resolved settings per target, so a row can show the user, port, and
-   identity file the OpenSSH client would actually pick.
-4. Reading the aliases in `~/.ssh/config` as a suggested inventory.
+1. An interactive or long-running remote session (a PTY, or a background job the
+   conversation can poll), so commands that need input or outlive one reply fit.
+2. Showing the settings `ssh -G` resolves for a target, so an alias can be checked
+   against what the OpenSSH client would really use.
+3. Reading the aliases in `~/.ssh/config` as a suggested inventory.
 
 None of these exist yet, and the interface may still change.
 

@@ -54,6 +54,9 @@ window.__ModuleLoader__.load({
         intro: 'Named SSH targets this machine can reach, kept in this plugin\'s own storage so the page can edit them without touching the profile patch file. The plugin never reads or writes ~/.ssh/config and never adds a host key.',
         storedIn: 'Stored by the plugin in its own ssh_targets storage domain; passwords and passphrases live in the Harness credential store.',
         tabsLabel: 'Sections of this page',
+        pickerGroup: 'Remote server',
+        pickerNone: 'No remote server',
+        pickerEmpty: 'No SSH target is saved yet — add one in Settings.',
         tabList: 'SSH targets',
         tabSettings: 'Client settings',
         settingsTitle: 'Client settings',
@@ -163,6 +166,9 @@ window.__ModuleLoader__.load({
         intro: '保存「本机能够连上的命名 SSH 目标」。清单存在插件自己的存储里，页面改它不会动 profile 的 patch 文件；插件从不读写 ~/.ssh/config，也不会替你写入主机密钥。',
         storedIn: '清单与参数存在插件自己的 ssh_targets 存储域；密码与口令存在 Harness 凭据库里。',
         tabsLabel: '本页面内的分区',
+        pickerGroup: '远程服务器',
+        pickerNone: '不使用远程服务器',
+        pickerEmpty: '还没有保存的 SSH 目标，请先在设置里添加。',
         tabList: 'SSH 目标清单',
         tabSettings: '客户端参数',
         settingsTitle: '客户端参数',
@@ -374,6 +380,12 @@ window.__ModuleLoader__.load({
 .dshssh-seg-item:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
 .dshssh-seg-item:disabled{cursor:default;opacity:.4}
 .dshssh-seg-item:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:-2px}
+.dshssh-seat{display:flex;flex-direction:column;gap:4px;min-width:200px}
+.dshssh-seat-group{display:flex;flex-direction:column;gap:2px}
+.dshssh-seat-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:5px 8px;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary);background:transparent;border:0;border-radius:6px;cursor:pointer;text-align:left}
+.dshssh-seat-row[aria-checked="true"]{outline:1px solid var(--dsw-alias-brand-primary);outline-offset:-1px}
+.dshssh-seat-row:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
+.dshssh-seat-row:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
 .dshssh-hidden{display:none}
 .dshssh-panel{display:flex;flex-direction:column;gap:16px}
 .dshssh-panel:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:2px}
@@ -803,6 +815,87 @@ window.__ModuleLoader__.load({
             onKeyDown,
           }, option.label)
         }),
+      )
+    }
+
+    /**
+     * The rows this plugin contributes to the conversation's session-options menu:
+     * which saved target the chat should work against. The menu owns its own
+     * disclosure, so this seat renders plain radio rows and nothing else.
+     */
+    function SshTargetSeat(props: any): any {
+      const t = translator(props)
+      const sessionId: string | undefined = typeof props?.sessionId === 'string' ? props.sessionId : undefined
+      const [rows, setRows] = React.useState([] as ConnectionView[])
+      const [chosen, setChosen] = React.useState(undefined as string | undefined)
+      const [busy, setBusy] = React.useState(false)
+
+      /**
+       * Re-read the saved targets and this conversation's current choice.
+       * @returns resolution once both landed.
+       */
+      async function refresh(): Promise<void> {
+        if (sessionId === undefined) return
+        try {
+          const result = await rpc('list', { sessionId })
+          setRows(result.connections ?? [])
+          setChosen(result.sessionTarget)
+        } catch {
+          setRows([])
+        }
+      }
+
+      React.useEffect(() => {
+        void refresh()
+        // One read per conversation; a click refreshes through the write path.
+      }, [sessionId])
+
+      /**
+       * Point this conversation at one target, or clear the choice.
+       * @param targetId - the chosen target, or `null` for none.
+       * @returns resolution once the Host recorded it.
+       */
+      async function choose(targetId: string | null): Promise<void> {
+        if (sessionId === undefined || busy) return
+        setBusy(true)
+        try {
+          const result = await rpc(targetId === null ? 'clearSessionTarget' : 'setSessionTarget', {
+            sessionId,
+            ...(targetId === null ? {} : { targetId }),
+          })
+          setChosen(result.sessionTarget?.targetId)
+        } catch {
+          await refresh()
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      if (sessionId === undefined) return null
+      return h('div', { class: 'dshssh-seat' },
+        h('div', { class: 'dshssh-seat-group', role: 'radiogroup', 'aria-label': t('pickerGroup') },
+          rows.length === 0 ? h('p', { class: 'dshssh-muted' }, t('pickerEmpty')) : null,
+          ...rows.map((row: ConnectionView) => h('button', {
+            key: row.id,
+            type: 'button',
+            role: 'radio',
+            'aria-checked': row.id === chosen,
+            class: 'dshssh-seat-row',
+            disabled: busy,
+            onClick: () => { void choose(row.id) },
+          },
+            h('span', {}, row.label),
+            h('span', { class: 'dshssh-muted' }, addressOf(row)),
+          )),
+          h('button', {
+            type: 'button',
+            role: 'radio',
+            'aria-checked': chosen === undefined,
+            class: 'dshssh-seat-row',
+            disabled: busy,
+            onClick: () => { void choose(null) },
+          }, t('pickerNone')),
+        ),
       )
     }
 
@@ -1530,6 +1623,13 @@ window.__ModuleLoader__.load({
        * @param ctx - the browser plugin context.
        */
       apply(ctx: any): void {
+        ctx.effect(() => ctx.slots.inject('conversation.input.model.options', () => ctx.slots.register({
+          name: 'conversation.input.model.options',
+          id: 'ssh-target',
+          order: 5,
+          label: () => ctx.locale.bind(NS)('pickerGroup'),
+          locale: NS,
+        }, SshTargetSeat)), 'ssh: conversation target picker')
         for (const language of Object.keys(DICT)) {
           ctx.effect(() => ctx.locale.register(NS, language, DICT[language]), `ssh: ${language} dictionary`)
         }

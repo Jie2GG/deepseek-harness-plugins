@@ -4,6 +4,73 @@ All notable changes to `@jie2gg/dsh-plugin-ssh` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project uses [semantic versioning](https://semver.org/).
 
+## 0.6.0
+
+### Added
+
+- **The agent can use the remote now.** One tool, `remote`, with the actions
+  `targets`, `run`, `ls`, `read`, `write`, `upload`, `download`. Each action calls
+  the same `ops` method the settings page calls, so the chat and the page cannot
+  drift apart, and the model sees one dense transcript line per call
+  (`Proxy$ uname -a` then stdout, `[stderr]` then the exit and duration, or
+  `status=auth-failed · exit=255` with a plain-language explanation).
+- **A conversation picks its server from the composer.** The session-options menu
+  (next to the model and reasoning controls) lists the saved targets as radio rows
+  plus **No remote server**; the choice is stored in the plugin's own storage
+  (`sessions` table) and reused by every call that does not name a target. The
+  resolution order is explicit argument → this conversation's choice → a lone
+  saved target, and an ambiguous call refuses with the candidate list instead of
+  guessing.
+- **Policy that matches how the harness gates tools.** The decision lives in
+  `tools/pre-execute`, not in the tool body: reads (`ls`, `read`, `targets`,
+  `download`) run free; `run` runs free only when its leading program is on the
+  target's allowlist; `write` and `upload` always ask; a target with agent access
+  off is denied. An `ask` is answered by the harness approval surface with
+  English and Chinese text naming host, path, or command, and a profile without an
+  approval service turns an `ask` into a denial rather than a pass. A command that
+  pipelines, redirects, or substitutes has no single leading program, so it is
+  asked about rather than pattern-matched.
+- **File transfer over `scp`.** Upload and download take the same trust and
+  credential flags as probes and commands (including `-P` for the port and the
+  askpass environment for a stored password), refuse to start a copy that exceeds
+  the transfer ceiling after stating the remote size, ask for `recursive` on a
+  directory, and refuse to clobber an existing local file unless told to overwrite.
+  Directories move with `scp -r`. `rsync` is not assumed: this machine has none.
+- **A hard local boundary.** A transfer's local path is resolved against the
+  conversation's own workspace and anything outside it — including a `..` walk —
+  is refused before a child starts.
+- Storage format 3: `agentAccess` and `allowedCommands` per target, per-target
+  `remoteTimeoutMs` / `maxOutputBytes` overrides, ceilings `remoteTimeoutMs` and
+  `maxTransferBytes` in the shared settings (editable on the Client settings tab),
+  and the `sessions` table. Formats 1 and 2 keep reading, and removing a target
+  clears the conversations that pointed at it.
+
+### Changed
+
+- `src/ssh.ts` became `src/transport.ts`: one option builder, one lane counter
+  (probes, commands, and transfers share the ceiling of four concurrent
+  operations), and one child lifecycle that terminates and drains before reading,
+  so every action inherits the 0.5.1 fixes.
+- The route gained `run`, `upload`, `download`, `setSessionTarget`, and
+  `clearSessionTarget`; `list` now answers with this conversation's chosen target
+  and the ranges every numeric field accepts.
+- A call that needs a secret refuses with `secret-error` before any child starts,
+  and a refused remote path is explained in words instead of a schema dump.
+
+### Notes
+
+- The tool and the storage change live on the Host side, so a running Harness
+  keeps the previous module until it restarts; the page and the composer seat
+  update through HMR on their own.
+- The plugin claims the tool name `remote`; if another bundle holds it, this one
+  registers `ssh_remote` and says so. The registry is probed before the claim, and
+  a probe-to-register race retries once.
+- Not done in this release: a custom chat card for the tool (the default row shows
+  the transcript text), a PTY or interactive session, background remote jobs
+  through `ctx.jobs`, and firing the `fs/write-intent` waterfall for a download —
+  inside a git workspace the file still shows up in the turn's change summary, but
+  outside one it is not recorded as a session file edit.
+
 ## 0.5.1
 
 ### Fixed

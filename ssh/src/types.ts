@@ -12,7 +12,7 @@
 export const RPC_ROUTE_PATH = '/api/ssh/rpc'
 
 /** RPC names the page may invoke; every other name is refused before dispatch. */
-export const RPC_METHODS = ['list', 'save', 'remove', 'probe', 'probeAll', 'run', 'configUpdate'] as const
+export const RPC_METHODS = ['list', 'save', 'remove', 'probe', 'probeAll', 'run', 'upload', 'download', 'setSessionTarget', 'clearSessionTarget', 'configUpdate'] as const
 
 /** One RPC name as it travels on the wire. */
 export type RpcMethod = (typeof RPC_METHODS)[number]
@@ -204,6 +204,34 @@ export type RemoteStatus =
 
 /** How a call reached its target. */
 export type TargetSource = 'argument' | 'session' | 'only-target'
+
+/** One completed or refused file transfer. */
+export interface RemoteTransferResult {
+  /** `upload` or `download`. */
+  action: 'upload' | 'download'
+  /** Whether bytes moved. */
+  ok: boolean
+  /** The transfer outcome. */
+  status: 'moved' | 'refused-size' | 'refused-exists' | 'missing' | 'failed'
+  /** The target the bytes moved with. */
+  target: { id: string; label: string; host: string }
+  /** Absolute path on this machine, inside the conversation's workspace. */
+  localPath: string
+  /** Absolute path on the server. */
+  remotePath: string
+  /** Bytes moved, when the transfer reported them. */
+  bytes?: number
+  /** Whether a directory was copied. */
+  recursive?: boolean
+  /** Whether an existing destination was replaced. */
+  overwrote?: boolean
+  /** Seconds spent. */
+  durationMs?: number
+  /** Plain-language reason for a refusal or failure. */
+  message?: string
+  /** The next step for a reader. */
+  hint?: string
+}
 
 /** The page's settings write, with every field optional. */
 export interface SettingsInput {

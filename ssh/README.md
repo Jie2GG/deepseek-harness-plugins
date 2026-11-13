@@ -29,6 +29,8 @@ ssh/
     ├── secrets.ts            # password and passphrase records in the credential store
     ├── askpass.ts            # the private helper that answers an ssh prompt
     ├── tool.ts               # the agent-facing `remote` tool and its policy gate
+    ├── transfer.ts           # scp moves, with a remote size and type pre-check
+    ├── local-path.ts         # the workspace boundary a local transfer path obeys
     ├── ops.ts                # one method per RPC name, transport-agnostic
     ├── rpc.ts                # Request → Response, failure code → HTTP status
     ├── client.ts             # browser half: the page, its tabs, and its icon
@@ -93,6 +95,8 @@ Body `{ method, params? }`, result `{ ok: true, result }` or
 | `remove` | `{ id }` | `{ removed, orphanSecrets, connections }` |
 | `probe` | `{ id }` or `{ draft, secrets? }` | `{ connection?, probe?, connections }` |
 | `run` | `{ command, target?, sessionId?, timeoutMs?, maxOutputBytes? }` | `{ run, connection?, connections }` |
+| `upload` / `download` | `{ path, localPath, localDir?, target?, sessionId?, recursive?, overwrite?, maxBytes?, timeoutMs? }` | the transfer result |
+| `setSessionTarget` / `clearSessionTarget` | `{ sessionId, targetId? }` | `{ sessionTarget }` |
 | `probeAll` | – | `{ connections, probed, skipped, failures }` |
 | `configUpdate` | `{ settings }` | `{ settings }` |
 
@@ -174,7 +178,8 @@ bundle is the live proof of that).
 
 | Field | Shape |
 | --- | --- |
-| `action` | `targets` \| `run` \| `ls` \| `read` \| `write` (uploads and downloads join next) |
+| `action` | `targets` \| `run` \| `ls` \| `read` \| `write` \| `upload` \| `download` |
+| `localPath`, `recursive` | the local side of a transfer; relative paths resolve inside the conversation workspace |
 | `target` | id, display name (any case), `host`, or `user@host`; omitted means this conversation's chosen target, then a lone saved target |
 | `command` / `path` / `content` | the remote command line, an absolute remote path, and the exact text to write |
 | `overwrite` / `append` / `mkdir` | write behaviour; `mkdir` defaults to true |
@@ -190,7 +195,8 @@ tool-authoring docs prescribe for deployment policy:
 | `run`, program in the target's `allowedCommands` | allow |
 | `run`, program not allowlisted | **ask** |
 | `run`, a pipeline / redirection / substitution (no single leading program) | **ask** |
-| `write` | **ask** |
+| `write`, `upload` | **ask** |
+| `download` | allow (it reads the server and writes inside the session workspace, which the file pipeline already governs) |
 | any action on a target with `agentAccess: off` | deny, naming the settings page |
 | storage unreadable at gate time | deny — running blind on a remote host is worse |
 
@@ -236,6 +242,18 @@ Facts checked against the running DSH (`0.2.2-rc.1`, `web` profile) while 0.2.0
 was written and re-checked through 0.5.1, and reproduced against a live server for
 the 0.5.1 fix, so the next round does not have to re-derive them:
 
+- File transfer: `scp` is the sibling of the configured `ssh` executable
+  (`/usr/bin/ssh` → `/usr/bin/scp`); it takes the port as `-P` (not `-p`), accepts
+  the same `-o BatchMode` / `StrictHostKeyChecking=accept-new` / `-i` / `-J` /
+  `PreferredAuthentications` flags, and reads the remote end as one `host:path`
+  argument, so no local shell is involved and a path with spaces needs no quoting.
+  A size and type pre-check (`stat -c '%s %F' -- '<path>'`, GNU coreutils here) runs
+  before a download so an oversized or directory payload is refused without
+  touching the disk. `rsync` is absent on this machine and is therefore not used.
+- The composer's session-options seat (`conversation.input.model.options`) declares
+  no owner props and receives `sessionId` among its standard props; a live check in
+  this profile showed the plugin's `ssh-target` occupant registered and active
+  beside the shipped `agent-team` one.
 - Tool authoring, as documented in `docs/cookbook/adding-a-tool.md` and
   `packages/core/tools`: `output` with `{ schema, render }` is mandatory;
   `execute` returns only the canonical JSON value that the registry validates,
@@ -343,7 +361,7 @@ the 0.5.1 fix, so the next round does not have to re-derive them:
    command reads like the built-in terminal card instead of a generic row.
 4. Optional: read `~/.ssh/config` aliases as a suggested inventory (`ctx.fs`).
 
-## Limits of 0.5.1
+## Limits of 0.6.0
 
 - One settings page, its two tabs, is the only surface; the agent cannot see the
   list yet.
@@ -353,12 +371,20 @@ the 0.5.1 fix, so the next round does not have to re-derive them:
   account, and the first probe records an unknown host key rather than asking.
 - Nothing about these fixes is live until the running Host loads the new module:
   an in-place package swap keeps the previous one until the process restarts.
-- A probe authenticates and then runs only `true`; nothing else executes remotely,
-  so a stored password is used for authentication checks alone.
+- A page probe still authenticates and runs only `true`; real commands come from
+  the agent's `run` action.
+- Remote calls are synchronous: no PTY, no terminal input, no background job. A
+  command that waits for a prompt hits its deadline.
+- A download is not announced through the `fs/write-intent` waterfall, so outside a
+  git workspace it will not appear in the session's file-change summary even though
+  the file itself lands (in a git workspace the turn-boundary snapshot covers it).
+  Firing that waterfall is the natural follow-up, and so is a `tool.call.toolview`
+  card for the tool, which the Web client renders from the wire tool name.
 - The credential store is private to other OS users, not to the agent: tool
   processes run as the same user that can read `.credentials.yaml`.
-- Deleting the bundle leaves both `storages/ssh_targets.json` and the plugin's
-  `ssh/…` records in `.credentials.yaml` in place until you remove them.
+- Deleting the bundle leaves both `storages/ssh_targets.json` (targets, ceilings,
+  and the per-conversation choices) and the plugin's `ssh/…` records in
+  `.credentials.yaml` in place until you remove them.
 - After an in-place package replacement the running Host keeps its previous module
   until restart. The page detects that (`list` reports no `askpass`) and hides the
   authentication controls with an explanation instead of sending a field the old

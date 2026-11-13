@@ -177,7 +177,7 @@ export function tail(stdout: string, stderr: string): string | undefined {
 }
 
 /** What one bounded child produced. */
-interface Collected {
+export interface Collected {
   outcome: 'exit' | 'timeout' | 'error' | 'cancelled'
   exitCode: number | null
   signal: NodeJS.Signals | null
@@ -246,6 +246,7 @@ export class SshTransport {
     settings: SshSettings,
     auth: RemoteAuth,
     deadlineMs: number,
+    options: { readonly portFlag?: string | undefined } = {},
   ): { flags: string[]; env: NodeJS.ProcessEnv | undefined; needsSecret: boolean } {
     const mode = auth.mode ?? 'key'
     const needsSecret = mode === 'password' || mode === 'key+password' || (mode === 'key' && auth.passphrase !== undefined)
@@ -271,7 +272,8 @@ export class SshTransport {
     } else if (mode === 'key') {
       flags.push('-o', 'PreferredAuthentications=publickey')
     }
-    if (target.port !== undefined) flags.push('-p', String(target.port))
+    // scp names the port -P; only ssh takes -p.
+    if (target.port !== undefined) flags.push(options.portFlag ?? '-p', String(target.port))
     if (target.identityFile !== undefined) flags.push('-i', target.identityFile)
     if (target.proxyJump !== undefined) flags.push('-J', target.proxyJump)
     if (target.extraArgs !== undefined) flags.push(...target.extraArgs)

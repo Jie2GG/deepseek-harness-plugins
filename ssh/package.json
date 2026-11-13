@@ -1,8 +1,8 @@
 {
   "name": "@jie2gg/dsh-plugin-ssh",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "private": true,
-  "description": "Adds a Remote connections page to the settings panel: SSH targets you edit from one address field and test from the browser, logging in with a key or with a password.",
+  "description": "Runs commands and moves files on stored SSH servers: a Remote connections settings page for the inventory, and a `remote` tool the conversation uses.",
   "keywords": [
     "dsh",
     "dsh-bundle",
@@ -53,14 +53,18 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
     "@deepseek-ai/dsh-client-connection": ">=0.2.2-rc.1 <0.3.0",
-    "@deepseek-ai/dsh-subprocess": ">=0.2.2-rc.1 <0.3.0"
+    "@deepseek-ai/dsh-subprocess": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-fs": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-working-directory": ">=0.2.2-rc.1 <0.3.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.1.0",
     "@deepseek-ai/dsh-client-connection": "0.2.2-rc.1",
     "@deepseek-ai/dsh-subprocess": "0.2.2-rc.1",
     "@types/node": "^24.0.0",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "@deepseek-ai/dsh-fs": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-working-directory": "0.2.2-rc.1"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/finalize-client.mjs",

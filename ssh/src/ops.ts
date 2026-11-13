@@ -10,9 +10,10 @@
  * @module @jie2gg/dsh-plugin-ssh/ops
  */
 
-import { connectionInputSchema, draftSecretSchema, remotePathSchema, MAX_CONCURRENT_PROBES, MAX_CONNECTIONS, MAX_MAX_OUTPUT_BYTES, MAX_MAX_TRANSFER_BYTES, MAX_PROBE_TIMEOUT_MS, MAX_REMOTE_TIMEOUT_MS, MIN_MAX_OUTPUT_BYTES, MIN_MAX_TRANSFER_BYTES, MIN_PROBE_TIMEOUT_MS, MIN_REMOTE_TIMEOUT_MS, probeDraftSchema, remoteRunSchema, secretPatchSchema, settingsInputSchema } from './storage.ts'
+import { connectionInputSchema, draftSecretSchema, remotePathSchema, transferInputSchema, sessionTargetInputSchema, MAX_CONCURRENT_PROBES, MAX_CONNECTIONS, MAX_MAX_OUTPUT_BYTES, MAX_MAX_TRANSFER_BYTES, MAX_PROBE_TIMEOUT_MS, MAX_REMOTE_TIMEOUT_MS, MIN_MAX_OUTPUT_BYTES, MIN_MAX_TRANSFER_BYTES, MIN_PROBE_TIMEOUT_MS, MIN_REMOTE_TIMEOUT_MS, probeDraftSchema, remoteRunSchema, secretPatchSchema, settingsInputSchema } from './storage.ts'
 import { SshError } from './types.ts'
-import type { AuthMode, ConnectionRecord, ConnectionView, ProbeOutcome, RemoteRunResult, SshSettings } from './types.ts'
+import type { AuthMode, ConnectionRecord, ConnectionView, ProbeOutcome, RemoteRunResult, RemoteTransferResult, SshSettings } from './types.ts'
+import { transfer } from './transfer.ts'
 import { shellQuote } from './transport.ts'
 import type { RemoteAuth, RemoteTarget, SshTransport } from './transport.ts'
 import type { TargetStore } from './store.ts'
@@ -61,6 +62,8 @@ export interface RemoteFileResult {
 /** One JSON-safe result the route hands back to the page. */
 export interface ListResult {
   connections: ConnectionView[]
+  /** The target this conversation chose, when the caller names a session. */
+  sessionTarget?: string
   settings: SshSettings
   limits: {
     maxConnections: number
@@ -86,8 +89,8 @@ export interface ListResult {
 
 /** The operations the page may invoke. */
 export interface Ops {
-  /** Everything the page renders in one read. */
-  list(): Promise<ListResult>
+  /** Everything the page renders in one read, plus this conversation's choice. */
+  list(params?: Params): Promise<ListResult>
   /** Insert or overwrite one target, and any secret the page sent with it. */
   save(params: Params): Promise<{ connection: ConnectionView; connections: ConnectionView[] }>
   /** Delete one target and forget its secrets. */
@@ -98,6 +101,14 @@ export interface Ops {
   probeAll(): Promise<{ connections: ConnectionView[]; probed: number; skipped: number; failures: { id: string; message: string }[] }>
   /** Run one remote command, resolving the target the same way the tool will. */
   runCommand(params: Params): Promise<{ run: RemoteRunResult; connection?: ConnectionView | undefined; connections: ConnectionView[] }>
+  /** Push one local file or directory to the server. */
+  upload(params: Params): Promise<RemoteTransferResult>
+  /** Pull one remote file into the conversation's workspace. */
+  download(params: Params): Promise<RemoteTransferResult>
+  /** Point a conversation at a target. */
+  setSessionTarget(params: Params): Promise<{ sessionTarget: { sessionId: string; targetId: string; setAt: string } | null }>
+  /** Forget a conversation's chosen target. */
+  clearSessionTarget(params: Params): Promise<{ sessionTarget: null }>
   /** List one remote path. */
   listRemote(params: Params): Promise<RemoteFileResult>
   /** Read one remote file as text. */
@@ -116,8 +127,10 @@ export interface OpsDeps {
   store: () => Promise<TargetStore>
   /** The credential-store face; `undefined` until the plugin is fully mounted. */
   secrets: () => TargetSecrets | undefined
-  /** Whether the askpass helper is usable, for the page to say so up front. */
-  askpass: () => { ready: boolean; failure?: string | undefined }
+  /** Whether the askpass helper is usable, and where it lives. */
+  askpass: () => { ready: boolean; path?: string | undefined; failure?: string | undefined }
+  /** Whether a local path already exists, so a download can refuse to overwrite. */
+  localExists?: ((path: string) => boolean | Promise<boolean>) | undefined
   /** Optional per-call overrides the tool layer passes down. */
   options?: FileCallOptions
 }
@@ -247,6 +260,7 @@ export interface FileCallOptions {
 export function createOps(deps: OpsDeps): Ops {
   const { runner, store, secrets, askpass } = deps
   const options = deps.options ?? {}
+  const localExists = deps.localExists
 
   /** One stored record as the page sees it. */
   async function viewOf(state: TargetStore, record: ConnectionRecord): Promise<ConnectionView> {
@@ -349,13 +363,145 @@ export function createOps(deps: OpsDeps): Ops {
   }
 
 
+  /**
+   * Validate one transfer call and run it, keeping the refusal language the same
+   * for both directions.
+   * @param direction - which way the bytes go.
+   * @param params - validated inputs.
+   * @returns the canonical transfer result.
+   */
+  async function move(direction: 'upload' | 'download', params: Params): Promise<RemoteTransferResult> {
+    const state = await store()
+    const globalSettings = state.settings()
+    // The remote path is validated on its own first, so a metacharacter or a
+    // relative path is explained in plain words instead of a schema dump.
+    const statedPath = typeof params.path === 'string' ? params.path.trim() : ''
+    try {
+      remotePathSchema.parse(statedPath)
+    } catch (error: unknown) {
+      throw new SshError('bad-input', messageOf(error), { field: 'path', hint: 'Expected an absolute path on the server, or one starting with "~/".' })
+    }
+    let input: ReturnType<typeof transferInputSchema.parse>
+    try {
+      input = transferInputSchema.parse(params)
+    } catch (error: unknown) {
+      throw new SshError('bad-input', messageOf(error), { field: fieldOf(error), hint: 'Fix the reported value and try again.' })
+    }
+    const record = pickTarget(state, params)
+    if (record.agentAccess === 'off') {
+      throw new SshError('bad-input', `"${record.label}" is set to agent access off, so no file may move with it.`, { field: 'target' })
+    }
+    const local = pathInside(input.localPath, input.localDir)
+    const overwrite = input.overwrite === true
+    if (direction === 'download' && !overwrite && localExists !== undefined && await localExists(local)) {
+      return {
+        action: 'download',
+        ok: false,
+        status: 'refused-exists',
+        target: { id: record.id, label: record.label, host: record.host },
+        localPath: local,
+        remotePath: input.path,
+        message: `${local} already exists locally.`,
+        hint: 'Pass overwrite to replace it.',
+      }
+    }
+    const settings: SshSettings = {
+      ...globalSettings,
+      ...(record.maxOutputBytes === undefined ? {} : { maxOutputBytes: record.maxOutputBytes }),
+    }
+    const auth = await authFor(record.id, record.auth)
+    const outcome = await transfer(runner, askpassSource(), targetOf(record), settings, auth, {
+      direction,
+      localPath: local,
+      remotePath: input.path,
+      ...(input.recursive === undefined ? {} : { recursive: input.recursive }),
+      overwrite,
+      maxBytes: input.maxBytes ?? settings.maxTransferBytes,
+      timeoutMs: input.timeoutMs ?? record.remoteTimeoutMs ?? settings.remoteTimeoutMs,
+    })
+    const target = { id: record.id, label: record.label, host: record.host }
+    const base: RemoteTransferResult = {
+      action: direction,
+      ok: outcome.status === 'moved',
+      status: outcome.status,
+      target,
+      localPath: local,
+      remotePath: input.path,
+      durationMs: outcome.durationMs,
+      ...(outcome.bytes === undefined ? {} : { bytes: outcome.bytes }),
+      ...(input.recursive === true ? { recursive: true } : {}),
+      ...(outcome.overwrote === true ? { overwrote: true } : {}),
+      ...(outcome.message === undefined ? {} : { message: outcome.message }),
+    }
+    if (base.ok) return base
+    return { ...base, hint: transferHint(outcome.status, direction) }
+  }
+
+  /**
+   * Refuse a local path outside the conversation's workspace, so the model cannot
+   * reach arbitrary files through a transfer.
+   * @param raw - the path as sent.
+   * @param dir - the workspace root, when the caller knows one.
+   * @returns the absolute path.
+   */
+  function pathInside(raw: string, dir: string | undefined): string {
+    const value = raw.trim()
+    if (dir === undefined) return value
+    const root = dir.endsWith('/') ? dir : `${dir}/`
+    if (value === dir) return value
+    if (!value.startsWith(root)) {
+      throw new SshError('bad-input', `"${value}" is outside the workspace ${dir}.`, {
+        field: 'localPath',
+        hint: 'Give a path inside the conversation workspace, or one relative to it.',
+      })
+    }
+    return value
+  }
+
+  /**
+   * Read and validate one conversation-target call.
+   * @param params - route parameters.
+   * @returns the session and the optional target.
+   */
+  function readSession(params: Params): { sessionId: string; targetId?: string } {
+    try {
+      const parsed = sessionTargetInputSchema.parse(params)
+      if (parsed.targetId === undefined) return { sessionId: parsed.sessionId }
+      return { sessionId: parsed.sessionId, targetId: parsed.targetId }
+    } catch (error: unknown) {
+      throw new SshError('bad-input', messageOf(error), { field: fieldOf(error) ?? 'sessionId' })
+    }
+  }
+
+  /**
+   * Name the next step for a refused transfer.
+   * @param status - what stopped it.
+   * @param direction - which way the bytes were moving.
+   * @returns the hint text.
+   */
+  function transferHint(status: string, direction: 'upload' | 'download'): string {
+    if (status === 'refused-size') return 'Raise the transfer ceiling in Settings → Remote connections, or copy a smaller path.'
+    if (status === 'refused-exists') return direction === 'download' ? 'Pass overwrite to replace the local file.' : 'Pass overwrite to replace the remote file.'
+    if (status === 'missing') return direction === 'download' ? 'List the remote directory first, or check the path.' : 'Check the local path, and make sure the remote directory exists (write with mkdir first).'
+    return 'See the message; a transfer failure usually means the path, the credential, or the deadline.'
+  }
+
+  /** The askpass face, taken through the readiness check so transfers get it too. */
+  function askpassSource() {
+    const helper = askpass()
+    return { path: helper.ready ? helper.path : undefined, failure: helper.failure }
+  }
+
   return {
-    async list(): Promise<ListResult> {
+    async list(params: Params = {}): Promise<ListResult> {
       const state = await store()
       const settings = state.settings()
       const helper = askpass()
+      const sessionId = typeof params.sessionId === 'string' ? params.sessionId : ''
+      const chosen = sessionId === '' ? undefined : state.getSessionTarget(sessionId)?.targetId
       return {
         connections: await viewsOf(state),
+        ...(chosen === undefined ? {} : { sessionTarget: chosen }),
         settings,
         limits: {
           maxConnections: MAX_CONNECTIONS,
@@ -534,6 +680,29 @@ export function createOps(deps: OpsDeps): Ops {
         bytes: Buffer.byteLength(content, 'utf8'),
         overwrote: overwrite && !append,
       })
+    },
+
+    async upload(params: Params): Promise<RemoteTransferResult> {
+      return await move('upload', params)
+    },
+
+    async download(params: Params): Promise<RemoteTransferResult> {
+      return await move('download', params)
+    },
+
+    async setSessionTarget(params: Params) {
+      const state = await store()
+      const input = readSession(params)
+      if (input.targetId === undefined) return { sessionTarget: null }
+      const row = await state.setSessionTarget(input.sessionId, input.targetId)
+      return { sessionTarget: row }
+    },
+
+    async clearSessionTarget(params: Params) {
+      const state = await store()
+      const input = readSession(params)
+      await state.clearSessionTarget(input.sessionId)
+      return { sessionTarget: null }
     },
 
     async configUpdate(params: Params) {

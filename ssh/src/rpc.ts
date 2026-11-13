@@ -120,7 +120,7 @@ export function createRpcHandler(ops: Ops): (request: Request) => Promise<Respon
 async function dispatch(ops: Ops, method: RpcMethod, params: Params): Promise<unknown> {
   switch (method) {
     case 'list':
-      return await ops.list()
+      return await ops.list(params)
     case 'save':
       return await ops.save(params)
     case 'remove':
@@ -131,6 +131,14 @@ async function dispatch(ops: Ops, method: RpcMethod, params: Params): Promise<un
       return await ops.probeAll()
     case 'run':
       return await ops.runCommand(params)
+    case 'upload':
+      return await ops.upload(params)
+    case 'download':
+      return await ops.download(params)
+    case 'setSessionTarget':
+      return await ops.setSessionTarget(params)
+    case 'clearSessionTarget':
+      return await ops.clearSessionTarget(params)
     case 'configUpdate':
       return await ops.configUpdate(params)
   }

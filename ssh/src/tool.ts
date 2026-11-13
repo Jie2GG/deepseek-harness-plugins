@@ -51,7 +51,7 @@ import { leadingProgram } from './transport.ts'
 import type { Ops, Params, RemoteFileResult } from './ops.ts'
 
 /** Actions the tool offers in 0.6.0; file transfer joins in the next stage. */
-export const REMOTE_TOOL_ACTIONS = ['targets', 'run', 'ls', 'read', 'write'] as const
+export const REMOTE_TOOL_ACTIONS = ['targets', 'run', 'ls', 'read', 'write', 'upload', 'download'] as const
 
 /** Preferred tool name, with a namespaced fallback if another plugin holds it. */
 export const REMOTE_TOOL_NAME = 'remote'
@@ -78,6 +78,21 @@ export interface RemoteToolDeps {
   sessionOf?: ((exec: Readonly<PendingCall>) => string | undefined) | undefined
   /** The target one conversation chose, read from the plugin's own storage. */
   sessionTargetOf?: ((sessionId: string) => string | undefined) | undefined
+  /** The conversation workspace one transfer call may touch. */
+  local?: RemoteLocalBridge | undefined
+}
+
+/**
+ * The local side of a transfer, resolved through the Host services the tool call
+ * belongs to: the conversation workspace, and whether a path is already taken.
+ */
+export interface RemoteLocalBridge {
+  /** The session workspace an absolute local path must stay inside. */
+  dirOf(exec: Readonly<PendingCall>): Promise<string | undefined>
+  /** Whether something already exists at that local path. */
+  exists(localPath: string): Promise<boolean>
+  /** Join a relative path onto the workspace, rejecting an escape. */
+  resolve(localPath: string, dir: string): string
 }
 
 /** One tool call's parameters as the registry decoded them. */
@@ -90,8 +105,11 @@ export interface RemoteCallArgs {
   overwrite?: boolean | undefined
   append?: boolean | undefined
   mkdir?: boolean | undefined
+  recursive?: boolean | undefined
   timeoutMs?: number | undefined
   maxBytes?: number | undefined
+  /** For `upload`/`download`: the path on this machine, relative to the session workspace. */
+  localPath?: string | undefined
 }
 
 /** A policy verdict, with the text a human would read. */
@@ -179,6 +197,19 @@ export function decideAccess(target: TargetSnapshot | undefined, args: RemoteCal
   if (args.action === 'ls' || args.action === 'read') {
     return { verdict: 'allow', reason: '' }
   }
+  if (args.action === 'upload') {
+    return {
+      verdict: 'ask',
+      reason: `Upload ${args.localPath ?? '<local path>'} to ${authority}:${args.path ?? '<remote path>'}.`,
+      display: {
+        en: `Copy a local file up to ${authority}: ${args.path ?? '(no remote path given)'}.`,
+        zh: `将本地文件上传到 ${authority}：${args.path ?? '（未给出远端路径）'}。`,
+      },
+    }
+  }
+  // A download reads the server and writes inside the conversation workspace,
+  // which the file pipeline already governs; asking twice would be noise.
+  if (args.action === 'download') return { verdict: 'allow', reason: '' }
   if (args.action === 'write') {
     return {
       verdict: 'ask',
@@ -301,12 +332,19 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
       overwrite: { type: 'boolean', description: 'For `write`: replace an existing remote file instead of refusing.' },
       append: { type: 'boolean', description: 'For `write`: append to the remote file instead of replacing it.' },
       mkdir: { type: 'boolean', description: 'For `write`: create the parent directory first. Defaults to true.' },
+      localPath: { type: 'string', description: 'For `upload` and `download`: the path on this machine. Relative paths are resolved inside the conversation workspace, and a path outside it is refused.' },
+      recursive: { type: 'boolean', description: 'For `upload` and `download`: move a directory rather than one file.' },
       timeoutMs: { type: 'integer', description: 'For `run`: override the command deadline for this call, in milliseconds.' },
       maxBytes: { type: 'integer', description: 'For `run` and `read`: the largest amount of output to bring back.' },
     },
     output: {
       schema: {
         oneOf: [
+          {
+            type: 'object',
+            additionalProperties: false,
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'transfer', required: true }, localPath: { type: 'string' }, remotePath: { type: 'string' }, bytes: { type: 'integer' }, recursive: { type: 'boolean' }, overwrote: { type: 'boolean' }, durationMs: { type: 'integer' } },
+          },
           {
             type: 'object',
             additionalProperties: false,
@@ -372,6 +410,34 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           if (call.maxBytes !== undefined) params.maxOutputBytes = call.maxBytes
           const result = await operations.runCommand(params)
           return runResult(result) as never
+        }
+        case 'upload':
+        case 'download': {
+          if (call.path === undefined || call.path.trim() === '') {
+            return { action: 'transfer', ok: false, status: 'failed', message: `An ${call.action} call needs a remote path.`, hint: 'Pass path: an absolute path on the server.' } as never
+          }
+          if (call.localPath === undefined || call.localPath.trim() === '') {
+            return { action: 'transfer', ok: false, status: 'failed', message: `An ${call.action} call needs a local path.`, hint: 'Pass localPath, inside this conversation workspace.' } as never
+          }
+          const bridge = deps.local
+          const dir = bridge === undefined ? undefined : await bridge.dirOf(exec)
+          if (bridge !== undefined && dir !== undefined) {
+            let local: string
+            try {
+              local = bridge.resolve(call.localPath, dir)
+            } catch (error: unknown) {
+              return { action: 'transfer', ok: false, status: 'failed', target: undefined, localPath: call.localPath, remotePath: call.path, message: error instanceof Error ? error.message : String(error), hint: 'Use a path inside the conversation workspace.' } as never
+            }
+            params.localPath = local
+          } else {
+            params.localPath = call.localPath
+          }
+          params.path = call.path
+          if (call.overwrite === true) params.overwrite = true
+          if (call.recursive === true) params.recursive = true
+          if (call.maxBytes !== undefined) params.maxBytes = call.maxBytes
+          const result = call.action === 'upload' ? await operations.upload(params) : await operations.download(params)
+          return { ...result, action: call.action } as never
         }
         case 'ls':
         case 'read':
@@ -547,6 +613,16 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
       lines.push(`${where}: ${String(value.path)} (${String(value.lines ?? 0)} lines, ${String(value.bytes ?? 0)} bytes${value.truncated === true ? ', truncated' : ''})`)
       lines.push(content.replace(/\n$/u, ''))
       if (typeof value.message === 'string') lines.push(String(value.message))
+      return lines.join('\n')
+    }
+    case 'upload':
+    case 'download': {
+      const toward = value.action === 'upload' ? 'up to' : 'down from'
+      lines.push(`${String(value.action)} ${toward} ${where}: ${String(value.localPath)} <-> ${String(value.remotePath)}`)
+      if (typeof value.bytes === 'number') lines.push(`${String(value.bytes)} bytes${value.recursive === true ? ' (directory)' : ''}${value.overwrote === true ? ', replaced an existing file' : ''}`)
+      if (typeof value.message === 'string') lines.push(String(value.message))
+      if (typeof value.hint === 'string') lines.push(`hint: ${String(value.hint)}`)
+      lines.push(`status=${String(value.status)}${typeof value.durationMs === 'number' ? ` · ${String(value.durationMs)} ms` : ''}`)
       return lines.join('\n')
     }
     case 'write': {
