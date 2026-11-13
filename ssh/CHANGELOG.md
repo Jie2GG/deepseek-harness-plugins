@@ -8,6 +8,12 @@ project uses [semantic versioning](https://semver.org/).
 
 ### Changed
 
+- **An empty command allowlist now reads as what it is.** The line the model sees
+  said `allowlist=none(ask every command)` and the description implied a program had
+  to be listed to run freely — both written before 0.10.0 made an empty list mean no
+  restriction, and both would have nudged the model to avoid `run`. It now says
+  `allowlist=none(no restriction)` and explains that a target with a list is the one
+  that gates.
 - **The tool is called `ssh`, not `remote`.** `ssh` is the word a reader and the
   model already use for it, the plugin is `ssh`, and a verb-shaped name invited the
   question "remote from what?". If another bundle holds `ssh`, this one still falls

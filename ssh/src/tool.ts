@@ -393,7 +393,7 @@ export function describeRemote(targets: TargetBrief[]): string {
     : `Choose the server this conversation means and pass it as \`target\`. Available aliases: ${targets
       .map(target => `\`${target.label}\` (${target.user === undefined || target.user === '' ? '' : `${target.user}@`}${target.host})`)
       .join(', ')}.`
-  return `Runs commands and moves files on a stored SSH server, with the credentials the plugin holds. ${list} A call addresses one server: leave \`target\` out to reuse the one this conversation last used. Nothing is interpreted by a local shell; the command string is executed by the login shell on the server. \`targets\`, \`ls\`, \`read\`, and \`download\` are reads; \`run\`, \`write\`, and \`upload\` may be refused by the user, and \`run\` needs its program on that target's allowlist to skip asking.`
+  return `Runs commands and moves files on a stored SSH server, with the credentials the plugin holds. ${list} A call addresses one server: leave \`target\` out to reuse the one this conversation last used. Nothing is interpreted by a local shell; the command string is executed by the login shell on the server. \`targets\`, \`ls\`, \`read\`, and \`download\` are reads; \`run\`, \`write\`, and \`upload\` may be refused by the user, and \`run\` runs freely unless that target lists a command allowlist, in which case only the listed programs and simple single-program calls run freely.`
 }
 
 /**
@@ -741,7 +741,7 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
           authority,
           `auth=${String(row.auth ?? 'key')}`,
           row.agentAccess === 'off' ? 'agent off' : 'agent on',
-          Array.isArray(row.allowedCommands) && row.allowedCommands.length > 0 ? `allowlist=${row.allowedCommands.join(',')}` : 'allowlist=none(ask every command)',
+          Array.isArray(row.allowedCommands) && row.allowedCommands.length > 0 ? `allowlist=${row.allowedCommands.join(',')}` : 'allowlist=none(no restriction)',
           row.hasPassword === true ? 'password stored' : '',
           row.hasPassphrase === true ? 'passphrase stored' : '',
           typeof row.lastProbe === 'string' ? `last probe: ${row.lastProbe}` : '',
