@@ -93,7 +93,25 @@ export interface RemoteLocalBridge {
   exists(localPath: string): Promise<boolean>
   /** Join a relative path onto the workspace, rejecting an escape. */
   resolve(localPath: string, dir: string): string
+  /**
+   * Ask the file pipeline what the next local write is allowed to be, **before**
+   * the copy starts: the session's change recorder listens to this waterfall and
+   * captures the before-image from it, and a plugin that lets an external process
+   * (`scp`) do the writing is the shape that waterfall is meant to cover.
+   * @param localPath - the absolute destination.
+   * @param exec - the pending call, passed as the actor so the edit is attributed.
+   * @returns the guard the pipeline decided on, or `undefined` when none applies.
+   */
+  writeIntent?: ((localPath: string, exec: Readonly<PendingCall>) => Promise<LocalWriteGuard | undefined>) | undefined
 }
+
+/**
+ * The one decision `fs/write-intent` can hand back that this plugin can honour:
+ * a create that must not replace what is already there. `replaceIfVersion` carries
+ * an opaque token the plugin cannot re-check around an external writer, so it is
+ * reported rather than silently ignored.
+ */
+export type LocalWriteGuard = { kind: 'createIfAbsent' } | { kind: 'replaceIfVersion' }
 
 /** One tool call's parameters as the registry decoded them. */
 export interface RemoteCallArgs {
@@ -428,16 +446,45 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           }
           const bridge = deps.local
           const dir = bridge === undefined ? undefined : await bridge.dirOf(exec)
+          let local: string
           if (bridge !== undefined && dir !== undefined) {
-            let local: string
             try {
               local = bridge.resolve(call.localPath, dir)
             } catch (error: unknown) {
               return { action: call.action, ok: false, status: 'failed', localPath: call.localPath, remotePath: call.path, message: error instanceof Error ? error.message : String(error), hint: 'Use a path inside the conversation workspace.' } as never
             }
-            params.localPath = local
           } else {
-            params.localPath = call.localPath
+            local = call.localPath
+          }
+          params.localPath = local
+          // Ask the file pipeline before scp touches the disk: the session's
+          // change recorder captures its before-image from this waterfall, and a
+          // create-only guard means a copy would clobber something the harness
+          // decided this turn may not replace.
+          if (call.action === 'download' && bridge?.writeIntent !== undefined) {
+            const guard = await bridge.writeIntent(local, exec)
+            if (guard?.kind === 'createIfAbsent' && call.overwrite !== true && await bridge.exists(local)) {
+              return {
+                action: 'download',
+                ok: false,
+                status: 'refused-exists',
+                localPath: local,
+                remotePath: call.path,
+                message: `The file pipeline only allows a new file at ${local}, and one is already there.`,
+                hint: 'Pick another localPath, or delete the existing file first.',
+              } as never
+            }
+            if (guard?.kind === 'replaceIfVersion' && call.overwrite !== true) {
+              return {
+                action: 'download',
+                ok: false,
+                status: 'refused-exists',
+                localPath: local,
+                remotePath: call.path,
+                message: `A transfer cannot honour the observed version the file pipeline requires for ${local}.`,
+                hint: 'Pass overwrite when you mean to replace it.',
+              } as never
+            }
           }
           params.path = call.path
           if (call.overwrite === true) params.overwrite = true

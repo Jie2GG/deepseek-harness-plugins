@@ -251,6 +251,13 @@ the 0.5.1 fix, so the next round does not have to re-derive them:
   cannot leak a credential, and answers the alias question instantly. The plugin
   passes only its own port/key/jump/extra-flag overrides, so what it prints is
   what a probe would dial.
+- `fs/write-intent` is a single-slot **decision** waterfall: a listener may
+  answer `createIfAbsent` or `replaceIfVersion` and never consults your write, so
+  the plugin must act on the answer — a create-only guard against an existing file
+  is a refusal, and a version guard cannot be honoured by an external copy and is
+  reported as such. The session change recorder attaches the edit by **object
+  identity** of the actor it saw at `tools/pre-execute`, which is why the plugin
+  hands the live tool execution to the waterfall and not a look-alike.
 - File transfer: `scp` is the sibling of the configured `ssh` executable
   (`/usr/bin/ssh` → `/usr/bin/scp`); it takes the port as `-P` (not `-p`), accepts
   the same `-o BatchMode` / `StrictHostKeyChecking=accept-new` / `-i` / `-J` /
@@ -386,11 +393,12 @@ the 0.5.1 fix, so the next round does not have to re-derive them:
   the agent's `run` action.
 - Remote calls are synchronous: no PTY, no terminal input, no background job. A
   command that waits for a prompt hits its deadline.
-- A download is not announced through the `fs/write-intent` waterfall, so outside a
-  git workspace it will not appear in the session's file-change summary even though
-  the file itself lands (in a git workspace the turn-boundary snapshot covers it).
-  Firing that waterfall is the natural follow-up, and so is a `tool.call.toolview`
-  card for the tool, which the Web client renders from the wire tool name.
+- A download dispatches `fs/write-intent` before `scp` runs, with the tool
+  execution as the actor, which is how the external write still lands in the
+  conversation's change summary (the recorder reads the before-image from that
+  waterfall and compares the disk at turn end; it never watches the write). The
+  plugin does not emit `fs/observed` afterwards — nothing needs it for the change
+  list, and the version token belongs to whoever performs the write.
 - The credential store is private to other OS users, not to the agent: tool
   processes run as the same user that can read `.credentials.yaml`.
 - Deleting the bundle leaves both `storages/ssh_targets.json` (targets, ceilings,

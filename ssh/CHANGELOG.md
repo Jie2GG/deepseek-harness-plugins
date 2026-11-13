@@ -4,6 +4,29 @@ All notable changes to `@jie2gg/dsh-plugin-ssh` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project uses [semantic versioning](https://semver.org/).
 
+## 0.8.0
+
+### Added
+
+- **A downloaded file now counts as a change in the conversation.** Before `scp`
+  writes anything, the plugin dispatches the same `fs/write-intent` waterfall the
+  built-in file tool does, with the live tool execution as the actor, and the
+  session's change recorder captures the before-image from that event — it never
+  watches the write itself, so an external process producing the bytes is the
+  supported shape, not a workaround.
+- The plugin honours what the pipeline answers instead of ignoring it: a
+  `createIfAbsent` guard with a file already in place refuses the download and
+  names the file pipeline as the reason, and a `replaceIfVersion` requirement is
+  reported as such (an external copy cannot re-check an opaque version token), so
+  a forced overwrite is an explicit caller choice rather than a silent bypass.
+
+### Notes
+
+- Attribution follows the recorder's own rules: only the turn's first mutation of
+  a path gets a before-image, and delegated or subagent sessions are skipped. The
+  plugin does not emit `fs/observed` after a transfer — nothing reads it for the
+  change list, and the version token belongs to whoever performs the write.
+
 ## 0.7.0
 
 ### Added

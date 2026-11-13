@@ -120,6 +120,15 @@ export function apply(ctx: Context): void {
       },
       exists: existsLocally,
       resolve: (localPath, dir) => resolveLocalInside(localPath, dir),
+      async writeIntent(localPath, exec) {
+        // Same actor, same waterfall the shipped file tool dispatches, and fired
+        // before the external writer runs — that is what makes a downloaded file
+        // show up in the conversation's change list.
+        const target = await ctx.fs.resolve(localPath)
+        const intent = await ctx.waterfall('fs/write-intent', target, exec as never, () => undefined)
+        const kind = (intent as { kind?: string } | undefined)?.kind
+        return kind === 'createIfAbsent' || kind === 'replaceIfVersion' ? { kind } : undefined
+      },
     },
     sessionOf: exec => (exec.agent as { id?: string } | undefined)?.id,
     sessionTargetOf: sessionId => store?.getSessionTarget(sessionId)?.targetId,
