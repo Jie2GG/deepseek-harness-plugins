@@ -890,7 +890,7 @@ window.__ModuleLoader__.load({
       const where = typeof args.label === 'string' && args.label !== '' ? args.label : (args.target ?? '')
       // ops answers `ls` with the action name `list`, so both spellings map.
       // ops answers `ls` with the action name `list`, so both spellings map.
-      const key = { run: 'rowRun', ls: 'rowLs', list: 'rowLs', list: 'rowLs', read: 'rowRead', write: 'rowWrite', upload: 'rowUpload', download: 'rowDownload' } as Record<string, string>
+      const key = { run: 'rowRun', ls: 'rowLs', list: 'rowLs',  read: 'rowRead', write: 'rowWrite', upload: 'rowUpload', download: 'rowDownload' } as Record<string, string>
       if (action === 'targets') return t('rowTargets')
       const pathKey = action === 'download' ? 'localPath' : 'path'
       const tail = typeof args[pathKey] === 'string' && args[pathKey] !== '' ? `: ${args[pathKey]}` : (typeof args.command === 'string' && args.command !== '' ? `: ${args.command}` : '')
