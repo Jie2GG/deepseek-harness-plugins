@@ -4,6 +4,46 @@ All notable changes to `@jie2gg/dsh-plugin-ssh` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project uses [semantic versioning](https://semver.org/).
 
+## 0.5.1
+
+### Fixed
+
+- **A first connection to an unknown host no longer times out.** A secret-backed
+  probe ran with `BatchMode=no`, so on an unknown host key OpenSSH asked
+  “are you sure you want to continue connecting (yes/no/[fingerprint])?” — on a
+  terminal the spawned child does not have, with stdin ignored. Nobody could
+  answer, the probe sat until its deadline, and stderr stayed empty, so the page
+  could only report 无法连接 / timed out for a host that was actually reachable.
+  Every probe now passes `-o StrictHostKeyChecking=accept-new`: an unknown key is
+  recorded on first contact and the exchange proceeds. A **changed** key still
+  fails, and is reported as “host key not trusted” rather than a generic failure.
+- **A timed-out probe states what it saw.** The output readers were consulted
+  before the provider had terminated the child and flushed the pipes, which left
+  the timeout outcome with an empty reason. The runner now waits briefly for the
+  child to settle and reads the streams after that drain.
+- **The connect phase no longer eats the whole deadline.** `ConnectTimeout` was
+  set to the full probe timeout, so a host that took its time on key exchange or
+  authentication had nothing left and was cut off mid-handshake. It is now a
+  third of the deadline, capped at 10 s: an unreachable host still fails fast.
+
+### Added
+
+- The Client settings tab shows a **Probe identity** card: the account, uid, and
+  home directory the Host process runs probes as, reported by the Host. This is
+  the answer to “my terminal connects but the page says it cannot”: the two are
+  usually different accounts, so they read different `~/.ssh/config`, keys,
+  agents, and `known_hosts` files.
+
+### Notes
+
+- Verified against the reporter's own target (`root@10.100.1.205`, password mode,
+  a stored password) from this machine: with the 0.5.0 options the handshake hung
+  12 s with no output; with `StrictHostKeyChecking=accept-new` the same command
+  authenticated in 681 ms with exit code 0.
+- The plugin records an unknown host key in the **Host account's** `known_hosts`,
+  which 0.4.0 documentation said it never touched. That promise is corrected in
+  both detail documents.
+
 ## 0.5.0
 
 ### Changed

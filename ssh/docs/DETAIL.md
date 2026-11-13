@@ -2,10 +2,11 @@
 
 Manages the SSH targets this machine reaches: a named list of hosts and OpenSSH
 aliases, how each one logs in, and a connectivity test you can run from the
-browser. Version **0.5.0** settles the authentication choice at two modes — **key**
-or **password** — after dropping the third one 0.4.0 offered; a new target still
-takes one address field plus the secrets that mode asks for, the page keeps its
-two tabs, and the agent still runs nothing on your behalf.
+browser. Version **0.5.1** settles the authentication choice at two modes — **key**
+or **password** — and fixes first contact with an unknown host key, which used to
+stall until the probe timed out. A new target still takes one address field plus
+the secrets that mode asks for, the page keeps its two tabs, and the agent still
+runs nothing on your behalf.
 
 ## Where the page is
 
@@ -20,7 +21,7 @@ General settings. Across its top sit two tabs:
 Both tabs read and write one page state, so a probe you started on the first tab
 keeps running while you edit values on the second.
 
-## What version 0.5.0 does
+## What the current version does
 
 - **SSH target list.** Add, edit, and delete named targets. One field takes the
   address — `[user@]host[:port]`, an `ssh://` form, an IPv6 literal in brackets,
@@ -84,13 +85,31 @@ processes run as that same user, so a stored secret is private from other users
 rather than hidden from the agent. And a stored secret still only ever runs `true`
 on the remote machine — the plugin executes nothing else there yet.
 
+## When your terminal connects but the page does not
+
+A probe is not your terminal session. It runs as the account the Harness Host
+process uses, and the Client settings tab names that account under **Probe
+identity**. That account has its own `~/.ssh/config`, its own private keys, its
+own `ssh-agent`, and its own `known_hosts`, so:
+
+- an alias that works in your terminal may resolve to something else, or nothing,
+  for the Host account;
+- a key you reach through `ssh-agent` in your shell is not in that agent;
+- a host you accepted interactively once is not automatically trusted there —
+  the first probe records it instead of asking.
+
+The stored password path does not depend on any of that: it authenticates by
+itself, which is why 0.5.1 made an unknown host key a recorded fact rather than
+an unanswerable question.
+
 ## What the page never touches
 
 - `~/.ssh/config`, your keys, and your agent sockets are read by `ssh` itself,
   never written by this plugin.
-- `known_hosts`: the probe keeps OpenSSH's strict host-key checking, so an
-  untrusted host is reported instead of silently accepted. Connect once from a
-  terminal to record the key.
+- `known_hosts`, apart from one thing: an unknown host key is **recorded on
+  first contact** (`StrictHostKeyChecking=accept-new`), because the probe has no
+  terminal to ask on and would otherwise wait forever. A host key that has
+  **changed** is still refused, never overwritten.
 - The `ssh` binary: nothing is installed or upgraded; a missing executable is
   reported as its own result.
 
@@ -108,7 +127,7 @@ None of these exist yet, and the interface may still change.
 
 ## Configuration
 
-The bundle inserts one plugin row with `config: {}` and 0.5.0 declares no
+The bundle inserts one plugin row with `config: {}` and this release declares no
 configuration fields: everything the page edits lives either in the plugin's own
 storage or in the credential store. Any key you add to that row is currently
 ignored.

@@ -64,6 +64,8 @@ window.__ModuleLoader__.load({
         settingsSaved: 'Saved.',
         settingsHint: 'A probe runs with BatchMode=yes unless it needs a secret, in which case the askpass helper answers the prompt for it.',
         commandHint: 'A name resolved on PATH, or an absolute path. Nothing is installed or upgraded: an executable that cannot be resolved is reported as its own result.',
+        runAsTitle: 'Probe identity',
+        runAsHint: 'A probe runs as the account the Harness Host process uses, so it reads and records keys in that account\'s ~/.ssh — often not the account your own terminal uses. An unknown host key is recorded on first contact, and a changed key still fails.',
         boundsTitle: 'Fixed bounds',
         boundsTargets: 'Targets per profile',
         boundsConcurrency: 'Probes at once',
@@ -138,7 +140,7 @@ window.__ModuleLoader__.load({
         stFailed: 'Failed',
         asOf: 'as of {at}',
         took: '{ms} ms',
-        hintUnknownHost: 'OpenSSH has no trusted host key for this host yet. Connect once from a terminal (ssh <host>) to record it; this page never writes known_hosts.',
+        hintUnknownHost: 'OpenSSH refused this host key. A first contact is recorded automatically, so this usually means the key changed: confirm the fingerprint with whoever runs the server, then update the known_hosts file of the Host account.',
         hintSshMissing: 'The configured ssh executable could not be resolved. Install OpenSSH or set its path in Client settings.',
         hintAuthFailed: 'The connection reached the server but no credential was accepted. For a password or an encrypted key, fill the secret field; for an agent key, check that the agent is running.',
         hintUnreachable: 'The host did not accept the session: check the address, the port, and any jump host.',
@@ -165,6 +167,8 @@ window.__ModuleLoader__.load({
         settingsSaved: '已保存。',
         settingsHint: '不需要凭据的探测以 BatchMode=yes 运行；需要用凭据时，由 askpass 助手应答提示。',
         commandHint: '填 PATH 能解析到的名字，或绝对路径。插件不会安装或升级程序：解析不到就单独作为一种结果报告。',
+        runAsTitle: '探测运行身份',
+        runAsHint: '探测以 Harness Host 进程所属的账号运行，因此读取与写入的是那个账号的 ~/.ssh，往往不是你终端所用的账号。首次遇到的主机密钥会被自动记录；主机密钥发生变化时仍会失败。',
         boundsTitle: '固定边界',
         boundsTargets: '每个 profile 可存的目标数',
         boundsConcurrency: '同时进行的探测数',
@@ -239,7 +243,7 @@ window.__ModuleLoader__.load({
         stFailed: '失败',
         asOf: '截至 {at}',
         took: '{ms} 毫秒',
-        hintUnknownHost: 'OpenSSH 还没有这台主机被信任的主机密钥。请在终端先手动连接一次（ssh <主机>）记录下来；本页面从不写入 known_hosts。',
+        hintUnknownHost: 'OpenSSH 拒绝了这台主机的密钥。首次联系会被自动记录，所以这通常表示主机密钥已变：请与服务器管理方确认 fingerprint，再更新探测所用账号的 known_hosts。',
         hintSshMissing: '无法解析设置里的 ssh 可执行文件。请安装 OpenSSH，或在客户端参数里填写它的路径。',
         hintAuthFailed: '已经连上服务端，但没有凭据被接受。密码或带口令的私钥请填写对应的凭据输入框；用 agent 的密钥请确认 agent 在运行。',
         hintUnreachable: '主机没有接受这次会话：请检查地址、端口以及跳板主机。',
@@ -806,6 +810,8 @@ window.__ModuleLoader__.load({
       const [settings, setSettings] = React.useState(null as { command: string; probeTimeoutMs: number; maxOutputBytes: number } | null)
       const [limits, setLimits] = React.useState({ maxConnections: 64, concurrentProbes: 4, probeAllLimit: 12, probeTimeoutMinMs: 1000, probeTimeoutMaxMs: 120000, outputMinBytes: 1024, outputMaxBytes: 4194304 })
       const [askpass, setAskpass] = React.useState('ready')
+      // Whose ~/.ssh the probes read: reported by the Host, never inferred here.
+      const [runsAs, setRunsAs] = React.useState(null as { uid: number | null; user: string; home: string } | null)
       // Whether the loaded Host half knows about authentication modes at all:
       // an in-place package swap needs a Host restart, and the page keeps working
       // without the secret controls until then.
@@ -844,6 +850,7 @@ window.__ModuleLoader__.load({
           })
           if (result.limits !== undefined) setLimits(result.limits)
           setAskpass(result.askpass ?? 'ready')
+          if (result.runsAs !== undefined) setRunsAs(result.runsAs)
           setModern(result.askpass !== undefined)
           setProbing(result.probing ?? 0)
           setFailure(null)
@@ -1063,6 +1070,17 @@ window.__ModuleLoader__.load({
         } catch {
           if (alive.current) setNotice({ tone: 'warn', text: t('copyFailed') })
         }
+      }
+
+      /**
+       * Name the identity a probe runs as, exactly as the Host reported it.
+       * @returns the one-line description, or `undefined` while it is unknown.
+       */
+      function runsAsLabel(): string | undefined {
+        if (runsAs === null) return undefined
+        const account = runsAs.user === '' ? '—' : runsAs.user
+        const uid = runsAs.uid === null || runsAs.uid === undefined ? '—' : String(runsAs.uid)
+        return `${account} (uid ${uid}) · ${runsAs.home === '' ? '—' : runsAs.home}`
       }
 
       /**
@@ -1392,6 +1410,13 @@ window.__ModuleLoader__.load({
         settings === null ? h('span', { class: 'dshssh-muted' }, loading ? t('listProbing') : t('listLoadFailed')) : null,
       )
 
+      /** Whose ssh configuration a probe really uses. */
+      const identityCard = h('section', { class: 'dshssh-card' },
+        h('h3', { class: 'dshssh-card-title' }, t('runAsTitle')),
+        runsAsLabel() === undefined ? null : h('p', { class: 'dshssh-row-meta' }, runsAsLabel() ?? ''),
+        h('p', { class: 'dshssh-muted' }, t('runAsHint')),
+      )
+
       /** What the plugin fixes in code, so a value is never a surprise. */
       const boundsCard = h('section', { class: 'dshssh-card' },
         h('h3', { class: 'dshssh-card-title' }, t('boundsTitle')),
@@ -1458,7 +1483,7 @@ window.__ModuleLoader__.load({
         'aria-labelledby': `${TAB_BASE}-${tab}`,
         tabIndex: 0,
         class: 'dshssh-panel',
-      }, tab === 'list' ? listCard : h('div', { class: 'dshssh-panel' }, settingsCard, boundsCard))
+      }, tab === 'list' ? listCard : h('div', { class: 'dshssh-panel' }, settingsCard, identityCard, boundsCard))
 
       return h('div', { class: 'dshssh-root' },
         h('style', {}, CSS),

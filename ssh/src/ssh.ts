@@ -38,7 +38,19 @@ const HOST_KEY_PATTERNS: readonly RegExp[] = [
   /host key verification failed/iu,
   /no matching host key type/iu,
   /man-in-the-middle/iu,
+  /remote host identification has changed/iu,
+  /offending (rsa |ecdsa |ed25519 |ecdsa-sk |ed25519-sk )?key in/iu,
+  /host key for .* did not match/iu,
+  /fingerprint does not match/iu,
 ]
+
+/*
+ * An unknown host key is recorded on first contact, and a changed one still
+ * fails: `BatchMode=no` would otherwise ask "are you sure you want to continue
+ * connecting?" on a terminal the spawned child does not have, and the probe
+ * would sit there until its deadline with nothing on stderr at all.
+ */
+export const HOST_KEY_SETTING = 'StrictHostKeyChecking=accept-new'
 
 /** stderr text that means the transport worked and the credential did not. */
 const AUTH_PATTERNS: readonly RegExp[] = [
@@ -188,7 +200,10 @@ export class SshRunner {
           hint: this.#askpass?.failure === undefined ? 'The helper is not prepared yet.' : this.#askpass.failure.slice(0, 512),
         })
       }
-      const connectTimeoutSeconds = Math.max(1, Math.round(settings.probeTimeoutMs / 1000))
+      // The whole deadline belongs to the exchange, not to the TCP connect
+      // alone: a third of it, capped at 10 s, reaches an unreachable host fast
+      // and still leaves room for key exchange and one authentication round.
+      const connectTimeoutSeconds = Math.max(1, Math.min(10, Math.round(settings.probeTimeoutMs / 3000)))
       const executable = await this.#resolve(settings.command, controller.signal)
       if (executable === undefined) {
         return {
@@ -201,6 +216,7 @@ export class SshRunner {
       const argv: string[] = [
         executable,
         '-o', `BatchMode=${needsSecret ? 'no' : 'yes'}`,
+        '-o', HOST_KEY_SETTING,
         '-o', `ConnectTimeout=${String(connectTimeoutSeconds)}`,
         '-o', `ServerAliveInterval=${String(Math.max(1, Math.floor(connectTimeoutSeconds / 2)))}`,
       ]
@@ -254,6 +270,15 @@ export class SshRunner {
         }, settings.probeTimeoutMs)
       })
 
+      if (settled.kind === 'timeout') {
+        // Let the provider terminate the child and flush the pipes before
+        // reading: the collected streams stay readable after settlement, and
+        // without this drain the timeout outcome would report no reason at all.
+        const drain = new AbortController()
+        const drainTimer = setTimeout(() => drain.abort(), 400)
+        await handle.waitForExit(drain.signal).catch(() => undefined)
+        clearTimeout(drainTimer)
+      }
       const stdout = handle.collected.stdout?.readFrom(0).text ?? ''
       const stderr = handle.collected.stderr?.readFrom(0).text ?? ''
       const durationMs = Date.now() - startedAt

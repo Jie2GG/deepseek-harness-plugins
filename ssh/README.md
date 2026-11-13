@@ -120,9 +120,9 @@ The file's shape, asserted by an integration run against the published json
 backend:
 
 ```json
-{ "unit": { "name": "ssh_targets", "version": 1 },
+{ "unit": { "name": "ssh_targets", "version": 2 },
   "global": { "command": "ssh", "probeTimeoutMs": 10000, "maxOutputBytes": 65536 },
-  "tables": { "connections": { "ssh-0123456789": { "id": "…", "label": "…", "host": "…", "extraArgs": ["-4"], "createdAt": "…", "updatedAt": "…", "lastProbe": { "status": "auth-failed" } } } } }
+  "tables": { "connections": { "ssh-0123456789": { "id": "…", "label": "…", "host": "…", "auth": "password", "extraArgs": ["-4"], "createdAt": "…", "updatedAt": "…", "lastProbe": { "status": "auth-failed" } } } } }
 ```
 
 Bounds live in `src/storage.ts`: 64 targets, 4 concurrent probes, 12 per
@@ -178,8 +178,8 @@ unmounting removes it.
 ## Verified contracts
 
 Facts checked against the running DSH (`0.2.2-rc.1`, `web` profile) while 0.2.0
-was written and re-checked at 0.3.0, so the next round does not have to
-re-derive them:
+was written and re-checked through 0.5.1, and reproduced against a live server for
+the 0.5.1 fix, so the next round does not have to re-derive them:
 
 - `ctx.storageDomain.open(spec)` → `Domain` with `table(name)` (`get`, `keys()`,
   `entries()` as `[key, value]`, `size`, `put`, `delete`, `deleteMany`,
@@ -247,8 +247,24 @@ re-derive them:
   branch, so a legacy or hand-edited record reads and probes without turning the
   list into a `storage-error`. The record format stays at version 2.
 - The probe command line, asserted by the offline smoke run:
-  `ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -p 22022
+  `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=3
+  -o ServerAliveInterval=1 -o PreferredAuthentications=publickey -p 22022
   -i /home/j/.ssh/id -J jump -o PreferredAuthentications=publickey jiegg@build-box true`.
+
+- A spawned child has **no terminal**: stdin is ignored, and the Host process is
+  not attached to one. That makes the interactive host-key question unanswerable,
+  which is the whole 0.5.1 fix — `accept-new` records instead of asking (OpenSSH
+  7.6+, and this machine runs 10.0p2). A changed key still fails, and its
+  `Offending … key in` / `Remote Host Identification Has Changed` output is
+  classified as `unknown-host`.
+- The collected streams are only complete after the provider has terminated the
+  child and drained them, so a probe that hits its deadline waits up to 400 ms
+  for `waitForExit` before reading them; without that drain a timeout carries no
+  reason at all.
+- `list` reports `runsAs` (`uid`, `user`, `home`) from the Host process, because
+  a probe reads that account's `~/.ssh`, not the terminal user's. On this
+  deployment the Host runs as uid 1024 with no `passwd` entry while the shell
+  account is uid 1000 — exactly the confusion the identity card answers.
 
 ## Planned surface for the next round
 
@@ -261,10 +277,16 @@ re-derive them:
    authentication plumbing and the secret slots are already the same ones.
 4. Optional: read `~/.ssh/config` aliases as a suggested inventory (`ctx.fs`).
 
-## Limits of 0.4.0
+## Limits of 0.5.1
 
 - One settings page, its two tabs, is the only surface; the agent cannot see the
   list yet.
+- A probe reads the **Host account's** ssh world — its `~/.ssh/config`, keys,
+  agent, and `known_hosts` — not the terminal user's, so a working alias in a
+  shell can still resolve differently here. The Client settings tab names the
+  account, and the first probe records an unknown host key rather than asking.
+- Nothing about these fixes is live until the running Host loads the new module:
+  an in-place package swap keeps the previous one until the process restarts.
 - A probe authenticates and then runs only `true`; nothing else executes remotely,
   so a stored password is used for authentication checks alone.
 - The credential store is private to other OS users, not to the agent: tool
