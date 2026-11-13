@@ -3,7 +3,7 @@
 Manages the SSH targets this machine reaches: a named list of hosts and OpenSSH
 aliases, how each one logs in, and a connectivity test you can run from the
 browser. From **0.6.0** the conversation can use that server too: the agent gets
-one `ssh` tool that runs commands, lists and reads files, writes text, and moves
+one `ssh_client` tool that runs commands, lists and reads files, writes text, and moves
 files with `scp` — all against the target you picked for the conversation, with the
 credentials you stored on this page. Nothing is installed or upgraded on either
 side.
@@ -181,7 +181,7 @@ ignored.
   copy starts. Two honest caveats: only the first change to a path within a turn keeps a
   before-image, and a sub-agent's conversation is not tracked by the recorder.
 - The settings page and its two tabs are the only **interface**; the conversation
-  reaches the same capability through the `ssh` tool, whose call renders in the
+  reaches the same capability through the `ssh_client` tool, whose call renders in the
   harness's own tool row like any other tool's.
 - A page probe authenticates and then runs only `true` on the server; real commands
   come from the agent's `run` action, and nothing on the server is installed or

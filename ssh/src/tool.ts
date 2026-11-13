@@ -56,8 +56,8 @@ export const REMOTE_TOOL_ACTIONS = ['targets', 'run', 'ls', 'read', 'write', 'up
 
 /** Preferred tool name, with a namespaced fallback if another plugin holds it. */
 /** The wire name this plugin claims. */
-export const REMOTE_TOOL_NAME = 'ssh'
-/** The name used when another plugin already holds `ssh`. */
+export const REMOTE_TOOL_NAME = 'ssh_client'
+/** The name used when another plugin already holds the primary name. */
 export const REMOTE_TOOL_FALLBACK_NAME = 'ssh_remote'
 
 /** What the policy layer needs to know about one stored target. */

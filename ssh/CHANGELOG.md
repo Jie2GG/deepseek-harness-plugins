@@ -4,6 +4,16 @@ All notable changes to `@jie2gg/dsh-plugin-ssh` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project uses [semantic versioning](https://semver.org/).
 
+## 0.13.0
+
+### Changed
+
+- **The tool is now `ssh_client`.** `ssh` is the word the OpenSSH program owns:
+  in the same sentence the description talks about the executable, the `-G`
+  resolution, the askpass helper, and `scp`, a tool named `ssh` reads as the
+  program rather than as this plugin's client over it. The fallback when another
+  bundle holds the name stays `ssh_remote`.
+
 ## 0.12.0
 
 ### Changed
