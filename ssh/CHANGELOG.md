@@ -4,6 +4,38 @@ All notable changes to `@jie2gg/dsh-plugin-ssh` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project uses [semantic versioning](https://semver.org/).
 
+## 0.7.0
+
+### Added
+
+- **A **Resolve** button on every target row.** It asks the local OpenSSH client
+  what that address actually means (`ssh -G`, which applies `~/.ssh/config`,
+  canonicalisation, and defaults **without contacting the server**) and shows the
+  host it would dial, the port, the user, the identity files in the order they
+  would be tried, and any `ProxyJump` or `ProxyCommand`.
+- A **differs from the saved address** chip when the client resolves something
+  other than what you typed — which is the usual reason an alias works in one
+  account's terminal and not here: the resolution is done as the Host account, the
+  same account that runs the probes, so it shows that account's configuration.
+- The raw resolved output stays available in a collapsible panel, so nothing is
+  hidden behind the parsed subset.
+- The route gained a `resolve` method (`{ target?, sessionId? }`), and
+  `SshTransport.resolve` shares the lane accounting, the executable lookup, and the
+  drained-stream reading of every other call — its command line deliberately
+  carries no `BatchMode` and no remote command, because nothing connects.
+
+### Notes
+
+- A saved record that names no user and a resolution that supplies one counts as a
+  difference: the probe would dial a bare alias and let the client decide, so the
+  panel telling you the effective user is the point of the feature.
+- Verified offline against a canned `ssh -G` dump: the `-G` form is local-only
+  (no `BatchMode`, no trailing remote command), the six keys are parsed with
+  repeated `identityfile` lines preserved, the differs flag is true for a
+  redirecting alias and false for an exact match, a nonzero client exit becomes
+  `ok: false` with its message, and an empty inventory refuses with `bad-input`
+  naming the reason. 394 assertions across seven suites.
+
 ## 0.6.0
 
 ### Added

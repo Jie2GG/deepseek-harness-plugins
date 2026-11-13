@@ -12,7 +12,7 @@
 
 import { connectionInputSchema, draftSecretSchema, remotePathSchema, transferInputSchema, sessionTargetInputSchema, MAX_CONCURRENT_PROBES, MAX_CONNECTIONS, MAX_MAX_OUTPUT_BYTES, MAX_MAX_TRANSFER_BYTES, MAX_PROBE_TIMEOUT_MS, MAX_REMOTE_TIMEOUT_MS, MIN_MAX_OUTPUT_BYTES, MIN_MAX_TRANSFER_BYTES, MIN_PROBE_TIMEOUT_MS, MIN_REMOTE_TIMEOUT_MS, probeDraftSchema, remoteRunSchema, secretPatchSchema, settingsInputSchema } from './storage.ts'
 import { SshError } from './types.ts'
-import type { AuthMode, ConnectionRecord, ConnectionView, ProbeOutcome, RemoteRunResult, RemoteTransferResult, SshSettings } from './types.ts'
+import type { AuthMode, ConnectionRecord, ConnectionView, ProbeOutcome, ResolvedConfig, RemoteRunResult, RemoteTransferResult, SshSettings } from './types.ts'
 import { transfer } from './transfer.ts'
 import { shellQuote } from './transport.ts'
 import type { RemoteAuth, RemoteTarget, SshTransport } from './transport.ts'
@@ -24,6 +24,27 @@ const PROBE_ALL_LIMIT = 12
 
 /** Plain JSON parameters as the route decoded them. */
 export type Params = Record<string, unknown>
+
+/** What one `ssh -G` resolution reports. */
+export interface ResolveResult {
+  /** Always `resolve`. */
+  action: 'resolve'
+  /** Whether the client understood and resolved the target. */
+  ok: boolean
+  /** The target that was resolved. */
+  target: { id: string; label: string; host: string }
+  /** The keys this plugin's calls are built from, as the client would use them. */
+  resolved: ResolvedConfig
+  /** What the saved record itself says, for comparison. */
+  stored: { host: string; user?: string | undefined; port?: number | undefined }
+  /** Whether the resolved destination differs from the saved address. */
+  differs: boolean
+  /** The raw resolved configuration, trimmed for a details panel. */
+  text?: string | undefined
+  /** Why it failed. */
+  message?: string | undefined
+  durationMs?: number | undefined
+}
 
 /** One remote file operation's canonical result. */
 export interface RemoteFileResult {
@@ -101,6 +122,8 @@ export interface Ops {
   probeAll(): Promise<{ connections: ConnectionView[]; probed: number; skipped: number; failures: { id: string; message: string }[] }>
   /** Run one remote command, resolving the target the same way the tool will. */
   runCommand(params: Params): Promise<{ run: RemoteRunResult; connection?: ConnectionView | undefined; connections: ConnectionView[] }>
+  /** Ask the local OpenSSH client what this target really resolves to. */
+  resolveRemote(params: Params): Promise<ResolveResult>
   /** Push one local file or directory to the server. */
   upload(params: Params): Promise<RemoteTransferResult>
   /** Pull one remote file into the conversation's workspace. */
@@ -362,6 +385,61 @@ export function createOps(deps: OpsDeps): Ops {
     return base
   }
 
+
+  /**
+   * Read the handful of resolved keys this plugin's calls actually affect.
+   * @param text - the `ssh -G` output.
+   * @returns the parsed keys, omitting any the client did not print.
+   */
+  function parseResolved(text: string): ResolvedConfig {
+    const resolved: ResolvedConfig = {}
+    const identities: string[] = []
+    for (const line of (text ?? '').split('\n')) {
+      const match = /^(\S+)\s+(.*)$/u.exec(line.trim())
+      if (match === null) continue
+      const key = (match[1] ?? '').toLowerCase()
+      const raw = (match[2] ?? '').trim()
+      switch (key) {
+        case 'hostname':
+          resolved.hostname = raw
+          break
+        case 'port': {
+          const port = Number(raw)
+          if (Number.isInteger(port) && port > 0 && port <= 65535) resolved.port = port
+          break
+        }
+        case 'user':
+          resolved.user = raw
+          break
+        case 'identityfile':
+          if (raw !== '') identities.push(raw)
+          break
+        case 'proxyjump':
+          if (raw !== 'none') resolved.proxyJump = raw
+          break
+        case 'proxycommand':
+          if (raw !== 'none') resolved.proxyCommand = raw
+          break
+        default:
+          break
+      }
+    }
+    if (identities.length > 0) resolved.identityFiles = identities
+    return resolved
+  }
+
+  /**
+   * Whether the client's answer differs from the address the user saved.
+   * @param resolved - the parsed `ssh -G` keys.
+   * @param stored - what the record itself says.
+   * @returns true when at least one field was resolved to something else.
+   */
+  function resolvedDiffers(resolved: ResolvedConfig, stored: { host: string; user?: string | undefined; port?: number | undefined }): boolean {
+    if (resolved.hostname !== undefined && resolved.hostname !== stored.host) return true
+    if (resolved.user !== undefined && resolved.user !== stored.user) return true
+    if (resolved.port !== undefined && resolved.port !== (stored.port ?? 22)) return true
+    return resolved.proxyJump !== undefined || resolved.proxyCommand !== undefined
+  }
 
   /**
    * Validate one transfer call and run it, keeping the refusal language the same
@@ -680,6 +758,43 @@ export function createOps(deps: OpsDeps): Ops {
         bytes: Buffer.byteLength(content, 'utf8'),
         overwrote: overwrite && !append,
       })
+    },
+
+    async resolveRemote(params: Params): Promise<ResolveResult> {
+      const state = await store()
+      const settings = state.settings()
+      const record = pickTarget(state, params)
+      const collected = await runner.resolve(targetOf(record), settings)
+      const target = { id: record.id, label: record.label, host: record.host }
+      const stored: { host: string; user?: string | undefined; port?: number | undefined } = {
+        host: record.host,
+        ...(record.user === undefined ? {} : { user: record.user }),
+        ...(record.port === undefined ? {} : { port: record.port }),
+      }
+      if (collected.outcome !== 'exit' || (collected.exitCode ?? 0) !== 0) {
+        const reason = collected.error ?? collected.stderr ?? collected.stdout
+        return {
+          action: 'resolve',
+          ok: false,
+          target,
+          stored,
+          resolved: {},
+          differs: false,
+          durationMs: collected.durationMs,
+          ...(reason === undefined || reason.trim() === '' ? {} : { message: reason.trim().slice(0, 512) }),
+        }
+      }
+      const resolved = parseResolved(collected.stdout)
+      return {
+        action: 'resolve',
+        ok: true,
+        target,
+        stored,
+        resolved,
+        differs: resolvedDiffers(resolved, stored),
+        ...(collected.stdout.trim() === '' ? {} : { text: collected.stdout.trim().split('\n').slice(0, 220).join('\n') }),
+        durationMs: collected.durationMs,
+      }
     },
 
     async upload(params: Params): Promise<RemoteTransferResult> {

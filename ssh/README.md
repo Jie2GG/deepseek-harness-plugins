@@ -98,6 +98,7 @@ Body `{ method, params? }`, result `{ ok: true, result }` or
 | `remove` | `{ id }` | `{ removed, orphanSecrets, connections }` |
 | `probe` | `{ id }` or `{ draft, secrets? }` | `{ connection?, probe?, connections }` |
 | `run` | `{ command, target?, sessionId?, timeoutMs?, maxOutputBytes? }` | `{ run, connection?, connections }` |
+| `resolve` | `{ target?, sessionId? }` | `{ action: 'resolve', ok, target, resolved, stored, differs, text? }` |
 | `upload` / `download` | `{ path, localPath, localDir?, target?, sessionId?, recursive?, overwrite?, maxBytes?, timeoutMs? }` | the transfer result |
 | `setSessionTarget` / `clearSessionTarget` | `{ sessionId, targetId? }` | `{ sessionTarget }` |
 | `probeAll` | – | `{ connections, probed, skipped, failures }` |
@@ -245,6 +246,11 @@ Facts checked against the running DSH (`0.2.2-rc.1`, `web` profile) while 0.2.0
 was written and re-checked through 0.5.1, and reproduced against a live server for
 the 0.5.1 fix, so the next round does not have to re-derive them:
 
+- `ssh -G <target>` is a **local** operation: it prints the resolved
+  configuration and exits without dialing, so the Resolve button cannot hang,
+  cannot leak a credential, and answers the alias question instantly. The plugin
+  passes only its own port/key/jump/extra-flag overrides, so what it prints is
+  what a probe would dial.
 - File transfer: `scp` is the sibling of the configured `ssh` executable
   (`/usr/bin/ssh` → `/usr/bin/scp`); it takes the port as `-P` (not `-p`), accepts
   the same `-o BatchMode` / `StrictHostKeyChecking=accept-new` / `-i` / `-J` /

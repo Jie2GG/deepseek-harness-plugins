@@ -29,6 +29,12 @@ keeps running while you edit values on the second.
   options** section holds the jump host, extra `ssh` arguments (one `ssh` argv
   entry per line), and a note. The display name is optional and falls back to the
   address. The list holds up to 64 targets.
+- **Resolve, per target.** A **Resolve** button asks the local OpenSSH client what
+  the address really means — the host, port, user, identity files, jump host, or
+  `ProxyCommand` it would dial — without contacting the server. When that answer
+  differs from what you saved, a chip says so, because that is the usual reason an
+  alias works in your terminal and not here: the resolution runs as the same
+  account that runs the probes.
 - **Two ways to log in.** Pick **Key** (ssh-agent or a private key, with an
   optional passphrase when the key is encrypted) or **Password** (publickey offers
   are skipped). The choice is remembered per target and shown on its row. The

@@ -134,6 +134,19 @@ window.__ModuleLoader__.load({
         removed: 'Deleted, and its stored secret was forgotten.',
         removedOrphan: 'Deleted, but its stored secret could not be removed.',
         copyDetail: 'Copy diagnostics',
+        resolve: 'Resolve',
+        resolveTitle: 'What the OpenSSH client resolves this target to',
+        resolveHint: 'Resolved locally with `ssh -G`; a probe also adds its own BatchMode, timeout, and host-key options.',
+        resolveDiffers: 'Differs from the saved address',
+        resolveSame: 'Matches the saved address',
+        resolveHostname: 'Dials',
+        resolveUser: 'User',
+        resolvePort: 'Port',
+        resolveIdentity: 'Identity files',
+        resolveJump: 'Jump host',
+        resolveProxy: 'ProxyCommand',
+        resolveRaw: 'Full resolved configuration',
+        resolveFailed: 'The ssh client could not resolve this target.',
         copied: 'Copied.',
         copyFailed: 'The browser refused the clipboard.',
         askpassUnavailable: 'This Host cannot prepare the ssh askpass helper, so a stored password or passphrase cannot be used. Key-agent probes still work.',
@@ -246,6 +259,19 @@ window.__ModuleLoader__.load({
         removed: '已删除，同时忘掉了它存的凭据。',
         removedOrphan: '已删除，但没能清掉它存的凭据。',
         copyDetail: '复制诊断',
+        resolve: '解析',
+        resolveTitle: 'OpenSSH 客户端把这个目标解析成什么',
+        resolveHint: '用 `ssh -G` 在本机解析，不联网；真正探测时插件还会加上自己的 BatchMode、超时与主机密钥选项。',
+        resolveDiffers: '与保存的地址不一致',
+        resolveSame: '与保存的地址一致',
+        resolveHostname: '实际连接',
+        resolveUser: '用户',
+        resolvePort: '端口',
+        resolveIdentity: '身份文件',
+        resolveJump: '跳板主机',
+        resolveProxy: 'ProxyCommand',
+        resolveRaw: '完整解析结果',
+        resolveFailed: '本机 ssh 没能解析这个目标。',
         copied: '已复制。',
         copyFailed: '浏览器拒绝了剪贴板写入。',
         askpassUnavailable: '这台 Host 上准备不出 ssh 的 askpass 助手，已保存的密码或口令暂时用不了；ssh-agent 方式的探测不受影响。',
@@ -380,6 +406,7 @@ window.__ModuleLoader__.load({
 .dshssh-seg-item:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
 .dshssh-seg-item:disabled{cursor:default;opacity:.4}
 .dshssh-seg-item:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:-2px}
+.dshssh-resolve{display:flex;flex-direction:column;gap:8px;padding:8px;border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-base)}
 .dshssh-seat{display:flex;flex-direction:column;gap:4px;min-width:200px}
 .dshssh-seat-group{display:flex;flex-direction:column;gap:2px}
 .dshssh-seat-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:5px 8px;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary);background:transparent;border:0;border-radius:6px;cursor:pointer;text-align:left}
@@ -931,6 +958,9 @@ window.__ModuleLoader__.load({
       const [draftProbe, setDraftProbe] = React.useState(null as ProbeOutcome | null)
       const [fieldError, setFieldError] = React.useState(null as string | null)
       const [confirmId, setConfirmId] = React.useState(null as string | null)
+      // Resolved client configuration per target, kept by id so one row's answer
+      // survives a re-render of the list.
+      const [resolved, setResolved] = React.useState({} as Record<string, any>)
       const [settingsDraft, setSettingsDraft] = React.useState({ command: '', probeTimeoutMs: '', maxOutputBytes: '', remoteTimeoutMs: '', maxTransferBytes: '' })
       const alive = React.useRef(true)
 
@@ -1218,6 +1248,55 @@ window.__ModuleLoader__.load({
         )
       }
 
+      /**
+       * Label-and-value rows for one resolved configuration, skipping what the
+       * client did not report.
+       * @param config - the parsed keys.
+       * @param record - the saved row, for the fallback address line.
+       * @returns the definition-list children.
+       */
+      function resolveRows(config: any, record: ConnectionView): any[] {
+        const rows: any[] = []
+        const push = (key: string, labelKey: string, value: unknown): void => {
+          if (value === undefined || value === null || value === '') return
+          rows.push(h('div', { class: 'dshssh-bound', key },
+            h('dt', {}, t(labelKey)),
+            h('dd', {}, Array.isArray(value) ? value.join(', ') : String(value)),
+          ))
+        }
+        const port = config.port === undefined || config.port === 22 ? '' : `:${String(config.port)}`
+        push('host', 'resolveHostname', `${config.user ?? record.user ?? ''}${config.user || record.user ? '@' : ''}${config.hostname ?? record.host}${port}`)
+        push('user', 'resolveUser', config.user)
+        push('port', 'resolvePort', config.port)
+        push('identity', 'resolveIdentity', config.identityFiles)
+        push('jump', 'resolveJump', config.proxyJump)
+        push('proxy', 'resolveProxy', config.proxyCommand)
+        return rows
+      }
+
+      /**
+       * Ask the Host what the OpenSSH client resolves this target to.
+       * @param record - the stored target.
+       * @returns resolution once the answer landed or the failure is stored.
+       */
+      async function resolveTarget(record: ConnectionView): Promise<void> {
+        const key = record.id
+        if (resolved[key] !== undefined) {
+          setResolved((current: Record<string, any>) => {
+            const next = { ...current }
+            delete next[key]
+            return next
+          })
+          return
+        }
+        try {
+          const result = await rpc('resolve', { target: record.id })
+          setResolved((current: Record<string, any>) => ({ ...current, [key]: result }))
+        } catch (error: unknown) {
+          setResolved((current: Record<string, any>) => ({ ...current, [key]: { ok: false, message: (error as any)?.message ?? t('resolveFailed') } }))
+        }
+      }
+
       /** One row of the stored list. */
       function rowOf(record: ConnectionView): any {
         const testing = busy === `probe:${record.id}`
@@ -1233,6 +1312,23 @@ window.__ModuleLoader__.load({
             h('div', { class: 'dshssh-row-meta' }, addressOf(record)),
             h('div', { class: 'dshssh-chips' }, ...chips),
             record.note === undefined ? null : h('div', { class: 'dshssh-muted' }, record.note),
+            resolved[record.id] === undefined ? null : h('div', { class: 'dshssh-resolve' },
+              h('span', { class: 'dshssh-row-title' }, t('resolveTitle')),
+              h('div', { class: 'dshssh-chips' },
+                h('span', {
+                  class: 'dshssh-chip',
+                  'data-tone': resolved[record.id].differs === true ? 'secret' : '',
+                }, resolved[record.id].differs === true ? t('resolveDiffers') : t('resolveSame')),
+              ),
+              resolved[record.id].ok === false
+                ? h('p', { class: 'dshssh-error' }, resolved[record.id].message ?? t('resolveFailed'))
+                : h('dl', { class: 'dshssh-bounds' }, ...resolveRows(resolved[record.id].resolved ?? {}, record)),
+              h('p', { class: 'dshssh-muted' }, t('resolveHint')),
+              typeof resolved[record.id].text === 'string' ? h('details', {},
+                h('summary', { class: 'dshssh-muted' }, t('resolveRaw')),
+                h('pre', { class: 'dshssh-detail' }, String(resolved[record.id].text)),
+              ) : null,
+            ),
             testing
               ? h(Badge, { tone: 'idle', text: t('stRunning') })
               : h('div', { class: 'dshssh-field' },
@@ -1282,6 +1378,12 @@ window.__ModuleLoader__.load({
                 disabled: busy !== null,
                 onClick: () => { setConfirmId(record.id) },
               }, t('remove')),
+            h('button', {
+              class: 'dshssh-btn',
+              type: 'button',
+              disabled: busy !== null,
+              onClick: () => { void resolveTarget(record) },
+            }, t('resolve')),
             record.lastProbe === undefined ? null : h('button', {
               class: 'dshssh-btn',
               type: 'button',

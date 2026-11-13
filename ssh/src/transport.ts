@@ -500,6 +500,46 @@ export class SshTransport {
   }
 
   /**
+   * Ask the local OpenSSH client what a target really resolves to.
+   *
+   * `ssh -G` applies the client configuration and prints the result without
+   * contacting the server, so it answers "where does this alias actually go"
+   * instantly and without a credential. The plugin's own overrides (port, key,
+   * jump, extra flags) are passed exactly as a probe would pass them, so what is
+   * printed is what a probe would dial.
+   * @param target - the identity fields to resolve.
+   * @param settings - the executable and the capture ceiling.
+   * @returns the resolved configuration text, or a classified failure.
+   */
+  async resolve(target: RemoteTarget, settings: SshSettings): Promise<Collected> {
+    const controller = this.#takeLane('config resolution')
+    try {
+      const program = await this.resolveExecutable(settings.command, controller.signal)
+      if (program === undefined) {
+        return {
+          outcome: 'error',
+          error: `Could not resolve the ssh executable "${settings.command}".`,
+          exitCode: null,
+          signal: null,
+          stdout: '',
+          stderr: '',
+          durationMs: 0,
+          truncated: false,
+        }
+      }
+      const flags: string[] = []
+      if (target.port !== undefined) flags.push('-p', String(target.port))
+      if (target.identityFile !== undefined) flags.push('-i', target.identityFile)
+      if (target.proxyJump !== undefined) flags.push('-J', target.proxyJump)
+      if (target.extraArgs !== undefined) flags.push(...target.extraArgs)
+      return await this.#collect(program, ['-G', ...flags, this.authority(target)], settings, undefined, 5_000, controller)
+    } finally {
+      this.#controllers.delete(controller)
+      this.#inFlight -= 1
+    }
+  }
+
+  /**
    * Run one command on the remote host.
    *
    * The command is a single argument, so nothing is interpreted locally; the

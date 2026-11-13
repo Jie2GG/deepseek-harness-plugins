@@ -12,7 +12,7 @@
 export const RPC_ROUTE_PATH = '/api/ssh/rpc'
 
 /** RPC names the page may invoke; every other name is refused before dispatch. */
-export const RPC_METHODS = ['list', 'save', 'remove', 'probe', 'probeAll', 'run', 'upload', 'download', 'setSessionTarget', 'clearSessionTarget', 'configUpdate'] as const
+export const RPC_METHODS = ['list', 'save', 'remove', 'probe', 'probeAll', 'run', 'resolve', 'upload', 'download', 'setSessionTarget', 'clearSessionTarget', 'configUpdate'] as const
 
 /** One RPC name as it travels on the wire. */
 export type RpcMethod = (typeof RPC_METHODS)[number]
@@ -122,6 +122,22 @@ export interface ConnectionInput {
   remoteTimeoutMs?: number | null | undefined
   /** Per-target output ceiling; `null` clears the override. */
   maxOutputBytes?: number | null | undefined
+}
+
+/** What one target's OpenSSH client configuration resolves to. */
+export interface ResolvedConfig {
+  /** The host the client will dial after aliases and canonicalisation. */
+  hostname?: string | undefined
+  /** The port it will dial. */
+  port?: number | undefined
+  /** The user it will send. */
+  user?: string | undefined
+  /** Identity files the configuration names, in the order the client would try them. */
+  identityFiles?: string[] | undefined
+  /** Jump host, if one is configured. */
+  proxyJump?: string | undefined
+  /** ProxyCommand, if one is configured. */
+  proxyCommand?: string | undefined
 }
 
 /** One SSH target as the plugin's storage domain keeps it. */
