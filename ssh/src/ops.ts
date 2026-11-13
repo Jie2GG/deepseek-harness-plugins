@@ -14,6 +14,7 @@ import { connectionInputSchema, draftSecretSchema, remotePathSchema, transferInp
 import { SshError } from './types.ts'
 import type { AuthMode, ConnectionRecord, ConnectionView, ProbeOutcome, ResolvedConfig, RemoteRunResult, RemoteTransferResult, SshSettings } from './types.ts'
 import { transfer } from './transfer.ts'
+import { applyEdit } from './edit.ts'
 import { shellQuote } from './transport.ts'
 import type { RemoteAuth, RemoteTarget, SshTransport } from './transport.ts'
 import type { TargetStore } from './store.ts'
@@ -48,8 +49,8 @@ export interface ResolveResult {
 
 /** One remote file operation's canonical result. */
 export interface RemoteFileResult {
-  /** `read` or `write`. */
-  action: 'read' | 'write'
+  /** `read`, `write`, or `edit`. */
+  action: 'read' | 'write' | 'edit'
   /** Whether the remote side accepted and completed the call. */
   ok: boolean
   /** Classified transport and command outcome. */
@@ -74,6 +75,14 @@ export interface RemoteFileResult {
   truncated?: boolean
   /** Whether an existing remote file was replaced. */
   overwrote?: boolean
+  /** For `edit`: how many places were replaced. */
+  replaced?: number
+  /** For `edit`: the size before and after the change. */
+  bytesBefore?: number
+  /** For `edit`: the size after the change. */
+  bytesAfter?: number
+  /** For `edit`: the backup copy left behind, when one was taken. */
+  backup?: string
   /** Exit code of the remote command. */
   exitCode?: number | null
   /** Duration of the whole call. */
@@ -138,6 +147,8 @@ export interface Ops {
   clearSessionTarget(params: Params): Promise<{ sessionTarget: null }>
   /** Read one remote path, whether it is a file, a directory, or missing. */
   readPath(params: Params): Promise<RemoteFileResult>
+  /** Replace exact text inside one remote file. */
+  editRemote(params: Params): Promise<RemoteFileResult>
   /** Write one remote file from text, with the overwrite guard. */
   writeRemote(params: Params): Promise<RemoteFileResult>
   /** Replace the shared settings. */
@@ -328,7 +339,7 @@ export function createOps(deps: OpsDeps): Ops {
    * @param action - which file action is running, for the refusal message.
    * @returns the resolved pieces.
    */
-  async function fileCall(params: Params, action: 'list' | 'read' | 'write') {
+  async function fileCall(params: Params, action: 'read' | 'write' | 'edit') {
     const state = await store()
     const globalSettings = state.settings()
     const record = pickTarget(state, params)
@@ -786,6 +797,90 @@ export function createOps(deps: OpsDeps): Ops {
         type: 'file',
         ...(body.size === undefined ? {} : { size: body.size }),
       })
+    },
+
+    async editRemote(params: Params): Promise<RemoteFileResult> {
+      const { record, settings, auth, path } = await fileCall(params, 'edit')
+      const oldText = typeof params.oldText === 'string' ? params.oldText : ''
+      const newText = typeof params.newText === 'string' ? params.newText : ''
+      const quoted = shellQuote(path)
+      const target = { id: record.id, label: record.label, host: record.host }
+      const read = await runner.run(targetOf(record), settings, auth, `if [ ! -f ${quoted} ]; then exit 20; fi; cat -- ${quoted}`, {
+        maxOutputBytes: options.maxOutputBytes ?? settings.maxOutputBytes,
+      })
+      if (read.status !== 'succeeded') {
+        const missing = read.exitCode === 20
+        return {
+          action: 'edit',
+          ok: false,
+          status: read.status,
+          target,
+          path,
+          type: missing ? 'missing' : 'file',
+          ...(read.durationMs === undefined ? {} : { durationMs: read.durationMs }),
+          ...(read.exitCode === undefined ? {} : { exitCode: read.exitCode }),
+          message: missing ? `There is no regular file at ${path} on ${record.host}.` : (read.stderr ?? 'The remote file could not be read.'),
+          hint: missing ? 'Read the parent directory, or write the file first.' : 'Read the file to see what came back.',
+        }
+      }
+      if (read.truncated === true) {
+        return {
+          action: 'edit',
+          ok: false,
+          status: 'exit-nonzero',
+          target,
+          path,
+          type: 'file',
+          ...(read.durationMs === undefined ? {} : { durationMs: read.durationMs }),
+          message: 'The file is larger than the read ceiling, so an edit could not see all of it.',
+          hint: 'Raise the output ceiling in Settings → Remote connections, or replace the file with write.',
+        }
+      }
+      const outcome = applyEdit({
+        content: read.stdout ?? '',
+        oldText,
+        newText,
+        ...(params.all === undefined ? {} : { all: params.all === true }),
+        ...(params.replaceFirst === undefined ? {} : { replaceFirst: params.replaceFirst === true }),
+      })
+      if (!outcome.ok) {
+        return {
+          action: 'edit',
+          ok: false,
+          status: 'exit-nonzero',
+          target,
+          path,
+          type: 'file',
+          ...(read.durationMs === undefined ? {} : { durationMs: read.durationMs }),
+          message: outcome.message,
+          hint: outcome.hint,
+          ...(outcome.reason === 'ambiguous' ? { replaced: outcome.found } : {}),
+        }
+      }
+      // Written back through the same inode with `cat >`, so the file keeps its
+      // owner and mode; a `cp` of a temp file over it would not. The optional
+      // backup is a `cp -p` first, which is cheap next to a remote round trip and
+      // is the only undo available on a server this plugin does not version.
+      const backupPath = `${path}.dsh-bak`
+      const prepare = params.backup === false ? '' : `cp -p -- ${quoted} ${shellQuote(backupPath)} && `
+      const wrote = await runner.run(targetOf(record), settings, auth, `${prepare}cat > ${quoted}`, {
+        stdin: outcome.text,
+        maxOutputBytes: settings.maxOutputBytes,
+      })
+      return {
+        action: 'edit',
+        ok: wrote.status === 'succeeded',
+        status: wrote.status,
+        target,
+        path,
+        type: 'file',
+        replaced: outcome.count,
+        bytesBefore: outcome.bytesBefore,
+        bytesAfter: outcome.bytesAfter,
+        ...(params.backup === false ? {} : { backup: backupPath }),
+        ...(wrote.durationMs === undefined && read.durationMs === undefined ? {} : { durationMs: (wrote.durationMs ?? 0) + (read.durationMs ?? 0) }),
+        ...(wrote.status === 'succeeded' ? {} : { message: wrote.stderr ?? 'The remote write failed after the match was found.', hint: 'The file is unchanged only if the backup copy also failed; check with read.' }),
+      }
     },
 
     async writeRemote(params: Params): Promise<RemoteFileResult> {

@@ -6,6 +6,19 @@ project uses [semantic versioning](https://semver.org/).
 
 ## 0.14.0
 
+### Added
+
+- **`edit` changes a remote file by exact text, not by line number.** It reads the
+  file, applies the replacement locally, and writes the result back through the same
+  inode (`cat >`, so owner and mode survive), leaving a `<path>.dsh-bak` copy unless
+  `backup: false` is passed. A needle that matches more than once is **refused** with
+  the count and the two ways out (`all`, `replaceFirst`, or more surrounding lines),
+  because on a server there is no diff view in which to notice a wrong guess. A file
+  larger than the read ceiling is refused rather than edited blind.
+- The matching rules live in `src/edit.ts` as a pure function, so the semantics —
+  non-overlapping counting, byte sizes rather than characters, an empty `newText`
+  meaning deletion, a no-op replacement refused — are tested without a server.
+
 ### Changed
 
 - **`ls` is gone: one `read` answers whatever the path is.** A directory comes back

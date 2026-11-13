@@ -52,7 +52,7 @@ import { leadingProgram } from './transport.ts'
 import type { Ops, Params, RemoteFileResult } from './ops.ts'
 
 /** Actions the tool offers in 0.6.0; file transfer joins in the next stage. */
-export const REMOTE_TOOL_ACTIONS = ['targets', 'run', 'read', 'write', 'upload', 'download'] as const
+export const REMOTE_TOOL_ACTIONS = ['targets', 'run', 'read', 'write', 'edit', 'upload', 'download'] as const
 
 /** Preferred tool name, with a namespaced fallback if another plugin holds it. */
 /** The wire name this plugin claims. */
@@ -147,6 +147,11 @@ export interface RemoteCallArgs {
   target?: string | undefined
   path?: string | undefined
   content?: string | undefined
+  oldText?: string | undefined
+  newText?: string | undefined
+  all?: boolean | undefined
+  replaceFirst?: boolean | undefined
+  backup?: boolean | undefined
   overwrite?: boolean | undefined
   append?: boolean | undefined
   mkdir?: boolean | undefined
@@ -256,6 +261,16 @@ export function decideAccess(target: TargetSnapshot | undefined, args: RemoteCal
   // A download reads the server and writes inside the conversation workspace,
   // which the file pipeline already governs; asking twice would be noise.
   if (args.action === 'download') return { verdict: 'allow', reason: '' }
+  if (args.action === 'edit') {
+    return {
+      verdict: 'ask',
+      reason: `Edit ${args.path ?? '<remote path>'} on ${authority}: replace ${JSON.stringify((args.oldText ?? '').slice(0, 120))} with ${JSON.stringify((args.newText ?? '').slice(0, 120))}.`,
+      display: {
+        en: `Edit a file on ${authority}: ${args.path ?? '(no path given)'}. The text it replaces is quoted in the reason.`,
+        zh: `将在 ${authority} 上编辑文件：${args.path ?? '（未给出路径）'}。被替换的文本在理由里引用。`,
+      },
+    }
+  }
   if (args.action === 'write') {
     return {
       verdict: 'ask',
@@ -394,7 +409,7 @@ export function describeRemote(targets: TargetBrief[]): string {
     : `Choose the server this conversation means and pass it as \`target\`. Available aliases: ${targets
       .map(target => `\`${target.label}\` (${target.user === undefined || target.user === '' ? '' : `${target.user}@`}${target.host})`)
       .join(', ')}.`
-  return `Runs commands and moves files on a stored SSH server, with the credentials the plugin holds. ${list} A call addresses one server: leave \`target\` out to reuse the one this conversation last used. Nothing is interpreted by a local shell; the command string is executed by the login shell on the server. \`targets\`, \`read\`, and \`download\` are reads; \`read\` answers with a directory listing when the path is a directory and with the file's text when it is a file; \`run\`, \`write\`, and \`upload\` may be refused by the user, and \`run\` runs freely unless that target lists a command allowlist, in which case only the listed programs and simple single-program calls run freely.`
+  return `Runs commands and moves files on a stored SSH server, with the credentials the plugin holds. ${list} A call addresses one server: leave \`target\` out to reuse the one this conversation last used. Nothing is interpreted by a local shell; the command string is executed by the login shell on the server. \`targets\`, \`read\`, and \`download\` are reads; \`read\` answers with a directory listing when the path is a directory and with the file's text when it is a file; \`run\`, \`write\`, \`edit\`, and \`upload\` may be refused by the user, and \`run\` runs freely unless that target lists a command allowlist, in which case only the listed programs and simple single-program calls run freely.`
 }
 
 /**
@@ -455,7 +470,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
         type: 'string',
         required: true,
         enum: [...REMOTE_TOOL_ACTIONS],
-        description: 'What to do: `targets` lists what is saved and resolves what this call would address; `run` executes one shell command on it; `read` returns a directory listing or the text of a file, depending on what the path is; `write` sends text to a remote path; `edit` replaces exact text inside a remote file; `upload` and `download` move files.',
+        description: 'What to do: `targets` lists what is saved and resolves what this call would address; `run` executes one shell command on it; `read` returns a directory listing or the text of a file, depending on what the path is; `write` sends text to a remote path; `edit` replaces exact text inside a remote file (it refuses an ambiguous match instead of guessing); `upload` and `download` move files.',
       },
       target: { type: 'string', description: targetParamHint(deps.targetsOf?.() ?? []) },
       command: { type: 'string', description: 'For `run`: the command line to execute on the server, as one string. Quote anything that must survive the remote shell.' },
@@ -472,6 +487,11 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
     output: {
       schema: {
         oneOf: [
+          {
+            type: 'object',
+            additionalProperties: false,
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'edit', required: true }, path: { type: 'string' }, type: { type: 'string', enum: ['file', 'directory', 'other', 'missing'] }, replaced: { type: 'integer' }, bytesBefore: { type: 'integer' }, bytesAfter: { type: 'integer' }, backup: { type: 'string' }, size: { type: 'integer' }, durationMs: { type: 'integer' } },
+          },
           {
             type: 'object',
             additionalProperties: false,
@@ -517,7 +537,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
     presentCall: (args) => {
       const call = args as RemoteCallArgs
       const label = call.command !== undefined ? call.command : call.path ?? call.action
-      return { card: 'generic', title: `${REMOTE_TOOL_NAME} ${call.action}`, kind: call.action === 'run' ? 'execute' : call.action === 'write' ? 'edit' : 'read', rawInput: String(label).slice(0, 400) }
+      return { card: 'generic', title: `${REMOTE_TOOL_NAME} ${call.action}`, kind: call.action === 'run' ? 'execute' : call.action === 'write' || call.action === 'edit' || call.action === 'upload' ? 'edit' : 'read', rawInput: String(label).slice(0, 400) }
     },
     async execute(args, exec) {
       const call = args as RemoteCallArgs
@@ -602,6 +622,26 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           const result = call.action === 'upload' ? await operations.upload(params) : await operations.download(params)
           await rememberSessionTarget(operations, sessionId, call, result)
           return { ...result, action: call.action } as never
+        }
+        case 'edit': {
+          if (call.path === undefined || call.path.trim() === '') {
+            return { action: 'edit', ok: false, status: 'failed', message: 'An edit call needs a remote path.', hint: 'Pass path: the file to change.' } as never
+          }
+          if (call.oldText === undefined || call.oldText === '') {
+            return { action: 'edit', ok: false, status: 'failed', message: 'An edit call needs the exact text to find.', hint: 'Read the file first and copy the lines, indentation included.' } as never
+          }
+          if (call.newText === undefined) {
+            return { action: 'edit', ok: false, status: 'failed', message: 'An edit call needs the replacement text.', hint: 'Pass newText, or an empty string to delete the match.' } as never
+          }
+          params.path = call.path
+          params.oldText = call.oldText
+          params.newText = call.newText
+          if (call.all === true) params.all = true
+          if (call.replaceFirst === true) params.replaceFirst = true
+          if (call.backup === false) params.backup = false
+          const edited = await operations.editRemote(params)
+          await rememberSessionTarget(operations, sessionId, call, edited)
+          return { ...edited } as never
         }
         case 'read':
         case 'write': {
@@ -796,6 +836,19 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
       if (typeof value.message === 'string') lines.push(String(value.message))
       if (typeof value.hint === 'string') lines.push(`hint: ${String(value.hint)}`)
       lines.push(`status=${String(value.status)}${typeof value.durationMs === 'number' ? ` · ${String(value.durationMs)} ms` : ''}`)
+      return lines.join('\n')
+    }
+    case 'edit': {
+      lines.push(`${where}: edit ${String(value.path)}`)
+      if (typeof value.replaced === 'number') {
+        const places = value.replaced === 1 ? '1 place' : `${String(value.replaced)} places`
+        lines.push(typeof value.bytesBefore === 'number' && typeof value.bytesAfter === 'number'
+          ? `replaced ${places}, ${String(value.bytesBefore)} -> ${String(value.bytesAfter)} bytes${typeof value.backup === 'string' ? ` (backup: ${String(value.backup)})` : ''}`
+          : `replaced ${places}`)
+      }
+      if (typeof value.message === 'string') lines.push(String(value.message))
+      if (typeof value.hint === 'string') lines.push(`hint: ${String(value.hint)}`)
+      if (value.ok !== true || typeof value.status === 'string') lines.push(`status=${String(value.status)}${typeof value.durationMs === 'number' ? ` · ${String(value.durationMs)} ms` : ''}`)
       return lines.join('\n')
     }
     case 'write': {

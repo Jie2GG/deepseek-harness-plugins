@@ -58,7 +58,7 @@ keeps running while you edit values on the second.
 
 Just ask. The agent sees the saved aliases — each with where it goes — among the
 things it can call, picks the one your conversation is about, and passes it. It can
-run a command, list or read a path, write a file, and upload or download; once it
+run a command, list or read a path, write or precisely edit a file, and upload or download; once it
 names a server, that conversation keeps using it, so a follow-up like "now the disk
 usage" does not repeat the host. Add or remove a target and the choices the agent
 sees follow on the next turn, with no conversation restart.
@@ -77,6 +77,7 @@ What runs without interrupting you:
 | --- | --- |
 | list, read, download, or show the saved targets | runs immediately |
 | a command whose program is in that target's **command allowlist** | runs immediately |
+| an edit of a remote file (exact text, refused when it matches more than once) | asks you first |
 | any other command, and any write or upload | asks you first, in your language, showing the server and the exact command or path |
 | anything against a target with **agent access** turned off | refused |
 

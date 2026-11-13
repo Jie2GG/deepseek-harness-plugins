@@ -31,6 +31,7 @@ ssh/
     ├── tool.ts               # the agent-facing `ssh_client` tool and its policy gate
     ├── transfer.ts           # scp moves, with a remote size and type pre-check
     ├── local-path.ts         # the workspace boundary a local transfer path obeys
+    ├── edit.ts               # the pure match-and-replace rules behind `edit`
     ├── ops.ts                # one method per RPC name, transport-agnostic
     ├── rpc.ts                # Request → Response, failure code → HTTP status
     ├── client.ts             # browser half: the page, its tabs, and its icon
@@ -182,10 +183,12 @@ bundle is the live proof of that).
 
 | Field | Shape |
 | --- | --- |
-| `action` | `targets` \| `run` \| `read` \| `write` \| `upload` \| `download` — `read` answers a directory listing, a file's text, or a refusal, depending on what the path is |
+| `action` | `targets` \| `run` \| `read` \| `write` \| `edit` \| `upload` \| `download` — `read` answers a directory listing, a file's text, or a refusal, depending on what the path is |
 | `localPath`, `recursive` | the local side of a transfer; relative paths resolve inside the conversation workspace |
 | `target` | id, display name (any case), `host`, or `user@host`; omitted means this conversation's chosen target, then a lone saved target |
 | `command` / `path` / `content` | the remote command line, an absolute remote path, and the exact text to write |
+| `oldText` / `newText` | for `edit`: the exact text to find (copied from a read) and its replacement; an empty `newText` deletes |
+| `all` / `replaceFirst` / `backup` | for `edit`: replace every occurrence / only the first / skip the `<path>.dsh-bak` copy |
 | `overwrite` / `append` / `mkdir` | write behaviour; `mkdir` defaults to true |
 | `timeoutMs` / `maxBytes` | per-call overrides of the shared ceilings |
 | `output` | `oneOf` per action, each `additionalProperties: false`; `execute` returns the canonical value and `output.render` writes the transcript text. The registry validates that value against the projected schema, so a branch that omits a field the producer emits rejects the whole call — the suites therefore validate every action's payload with `validateJsonSchemaValue`, not just its contents |
@@ -200,7 +203,7 @@ tool-authoring docs prescribe for deployment policy:
 | `run`, program not allowlisted | **ask** |
 | `run`, a pipeline / redirection / substitution (no single leading program) | **ask** |
 | any `ask`, in a conversation whose approval policy is `never` | **allow** — the core rejects unanswered asks by policy, so asking there is a self-inflicted refusal |
-| `write`, `upload` | **ask** |
+| `write`, `edit`, `upload` | **ask** |
 | `download` | allow (it reads the server and writes inside the session workspace, which the file pipeline already governs) |
 | any action on a target with `agentAccess: off` | deny, naming the settings page |
 | storage unreadable at gate time | deny — running blind on a remote host is worse |
