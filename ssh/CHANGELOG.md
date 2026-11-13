@@ -4,6 +4,15 @@ All notable changes to `@jie2gg/dsh-plugin-ssh` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project uses [semantic versioning](https://semver.org/).
 
+## 0.12.0
+
+### Changed
+
+- **The tool is called `ssh`, not `remote`.** `ssh` is the word a reader and the
+  model already use for it, the plugin is `ssh`, and a verb-shaped name invited the
+  question "remote from what?". If another bundle holds `ssh`, this one still falls
+  back to `ssh_remote` and says so once.
+
 ## 0.11.0
 
 ### Removed

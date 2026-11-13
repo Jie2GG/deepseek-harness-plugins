@@ -55,7 +55,9 @@ import type { Ops, Params, RemoteFileResult } from './ops.ts'
 export const REMOTE_TOOL_ACTIONS = ['targets', 'run', 'ls', 'read', 'write', 'upload', 'download'] as const
 
 /** Preferred tool name, with a namespaced fallback if another plugin holds it. */
-export const REMOTE_TOOL_NAME = 'remote'
+/** The wire name this plugin claims. */
+export const REMOTE_TOOL_NAME = 'ssh'
+/** The name used when another plugin already holds `ssh`. */
 export const REMOTE_TOOL_FALLBACK_NAME = 'ssh_remote'
 
 /** What the policy layer needs to know about one stored target. */
@@ -519,7 +521,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
     presentCall: (args) => {
       const call = args as RemoteCallArgs
       const label = call.command !== undefined ? call.command : call.path ?? call.action
-      return { card: 'generic', title: `remote ${call.action}`, kind: call.action === 'run' ? 'execute' : call.action === 'write' ? 'edit' : 'read', rawInput: String(label).slice(0, 400) }
+      return { card: 'generic', title: `${REMOTE_TOOL_NAME} ${call.action}`, kind: call.action === 'run' ? 'execute' : call.action === 'write' ? 'edit' : 'read', rawInput: String(label).slice(0, 400) }
     },
     async execute(args, exec) {
       const call = args as RemoteCallArgs

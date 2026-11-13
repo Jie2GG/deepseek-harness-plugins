@@ -28,7 +28,7 @@ ssh/
     ├── transport.ts          # SshTransport: one option set, one child, run + probe
     ├── secrets.ts            # password and passphrase records in the credential store
     ├── askpass.ts            # the private helper that answers an ssh prompt
-    ├── tool.ts               # the agent-facing `remote` tool and its policy gate
+    ├── tool.ts               # the agent-facing `ssh` tool and its policy gate
     ├── transfer.ts           # scp moves, with a remote size and type pre-check
     ├── local-path.ts         # the workspace boundary a local transfer path obeys
     ├── ops.ts                # one method per RPC name, transport-agnostic
@@ -175,7 +175,7 @@ prompt text `ssh` passes as `$1` and answers from `DSH_SSH_ASKPASS_PASSPHRASE` o
 
 ### Tool (`src/tool.ts`)
 
-One tool, `remote`, registered through `ctx.tools.register(defineTool(…))` inside
+One tool, `ssh`, registered through `ctx.tools.register(defineTool(…))` inside
 `ctx.effect` — a third-party bundle needs no preset entry: the registry feeds its
 schemas into the system-prompt assembly on its own (the installed `dsh-github-flow`
 bundle is the live proof of that).
@@ -211,7 +211,7 @@ Chinese, and a missing approval service turns an `ask` into a denial rather than
 pass. The tool body re-checks only the hard stop (`agentAccess`), because it
 cannot know whether the gate already obtained consent.
 
-The name `remote` is a shared extension point: the registry is probed with
+The name `ssh` is a shared extension point: the registry is probed with
 `ctx.tools.get` first, and a taken name falls back to `ssh_remote` with a warning
 instead of failing the fiber; a race between probe and registration retries once.
 An unrelated registration fault still propagates.
@@ -330,7 +330,7 @@ the 0.5.1 fix, so the next round does not have to re-derive them:
   waterfall and compares the disk at turn end; it never watches the write). The
   plugin does not emit `fs/observed` afterwards — nothing needs it for the change
   list, and the version token belongs to whoever performs the write.
-- The tool card claims both wire names (`remote`, `ssh_remote`) and replaces the
+- The tool card claims both wire names (`ssh`, `ssh_remote`) and replaces the
   generic row completely, so an action this component does not name still renders,
   just under a generic headline.
 - The credential store is private to other OS users, not to the agent: tool
