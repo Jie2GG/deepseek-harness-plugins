@@ -437,25 +437,21 @@ window.__ModuleLoader__.load({
 .dshssh-seg-item:disabled{cursor:default;opacity:.4}
 .dshssh-seg-item:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:-2px}
 .dshssh-resolve{display:flex;flex-direction:column;gap:8px;padding:8px;border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-base)}
-.dshssh-tool{display:flex;flex-direction:column;gap:6px;padding:6px 8px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-1)}
-.dshssh-tool[data-state="ok"]{border-color:var(--dsw-alias-state-success-primary)}
-.dshssh-tool[data-state="error"]{border-color:var(--dsw-alias-state-error-primary)}
-.dshssh-tool-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.dshssh-tool-toggle{display:flex;align-items:center;gap:8px;flex:1 1 auto;min-width:0;padding:0;border:0;background:transparent;font:inherit;font-size:13px;color:var(--dsw-alias-label-primary);cursor:pointer;text-align:left}
-.dshssh-tool-toggle:disabled{cursor:default}
-.dshssh-tool-toggle:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:2px}
-.dshssh-tool-title{overflow-wrap:anywhere}
-.dshssh-tool-dot{flex:0 0 auto;width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-state-idle-primary)}
-.dshssh-tool-dot[data-state="running"],.dshssh-tool-dot[data-state="preparing"]{background:var(--dsw-alias-state-warn-primary)}
-.dshssh-tool-dot[data-state="ok"]{background:var(--dsw-alias-state-success-primary)}
-.dshssh-tool-dot[data-state="error"]{background:var(--dsw-alias-state-error-primary)}
-.dshssh-tool-chips{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.dshssh-tool-chip{padding:1px 7px;font-size:11.5px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base)}
-.dshssh-tool-link{padding:2px 8px;font:inherit;font-size:11.5px;color:var(--dsw-alias-brand-primary);background:transparent;border:1px solid var(--dsw-alias-border-l2);border-radius:6px;cursor:pointer}
-.dshssh-tool-link:hover{border-color:var(--dsw-alias-brand-primary)}
-.dshssh-tool-link:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:1px}
+.dshssh-tool{display:flex;flex-direction:column;gap:2px;padding:1px 0}
+.dshssh-tool-row{display:flex;align-items:baseline;gap:8px;min-width:0}
+.dshssh-tool-toggle{display:flex;align-items:baseline;gap:7px;flex:1 1 auto;min-width:0;padding:1px 0;border:0;background:transparent;font:inherit;font-size:13px;color:var(--dsw-alias-label-secondary);cursor:pointer;text-align:left}
+.dshssh-tool-toggle:hover .dshssh-tool-title{color:var(--dsw-alias-label-primary)}
+.dshssh-tool-toggle:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:2px;border-radius:4px}
+.dshssh-tool-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;color:var(--dsw-alias-label-secondary)}
+.dshssh-tool-caret{flex:0 0 auto;font-size:10px;color:var(--dsw-alias-label-tertiary);transition:transform 120ms ease}
+.dshssh-tool-caret[data-open="true"]{transform:rotate(90deg)}
+.dshssh-tool-chips{display:flex;align-items:baseline;gap:9px;flex:0 1 auto;flex-wrap:wrap;font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.dshssh-tool-chip{white-space:nowrap;font-variant-numeric:tabular-nums}
+.dshssh-tool-link{flex:0 0 auto;padding:1px 2px;border:0;background:transparent;font:inherit;font-size:12px;color:var(--dsw-alias-link);cursor:pointer;white-space:nowrap}
+.dshssh-tool-link:hover{text-decoration:underline}
+.dshssh-tool-link:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:1px;border-radius:4px}
 .dshssh-tool-error{margin:0;font-size:12px;color:var(--dsw-alias-state-error-primary)}
-.dshssh-tool-body{margin:0;padding:8px;max-height:320px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l1);border-radius:6px}
+.dshssh-tool-body{margin:2px 0 0;padding:6px 8px;max-height:320px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l1);border-radius:6px}
 .dshssh-hidden{display:none}
 .dshssh-panel{display:flex;flex-direction:column;gap:16px}
 .dshssh-panel:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:2px}
@@ -892,7 +888,8 @@ window.__ModuleLoader__.load({
     /** The title line of a remote tool card, built from its action and arguments. */
     function toolHeadline(action: string, args: any, t: (key: string) => string): string {
       const where = typeof args.label === 'string' && args.label !== '' ? args.label : (args.target ?? '')
-      const key = { run: 'rowRun', ls: 'rowLs', read: 'rowRead', write: 'rowWrite', upload: 'rowUpload', download: 'rowDownload' } as Record<string, string>
+      // ops answers `ls` with the action name `list`, so both spellings map.
+      const key = { run: 'rowRun', ls: 'rowLs', list: 'rowLs', read: 'rowRead', write: 'rowWrite', upload: 'rowUpload', download: 'rowDownload' } as Record<string, string>
       if (action === 'targets') return t('rowTargets')
       const pathKey = action === 'download' ? 'localPath' : 'path'
       const tail = typeof args[pathKey] === 'string' && args[pathKey] !== '' ? `: ${args[pathKey]}` : (typeof args.command === 'string' && args.command !== '' ? `: ${args.command}` : '')
@@ -915,7 +912,6 @@ window.__ModuleLoader__.load({
       if (phase === 'preparing') {
         return h('div', { class: 'dshssh-tool', 'data-tool': 'remote', 'data-state': 'preparing' },
           h('div', { class: 'dshssh-tool-row' },
-            h('span', { class: 'dshssh-tool-dot', 'data-state': 'preparing' }),
             h('span', { class: 'dshssh-tool-title' }, t('rowPreparing')),
           ),
         )
@@ -950,7 +946,7 @@ window.__ModuleLoader__.load({
             disabled: output === '',
             onClick: () => { if (disclosure !== null) disclosure.toggle() },
           },
-            h('span', { class: 'dshssh-tool-dot', 'data-state': state }),
+            h('span', { class: 'dshssh-tool-caret', 'data-open': expanded ? 'true' : 'false', 'aria-hidden': 'true' }, '▶'),
             h('span', { class: 'dshssh-tool-title' }, toolHeadline(action, { ...args, ...(typeof meta.label === 'string' ? { label: meta.label } : {}), ...(typeof meta.path === 'string' ? { path: meta.path } : {}), ...(typeof meta.localPath === 'string' ? { localPath: meta.localPath } : {}) }, t)),
           ),
           h('span', { class: 'dshssh-tool-chips' }, ...chips),
