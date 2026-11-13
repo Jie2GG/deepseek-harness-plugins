@@ -57,6 +57,23 @@ project uses [semantic versioning](https://semver.org/).
 - A call that needs a secret refuses with `secret-error` before any child starts,
   and a refused remote path is explained in words instead of a schema dump.
 
+### Fixed (0.6.0, found in live use)
+
+- The tool rejected its own successful calls: `read` and the two transfers
+  matched **no** `oneOf` branch, so the registry reported
+  `value must match exactly one oneOf branch (matched 0)` on a call that had
+  actually worked. Two causes: the per-branch schemas omitted `exitCode` and
+  `durationMs`, which every ops method emits, and the transfer branch pinned
+  `action` to the name `transfer` while the body returns the real action
+  (`upload` or `download`). Both are corrected — the common outcome fields moved
+  into the shared shape and the transfer branch declares the actions it serves.
+- The offline suites had asserted the payload *values* without ever validating
+  them against the projected JSON Schema, which is how this survived 71 tool
+  assertions. Section 5b of the tool suite and 5b of the transfer suite now run
+  every action's payload through the registry's own `validateJsonSchemaValue`,
+  plus two negative cases (an undeclared field and an unknown action must still
+  be rejected). 376 assertions across seven suites.
+
 ### Notes
 
 - The tool and the storage change live on the Host side, so a running Harness

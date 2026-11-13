@@ -184,7 +184,7 @@ bundle is the live proof of that).
 | `command` / `path` / `content` | the remote command line, an absolute remote path, and the exact text to write |
 | `overwrite` / `append` / `mkdir` | write behaviour; `mkdir` defaults to true |
 | `timeoutMs` / `maxBytes` | per-call overrides of the shared ceilings |
-| `output` | `oneOf` per action, each `additionalProperties: false`; `execute` returns the canonical value and `output.render` writes the transcript text |
+| `output` | `oneOf` per action, each `additionalProperties: false`; `execute` returns the canonical value and `output.render` writes the transcript text. The registry validates that value against the projected schema, so a branch that omits a field the producer emits rejects the whole call — the suites therefore validate every action's payload with `validateJsonSchemaValue`, not just its contents |
 
 Policy is decided in `tools/pre-execute`, not inside the tool, which is what the
 tool-authoring docs prescribe for deployment policy:

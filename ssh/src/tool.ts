@@ -296,6 +296,13 @@ const OUTCOME_SHAPE = {
   message: { type: 'string' },
   hint: { type: 'string' },
   resolvedVia: { type: 'string', enum: ['argument', 'session', 'only-target'] },
+  /**
+   * Every action reports what the child exited with and how long it took, so both
+   * live in the shared shape: keeping them per-branch is how a read payload came to
+   * match no branch at all and the registry rejected the whole call.
+   */
+  exitCode: { oneOf: [{ type: 'integer' }, { type: 'null' }] },
+  durationMs: { type: 'integer' },
   target: {
     type: 'object',
     properties: {
@@ -343,7 +350,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           {
             type: 'object',
             additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'transfer', required: true }, localPath: { type: 'string' }, remotePath: { type: 'string' }, bytes: { type: 'integer' }, recursive: { type: 'boolean' }, overwrote: { type: 'boolean' }, durationMs: { type: 'integer' } },
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', enum: ['upload', 'download'], required: true }, localPath: { type: 'string' }, remotePath: { type: 'string' }, bytes: { type: 'integer' }, recursive: { type: 'boolean' }, overwrote: { type: 'boolean' } },
           },
           {
             type: 'object',
@@ -414,10 +421,10 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
         case 'upload':
         case 'download': {
           if (call.path === undefined || call.path.trim() === '') {
-            return { action: 'transfer', ok: false, status: 'failed', message: `An ${call.action} call needs a remote path.`, hint: 'Pass path: an absolute path on the server.' } as never
+            return { action: call.action, ok: false, status: 'failed', message: `An ${call.action} call needs a remote path.`, hint: 'Pass path: an absolute path on the server.' } as never
           }
           if (call.localPath === undefined || call.localPath.trim() === '') {
-            return { action: 'transfer', ok: false, status: 'failed', message: `An ${call.action} call needs a local path.`, hint: 'Pass localPath, inside this conversation workspace.' } as never
+            return { action: call.action, ok: false, status: 'failed', message: `An ${call.action} call needs a local path.`, hint: 'Pass localPath, inside this conversation workspace.' } as never
           }
           const bridge = deps.local
           const dir = bridge === undefined ? undefined : await bridge.dirOf(exec)
@@ -426,7 +433,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
             try {
               local = bridge.resolve(call.localPath, dir)
             } catch (error: unknown) {
-              return { action: 'transfer', ok: false, status: 'failed', target: undefined, localPath: call.localPath, remotePath: call.path, message: error instanceof Error ? error.message : String(error), hint: 'Use a path inside the conversation workspace.' } as never
+              return { action: call.action, ok: false, status: 'failed', localPath: call.localPath, remotePath: call.path, message: error instanceof Error ? error.message : String(error), hint: 'Use a path inside the conversation workspace.' } as never
             }
             params.localPath = local
           } else {
