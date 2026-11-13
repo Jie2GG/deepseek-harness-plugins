@@ -149,6 +149,24 @@ window.__ModuleLoader__.load({
         resolveFailed: 'The ssh client could not resolve this target.',
         copied: 'Copied.',
         copyFailed: 'The browser refused the clipboard.',
+        rowPreparing: 'Talking to the remote server…',
+        rowRun: 'Run on',
+        rowLs: 'List on',
+        rowRead: 'Read on',
+        rowWrite: 'Write on',
+        rowUpload: 'Upload to',
+        rowDownload: 'Download from',
+        rowTargets: 'Remote targets',
+        rowUnknown: 'Remote call',
+        rowRunning: 'running',
+        rowOk: 'ok',
+        rowError: 'failed',
+        rowInspect: 'Inspect',
+        rowExit: 'exit',
+        rowTook: 'in',
+        rowBytes: 'bytes',
+        rowReplaced: 'replaced',
+        rowDir: 'directory',
         askpassUnavailable: 'This Host cannot prepare the ssh askpass helper, so a stored password or passphrase cannot be used. Key-agent probes still work.',
         legacyHost: 'The running Host predates password support: it still needs to be restarted for the authentication choice and the secret fields to appear. Until then a target connects with ssh-agent or an unencrypted key.',
         stIdle: 'Not tested',
@@ -274,6 +292,24 @@ window.__ModuleLoader__.load({
         resolveFailed: '本机 ssh 没能解析这个目标。',
         copied: '已复制。',
         copyFailed: '浏览器拒绝了剪贴板写入。',
+        rowPreparing: '正在连接远程服务器…',
+        rowRun: '在',
+        rowLs: '列目录于',
+        rowRead: '读取自',
+        rowWrite: '写入到',
+        rowUpload: '上传到',
+        rowDownload: '下载到',
+        rowTargets: '远程目标清单',
+        rowUnknown: '远程调用',
+        rowRunning: '执行中',
+        rowOk: '成功',
+        rowError: '失败',
+        rowInspect: '查看轨迹',
+        rowExit: '退出码',
+        rowTook: '用时',
+        rowBytes: '字节',
+        rowReplaced: '已替换',
+        rowDir: '目录',
         askpassUnavailable: '这台 Host 上准备不出 ssh 的 askpass 助手，已保存的密码或口令暂时用不了；ssh-agent 方式的探测不受影响。',
         legacyHost: '当前正在运行的 Host 还是重启前的旧版本，重启之后才会出现登录方式与凭据输入框。在此之前，目标只能用 ssh-agent 或无口令私钥连接。',
         stIdle: '未测试',
@@ -407,6 +443,25 @@ window.__ModuleLoader__.load({
 .dshssh-seg-item:disabled{cursor:default;opacity:.4}
 .dshssh-seg-item:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:-2px}
 .dshssh-resolve{display:flex;flex-direction:column;gap:8px;padding:8px;border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-base)}
+.dshssh-tool{display:flex;flex-direction:column;gap:6px;padding:6px 8px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-1)}
+.dshssh-tool[data-state="ok"]{border-color:var(--dsw-alias-state-success-primary)}
+.dshssh-tool[data-state="error"]{border-color:var(--dsw-alias-state-error-primary)}
+.dshssh-tool-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.dshssh-tool-toggle{display:flex;align-items:center;gap:8px;flex:1 1 auto;min-width:0;padding:0;border:0;background:transparent;font:inherit;font-size:13px;color:var(--dsw-alias-label-primary);cursor:pointer;text-align:left}
+.dshssh-tool-toggle:disabled{cursor:default}
+.dshssh-tool-toggle:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:2px}
+.dshssh-tool-title{overflow-wrap:anywhere}
+.dshssh-tool-dot{flex:0 0 auto;width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-state-idle-primary)}
+.dshssh-tool-dot[data-state="running"],.dshssh-tool-dot[data-state="preparing"]{background:var(--dsw-alias-state-warn-primary)}
+.dshssh-tool-dot[data-state="ok"]{background:var(--dsw-alias-state-success-primary)}
+.dshssh-tool-dot[data-state="error"]{background:var(--dsw-alias-state-error-primary)}
+.dshssh-tool-chips{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.dshssh-tool-chip{padding:1px 7px;font-size:11.5px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base)}
+.dshssh-tool-link{padding:2px 8px;font:inherit;font-size:11.5px;color:var(--dsw-alias-brand-primary);background:transparent;border:1px solid var(--dsw-alias-border-l2);border-radius:6px;cursor:pointer}
+.dshssh-tool-link:hover{border-color:var(--dsw-alias-brand-primary)}
+.dshssh-tool-link:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:1px}
+.dshssh-tool-error{margin:0;font-size:12px;color:var(--dsw-alias-state-error-primary)}
+.dshssh-tool-body{margin:0;padding:8px;max-height:320px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l1);border-radius:6px}
 .dshssh-seat{display:flex;flex-direction:column;gap:4px;min-width:200px}
 .dshssh-seat-group{display:flex;flex-direction:column;gap:2px}
 .dshssh-seat-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:5px 8px;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary);background:transparent;border:0;border-radius:6px;cursor:pointer;text-align:left}
@@ -925,6 +980,165 @@ window.__ModuleLoader__.load({
           }, t('pickerNone')),
         ),
       )
+    }
+
+
+    /** The title line of a remote tool card, built from its action and arguments. */
+    function toolHeadline(action: string, args: any, t: (key: string) => string): string {
+      const where = typeof args.label === 'string' && args.label !== '' ? args.label : (args.target ?? '')
+      const key = { run: 'rowRun', ls: 'rowLs', read: 'rowRead', write: 'rowWrite', upload: 'rowUpload', download: 'rowDownload' } as Record<string, string>
+      if (action === 'targets') return t('rowTargets')
+      const pathKey = action === 'download' ? 'localPath' : 'path'
+      const tail = typeof args[pathKey] === 'string' && args[pathKey] !== '' ? `: ${args[pathKey]}` : (typeof args.command === 'string' && args.command !== '' ? `: ${args.command}` : '')
+      return `${t(key[action] ?? 'rowUnknown')}${where ? ` ${where}` : ''}${tail}`
+    }
+
+    /**
+     * The chat card for a `remote` call. Registering the key replaces the generic
+     * tool row completely, so all three phases and every action are handled here:
+     * a preparing call shows a pending line, a started call shows the headline with
+     * its running state, and a result adds the outcome facts from
+     * `presentationMeta` while the body stays collapsed until asked for.
+     */
+    function RemoteToolRow(props: any): any {
+      const t = translator(props)
+      const disclosure = typeof props?.useDisclosure === 'function' ? props.useDisclosure() : null
+      const expanded = disclosure === null ? true : disclosure.expanded === true
+      const block = props?.block
+      const phase = props?.phase
+      if (phase === 'preparing') {
+        return h('div', { class: 'dshssh-tool', 'data-tool': 'remote', 'data-state': 'preparing' },
+          h('div', { class: 'dshssh-tool-row' },
+            h('span', { class: 'dshssh-tool-dot', 'data-state': 'preparing' }),
+            h('span', { class: 'dshssh-tool-title' }, t('rowPreparing')),
+          ),
+        )
+      }
+      const settled = phase === 'result'
+      const meta = settled && block?.meta && typeof block.meta === 'object' ? block.meta : {}
+      const output = settled ? collectToolText(block?.content) : ''
+      // The outcome facts are read back out of the rendered transcript line: the
+      // seat's metadata is deliberately narrow, and this plugin owns that line.
+      const facts = parseOutcomeLine(output)
+      const args = readToolArgs(block, settled)
+      const action = typeof meta.action === 'string' ? meta.action : (typeof args.action === 'string' ? args.action : 'run')
+      const errored = settled && (block?.isError === true || meta.ok === false)
+      const state = settled ? (errored ? 'error' : 'ok') : 'running'
+      const chips: any[] = []
+      if (settled) {
+        if (typeof facts.status === 'string') chips.push(h('span', { class: 'dshssh-tool-chip', key: 'status' }, facts.status))
+        if (typeof facts.exitCode === 'number') chips.push(h('span', { class: 'dshssh-tool-chip', key: 'exit' }, `${t('rowExit')} ${String(facts.exitCode)}`))
+        if (typeof facts.durationMs === 'number') chips.push(h('span', { class: 'dshssh-tool-chip', key: 'ms' }, `${t('rowTook')} ${String(facts.durationMs)} ms`))
+        if (typeof facts.bytes === 'number') chips.push(h('span', { class: 'dshssh-tool-chip', key: 'bytes' }, `${String(facts.bytes)} ${t('rowBytes')}`))
+        if (facts.truncated === true) chips.push(h('span', { class: 'dshssh-tool-chip', key: 'trunc' }, 'truncated'))
+      } else {
+        chips.push(h('span', { class: 'dshssh-tool-chip', key: 'running' }, t('rowRunning')))
+      }
+      const localFile = typeof facts.localPath === 'string' ? facts.localPath : undefined
+      return h('div', { class: 'dshssh-tool', 'data-tool': 'remote', 'data-state': state },
+        h('div', { class: 'dshssh-tool-row' },
+          h('button', {
+            type: 'button',
+            class: 'dshssh-tool-toggle',
+            'aria-expanded': expanded,
+            disabled: output === '',
+            onClick: () => { if (disclosure !== null) disclosure.toggle() },
+          },
+            h('span', { class: 'dshssh-tool-dot', 'data-state': state }),
+            h('span', { class: 'dshssh-tool-title' }, toolHeadline(action, { ...args, ...(typeof meta.label === 'string' ? { label: meta.label } : {}), ...(typeof meta.path === 'string' ? { path: meta.path } : {}), ...(typeof meta.localPath === 'string' ? { localPath: meta.localPath } : {}) }, t)),
+          ),
+          h('span', { class: 'dshssh-tool-chips' }, ...chips),
+          localFile !== undefined && typeof props?.openFile === 'function' ? h('button', {
+            type: 'button',
+            class: 'dshssh-tool-link',
+            onClick: () => { props.openFile(shortenHome(localFile, props.home)) },
+          }, String(localFile).split('/').at(-1)) : null,
+          typeof props?.inspect === 'function' ? h('button', {
+            type: 'button',
+            class: 'dshssh-tool-link',
+            onClick: props.inspect,
+          }, t('rowInspect')) : null,
+        ),
+        settled && errored && typeof block?.error?.code === 'string' ? h('p', { class: 'dshssh-tool-error' }, block.error.code) : null,
+        expanded && output !== '' ? h('pre', { class: 'dshssh-tool-body' }, output) : null,
+      )
+    }
+
+    /**
+     * Read the arguments a card headline needs, tolerating a call whose argument
+     * stream is still partial: the raw text is parsed when it is complete, and the
+     * lazy argument view answers for a running call.
+     * @param block - the call or result block.
+     * @param settled - whether the call has produced its result.
+     * @returns the fields used in the headline.
+     */
+    function readToolArgs(block: any, settled: boolean): Record<string, unknown> {
+      const raw = settled ? block?.call?.argsRaw : block?.argsRaw
+      if (typeof raw === 'string' && raw !== '') {
+        try {
+          const parsed = JSON.parse(raw)
+          if (parsed !== null && typeof parsed === 'object') return parsed as Record<string, unknown>
+        } catch {
+          return {}
+        }
+        return {}
+      }
+      const lazy = block?.args
+      if (lazy === null || typeof lazy !== 'object' || typeof lazy.value !== 'function') return {}
+      const out: Record<string, unknown> = {}
+      const action = lazy.value('action')
+      if (typeof action === 'string') out.action = action
+      for (const key of ['command', 'path', 'target', 'localPath']) {
+        if (typeof lazy.text !== 'function') continue
+        const value = lazy.text(key)
+        if (typeof value === 'string' && value !== '') out[key] = value
+      }
+      return out
+    }
+
+    /**
+     * Read the outcome facts back out of the transcript line this plugin renders
+     * (`status=… · exit=N · 705 ms`, and the transfer or read header lines).
+     * @param text - the joined result content.
+     * @returns whatever the text states; the card shows only what it finds.
+     */
+    function parseOutcomeLine(text: string): Record<string, unknown> {
+      const out: Record<string, unknown> = {}
+      if (typeof text !== 'string' || text === '') return out
+      const status = /status=([a-z-]+)/u.exec(text)
+      if (status !== null) out.status = status[1]
+      const exit = /exit=(-?\d+)/u.exec(text)
+      if (exit !== null) out.exitCode = Number(exit[1])
+      const ms = /(\d+) ms/u.exec(text)
+      if (ms !== null) out.durationMs = Number(ms[1])
+      const bytes = /^(\d+) bytes/u.exec(text)
+      if (bytes !== null) out.bytes = Number(bytes[1])
+      if (/output truncated/u.test(text)) out.truncated = true
+      const local = /: (\/[^ ]*) <-> /u.exec(text)
+      if (local !== null) out.localPath = local[1]
+      return out
+    }
+
+    /**
+     * Join the text blocks of a tool result for the card body.
+     * @param content - the result content blocks.
+     * @returns the combined text, or an empty string.
+     */
+    function collectToolText(content: any): string {
+      if (!Array.isArray(content)) return ''
+      return content.map((item: any) => (item !== null && typeof item === 'object' && item.type === 'text' ? String(item.text ?? '') : '')).join('\n').trim()
+    }
+
+    /**
+     * Show a local path under the account home as `~`, the way the host rows do.
+     * @param path - the absolute local path.
+     * @param home - the account home, when the shell supplies one.
+     * @returns the displayable path.
+     */
+    function shortenHome(path: string, home: any): string {
+      if (typeof home !== 'string' || home === '') return path
+      if (path === home) return '~'
+      return path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path
     }
 
     /**
@@ -1733,6 +1947,12 @@ window.__ModuleLoader__.load({
           label: () => ctx.locale.bind(NS)('pickerGroup'),
           locale: NS,
         }, SshTargetSeat)), 'ssh: conversation target picker')
+        ctx.effect(() => ctx.slots.inject('tool.call.toolview', function* () {
+          // Whichever wire name this plugin claimed is decided by the Host, so
+          // both keys are covered and the one never registered simply never renders.
+          yield ctx.slots.register({ name: 'tool.call.toolview', key: 'remote', locale: NS }, RemoteToolRow)
+          yield ctx.slots.register({ name: 'tool.call.toolview', key: 'ssh_remote', locale: NS }, RemoteToolRow)
+        }), 'ssh: remote tool card')
         for (const language of Object.keys(DICT)) {
           ctx.effect(() => ctx.locale.register(NS, language, DICT[language]), `ssh: ${language} dictionary`)
         }

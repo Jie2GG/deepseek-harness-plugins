@@ -20,6 +20,22 @@ project uses [semantic versioning](https://semver.org/).
   reported as such (an external copy cannot re-check an opaque version token), so
   a forced overwrite is an explicit caller choice rather than a silent bypass.
 
+### Added (also 0.8.0)
+
+- **The remote tool has its own chat card.** Registering the wire name in the
+  `tool.call.toolview` keyed seat replaces the generic tool row completely, so the
+  card covers every phase — a pending line while arguments stream in, the headline
+  plus a running state once dispatched, and outcome chips with an expandable output
+  body at result — and every action. The headline names the target, the action, and
+  the path or command; a fetched or written local file gets a button that opens it
+  in the editor, and the trajectory inspector stays available. Both possible wire
+  names are claimed (`remote` and the `ssh_remote` fallback); the one never
+  registered simply never renders.
+- The card's metadata stays three scalars on purpose: the output DSL infers a
+  strict `JsonValue`, so status, exit code, duration, and byte count are read back
+  out of the transcript line this plugin itself renders, which keeps the two in
+  step without widening the persisted payload.
+
 ### Notes
 
 - Attribution follows the recorder's own rules: only the turn's first mutation of

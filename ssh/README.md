@@ -399,6 +399,9 @@ the 0.5.1 fix, so the next round does not have to re-derive them:
   waterfall and compares the disk at turn end; it never watches the write). The
   plugin does not emit `fs/observed` afterwards — nothing needs it for the change
   list, and the version token belongs to whoever performs the write.
+- The tool card claims both wire names (`remote`, `ssh_remote`) and replaces the
+  generic row completely, so an action this component does not name still renders,
+  just under a generic headline.
 - The credential store is private to other OS users, not to the agent: tool
   processes run as the same user that can read `.credentials.yaml`.
 - Deleting the bundle leaves both `storages/ssh_targets.json` (targets, ceilings,

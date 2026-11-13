@@ -164,6 +164,10 @@ ignored.
 
 ## Limits of this release
 
+- A downloaded file is listed among the conversation's changes, the same way an edited
+  workspace file is, because the plugin asks the file pipeline for permission before the
+  copy starts. Two honest caveats: only the first change to a path within a turn keeps a
+  before-image, and a sub-agent's conversation is not tracked by the recorder.
 - The page and its two tabs are the only surface; the agent cannot see or use
   this list yet.
 - A probe authenticates but executes nothing beyond `true`; running a real remote

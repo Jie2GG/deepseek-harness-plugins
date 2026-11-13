@@ -400,7 +400,10 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
       render: (args, value) => [{ type: 'text', text: renderCall(args as RemoteCallArgs, value as Record<string, unknown>) }],
       presentationMeta: (_args, value) => {
         const payload = value as Record<string, unknown>
-        const target = payload.target as { id?: string; label?: string; host?: string } | undefined
+        const target = payload.target as { label?: string; host?: string } | undefined
+        // The DSL infers a strict JsonValue here, so the card is handed only these
+        // three scalars; the status, exit code, and duration a reader wants are
+        // parsed from the rendered body line, whose format this module owns.
         return {
           action: typeof payload.action === 'string' ? payload.action : 'run',
           ok: payload.ok === true,
