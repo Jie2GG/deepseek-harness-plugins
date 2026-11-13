@@ -21,6 +21,11 @@ project uses [semantic versioning](https://semver.org/).
 
 ### Changed
 
+- **Two action names became verbs of what they do.** `targets` is now
+  `get_connection`, and it answers the question the call is really for: which server
+  a later call would address, and how that was reached (named in the call, remembered
+  for this conversation, or the only one saved). Nothing connects while it answers.
+  `run` is now `exec`.
 - **`ls` is gone: one `read` answers whatever the path is.** A directory comes back
   as a listing, a file as its text, anything else (symlink, socket) as what it is,
   and a miss as a refusal that names the parent directory as the next step. The tool

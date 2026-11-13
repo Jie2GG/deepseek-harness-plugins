@@ -75,8 +75,8 @@ What runs without interrupting you:
 
 | The call | What happens |
 | --- | --- |
-| list, read, download, or show the saved targets | runs immediately |
-| a command whose program is in that target's **command allowlist** | runs immediately |
+| list a directory, read a file, download, or ask which server this is (`get_connection`) | runs immediately |
+| a command whose program is on that target's **command allowlist**, or any command where the target lists no allowlist | runs immediately |
 | an edit of a remote file (exact text, refused when it matches more than once) | asks you first |
 | any other command, and any write or upload | asks you first, in your language, showing the server and the exact command or path |
 | anything against a target with **agent access** turned off | refused |
@@ -185,7 +185,7 @@ ignored.
   reaches the same capability through the `ssh_client` tool, whose call renders in the
   harness's own tool row like any other tool's.
 - A page probe authenticates and then runs only `true` on the server; real commands
-  come from the agent's `run` action, and nothing on the server is installed or
+  come from the agent's `exec` action, and nothing on the server is installed or
   upgraded by this plugin.
 - A remote call is waited for: no interactive session, no PTY, no background job to
   poll, so a command that needs terminal input or outlives one reply hits its

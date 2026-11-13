@@ -98,7 +98,7 @@ Body `{ method, params? }`, result `{ ok: true, result }` or
 | `save` | `{ connection, secrets? }` (no `id` = create) | `{ connection, connections }` |
 | `remove` | `{ id }` | `{ removed, orphanSecrets, connections }` |
 | `probe` | `{ id }` or `{ draft, secrets? }` | `{ connection?, probe?, connections }` |
-| `run` | `{ command, target?, sessionId?, timeoutMs?, maxOutputBytes? }` | `{ run, connection?, connections }` |
+| `exec` | `{ command, target?, sessionId?, timeoutMs?, maxOutputBytes? }` | `{ run, connection?, connections }` |
 | `resolve` | `{ target?, sessionId? }` | `{ action: 'resolve', ok, target, resolved, stored, differs, text? }` |
 | `upload` / `download` | `{ path, localPath, localDir?, target?, sessionId?, recursive?, overwrite?, maxBytes?, timeoutMs? }` | the transfer result |
 | `setSessionTarget` / `clearSessionTarget` | `{ sessionId, targetId? }` | `{ sessionTarget }` |
@@ -183,7 +183,7 @@ bundle is the live proof of that).
 
 | Field | Shape |
 | --- | --- |
-| `action` | `targets` \| `run` \| `read` \| `write` \| `edit` \| `upload` \| `download` — `read` answers a directory listing, a file's text, or a refusal, depending on what the path is |
+| `action` | `get_connection` \| `exec` \| `read` \| `write` \| `edit` \| `upload` \| `download` — `read` answers a directory listing, a file's text, or a refusal, depending on what the path is |
 | `localPath`, `recursive` | the local side of a transfer; relative paths resolve inside the conversation workspace |
 | `target` | id, display name (any case), `host`, or `user@host`; omitted means this conversation's chosen target, then a lone saved target |
 | `command` / `path` / `content` | the remote command line, an absolute remote path, and the exact text to write |
@@ -198,10 +198,10 @@ tool-authoring docs prescribe for deployment policy:
 
 | Call | Verdict |
 | --- | --- |
-| `targets`, `ls`, `read` | allow |
-| `run`, program in the target's `allowedCommands` | allow |
-| `run`, program not allowlisted | **ask** |
-| `run`, a pipeline / redirection / substitution (no single leading program) | **ask** |
+| `get_connection`, `read` (a listing or a file's text), `download` | allow |
+| `exec`, program in the target's `allowedCommands`, or no allowlist at all | allow |
+| `exec`, program not on a non-empty allowlist | **ask** |
+| `exec`, a pipeline / redirection / substitution (no single leading program) | **ask** |
 | any `ask`, in a conversation whose approval policy is `never` | **allow** — the core rejects unanswered asks by policy, so asking there is a self-inflicted refusal |
 | `write`, `edit`, `upload` | **ask** |
 | `download` | allow (it reads the server and writes inside the session workspace, which the file pipeline already governs) |
@@ -304,7 +304,7 @@ the 0.5.1 fix, so the next round does not have to re-derive them:
 
 ## Planned surface for the next round
 
-1. An agent tool over the same `ops` methods (`hosts` / `probe` / `run`), which
+1. An agent tool over the same `ops` methods (`list` / `probe` / `runCommand`), which
    is why every operation already returns an explicit status rather than a
    rendered string, and why the probe classification is a pure function.
 2. File transfer over the same transport (`upload`, `download`, directories
@@ -324,7 +324,7 @@ the 0.5.1 fix, so the next round does not have to re-derive them:
 - Nothing about these fixes is live until the running Host loads the new module:
   an in-place package swap keeps the previous one until the process restarts.
 - A page probe still authenticates and runs only `true`; real commands come from
-  the agent's `run` action.
+  the agent's `exec` action.
 - Remote calls are synchronous: no PTY, no terminal input, no background job. A
   command that waits for a prompt hits its deadline.
 - A download dispatches `fs/write-intent` before `scp` runs, with the tool

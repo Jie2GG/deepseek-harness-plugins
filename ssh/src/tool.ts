@@ -52,7 +52,7 @@ import { leadingProgram } from './transport.ts'
 import type { Ops, Params, RemoteFileResult } from './ops.ts'
 
 /** Actions the tool offers in 0.6.0; file transfer joins in the next stage. */
-export const REMOTE_TOOL_ACTIONS = ['targets', 'run', 'read', 'write', 'edit', 'upload', 'download'] as const
+export const REMOTE_TOOL_ACTIONS = ['get_connection', 'exec', 'read', 'write', 'edit', 'upload', 'download'] as const
 
 /** Preferred tool name, with a namespaced fallback if another plugin holds it. */
 /** The wire name this plugin claims. */
@@ -177,7 +177,7 @@ export interface PolicyVerdict {
  */
 export function readArgs(exec: Readonly<PendingCall>): RemoteCallArgs {
   const raw = (exec.arguments ?? {}) as Record<string, unknown>
-  const action = typeof raw.action === 'string' ? (raw.action as (typeof REMOTE_TOOL_ACTIONS)[number]) : 'run'
+  const action = typeof raw.action === 'string' ? (raw.action as (typeof REMOTE_TOOL_ACTIONS)[number]) : 'exec'
   const text = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined)
   const number = (value: unknown): number | undefined => (typeof value === 'number' && Number.isFinite(value) ? value : undefined)
   return {
@@ -229,7 +229,7 @@ export function findTarget(catalog: readonly TargetSnapshot[], args: RemoteCallA
  * @returns the verdict and the text to show a human.
  */
 export function decideAccess(target: TargetSnapshot | undefined, args: RemoteCallArgs): PolicyVerdict {
-  if (args.action === 'targets') return { verdict: 'allow', reason: '' }
+  if (args.action === 'get_connection') return { verdict: 'allow', reason: '' }
   // An unresolved or ambiguous target is the body's problem: it refuses with the
   // candidate list, which is more useful than a policy prompt about nothing.
   if (target === undefined) return { verdict: 'allow', reason: '' }
@@ -405,11 +405,11 @@ const OUTCOME_SHAPE = {
  */
 export function describeRemote(targets: TargetBrief[]): string {
   const list = targets.length === 0
-    ? 'No SSH target is saved yet: call `targets` after the user adds one in Settings → Remote connections.'
+    ? 'No SSH target is saved yet: call `get_connection` after the user adds one in Settings → Remote connections.'
     : `Choose the server this conversation means and pass it as \`target\`. Available aliases: ${targets
       .map(target => `\`${target.label}\` (${target.user === undefined || target.user === '' ? '' : `${target.user}@`}${target.host})`)
       .join(', ')}.`
-  return `Runs commands and moves files on a stored SSH server, with the credentials the plugin holds. ${list} A call addresses one server: leave \`target\` out to reuse the one this conversation last used. Nothing is interpreted by a local shell; the command string is executed by the login shell on the server. \`targets\`, \`read\`, and \`download\` are reads; \`read\` answers with a directory listing when the path is a directory and with the file's text when it is a file; \`run\`, \`write\`, \`edit\`, and \`upload\` may be refused by the user, and \`run\` runs freely unless that target lists a command allowlist, in which case only the listed programs and simple single-program calls run freely.`
+  return `Runs commands and moves files on a stored SSH server, with the credentials the plugin holds. ${list} A call addresses one server: leave \`target\` out to reuse the one this conversation last used. Nothing is interpreted by a local shell; the command string is executed by the login shell on the server. \`get_connection\`, \`read\`, and \`download\` are reads; \`read\` answers with a directory listing when the path is a directory and with the file's text when it is a file; \`exec\`, \`write\`, \`edit\`, and \`upload\` may be refused by the user, and \`exec\` runs freely unless that target lists a command allowlist, in which case only the listed programs and simple single-program calls run freely.`
 }
 
 /**
@@ -470,7 +470,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
         type: 'string',
         required: true,
         enum: [...REMOTE_TOOL_ACTIONS],
-        description: 'What to do: `targets` lists what is saved and resolves what this call would address; `run` executes one shell command on it; `read` returns a directory listing or the text of a file, depending on what the path is; `write` sends text to a remote path; `edit` replaces exact text inside a remote file (it refuses an ambiguous match instead of guessing); `upload` and `download` move files.',
+        description: 'What to do: `get_connection` lists what is saved and resolves which server this call would address, without connecting; `exec` runs one shell command on it; `read` returns a directory listing or the text of a file, depending on what the path is; `write` sends text to a remote path; `edit` replaces exact text inside a remote file (it refuses an ambiguous match instead of guessing); `upload` and `download` move files.',
       },
       target: { type: 'string', description: targetParamHint(deps.targetsOf?.() ?? []) },
       command: { type: 'string', description: 'For `run`: the command line to execute on the server, as one string. Quote anything that must survive the remote shell.' },
@@ -500,12 +500,12 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           {
             type: 'object',
             additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'targets', required: true }, targets: { type: 'array', items: { type: 'object', properties: TARGET_SHAPE, additionalProperties: false } }, count: { type: 'integer' } },
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'get_connection', required: true }, selectedId: { type: 'string' }, selectedLabel: { type: 'string' }, selectedHost: { type: 'string' }, selectedUser: { type: 'string' }, selectedVia: { type: 'string' }, targets: { type: 'array', items: { type: 'object', properties: TARGET_SHAPE, additionalProperties: false } }, count: { type: 'integer' } },
           },
           {
             type: 'object',
             additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'run', required: true }, exitCode: { oneOf: [{ type: 'integer' }, { type: 'null' }] }, stdout: { type: 'string' }, stderr: { type: 'string' }, truncated: { type: 'boolean' }, durationMs: { type: 'integer' } },
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'exec', required: true }, exitCode: { oneOf: [{ type: 'integer' }, { type: 'null' }] }, stdout: { type: 'string' }, stderr: { type: 'string' }, truncated: { type: 'boolean' }, durationMs: { type: 'integer' } },
           },
           {
             type: 'object',
@@ -527,7 +527,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
         // three scalars; the status, exit code, and duration a reader wants are
         // parsed from the rendered body line, whose format this module owns.
         return {
-          action: typeof payload.action === 'string' ? payload.action : 'run',
+          action: typeof payload.action === 'string' ? payload.action : 'exec',
           ok: payload.ok === true,
           label: target?.label ?? target?.host ?? '',
         }
@@ -537,7 +537,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
     presentCall: (args) => {
       const call = args as RemoteCallArgs
       const label = call.command !== undefined ? call.command : call.path ?? call.action
-      return { card: 'generic', title: `${REMOTE_TOOL_NAME} ${call.action}`, kind: call.action === 'run' ? 'execute' : call.action === 'write' || call.action === 'edit' || call.action === 'upload' ? 'edit' : 'read', rawInput: String(label).slice(0, 400) }
+      return { card: 'generic', title: `${REMOTE_TOOL_NAME} ${call.action}`, kind: call.action === 'exec' ? 'execute' : call.action === 'write' || call.action === 'edit' || call.action === 'upload' ? 'edit' : 'read', rawInput: String(label).slice(0, 400) }
     },
     async execute(args, exec) {
       const call = args as RemoteCallArgs
@@ -547,13 +547,32 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
       const sessionId = deps.sessionOf?.(exec)
       if (sessionId !== undefined) params.sessionId = sessionId
       switch (call.action) {
-        case 'targets': {
+        case 'get_connection': {
           const listed = await operations.list()
-          return listedResult(listed.connections, listed.settings) as never
+          // Naming the server is why this call exists. The rules below are the same
+          // ones the gate and every other action use, and nothing connects.
+          const snapshots = listed.connections.map(row => ({
+            id: row.id,
+            label: row.label,
+            host: row.host,
+            ...(row.user === undefined ? {} : { user: row.user }),
+            ...(row.port === undefined ? {} : { port: row.port }),
+            agentAccess: row.agentAccess,
+            allowedCommands: row.allowedCommands,
+          }))
+          const stored = sessionId === undefined || (call.target ?? '').trim() !== '' ? undefined : deps.sessionTargetOf?.(sessionId)
+          const resolved = findTarget(snapshots, call, stored)
+          return listedResult(listed.connections, listed.settings, resolved === undefined ? undefined : {
+            id: resolved.id,
+            label: resolved.label,
+            host: resolved.host,
+            ...(resolved.user === undefined ? {} : { user: resolved.user }),
+            via: (call.target ?? '').trim() !== '' ? 'argument' : stored !== undefined ? 'session' : 'only-target',
+          }) as never
         }
-        case 'run': {
+        case 'exec': {
           if (call.command === undefined || call.command.trim() === '') {
-            return { action: 'run', ok: false, status: 'failed', message: 'A run call needs a command.', hint: 'Pass command, as one string.' } as never
+            return { action: 'exec', ok: false, status: 'failed', message: 'A run call needs a command.', hint: 'Pass command, as one string.' } as never
           }
           params.command = call.command
           if (call.timeoutMs !== undefined) params.timeoutMs = call.timeoutMs
@@ -677,9 +696,21 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
  * @param settings - the shared ceilings, echoed for the reader.
  * @returns the canonical payload.
  */
-function listedResult(connections: Awaited<ReturnType<Ops['list']>>['connections'], settings: Awaited<ReturnType<Ops['list']>>['settings']): Record<string, unknown> {
+/**
+ * Shape the answer of `get_connection`: the saved inventory and, which is the point
+ * of the call, the server a later call would actually address.
+ * @param connections - the stored rows.
+ * @param settings - the shared ceilings, folded into the summary line.
+ * @param selected - the resolved target and how it was reached.
+ * @returns the canonical payload.
+ */
+function listedResult(
+  connections: Awaited<ReturnType<Ops['list']>>['connections'],
+  settings: Awaited<ReturnType<Ops['list']>>['settings'],
+  selected?: { id: string; label: string; host: string; user?: string | undefined; via: string } | undefined,
+): Record<string, unknown> {
   return {
-    action: 'targets',
+    action: 'get_connection',
     ok: true,
     count: connections.length,
     targets: connections.map(row => ({
@@ -695,6 +726,13 @@ function listedResult(connections: Awaited<ReturnType<Ops['list']>>['connections
       hasPassphrase: row.secrets?.passphrase === true,
       ...(row.lastProbe === undefined ? {} : { lastProbe: `${row.lastProbe.status} at ${row.lastProbe.at}` }),
     })),
+    ...(selected === undefined ? {} : {
+      selectedId: selected.id,
+      selectedLabel: selected.label,
+      selectedHost: selected.host,
+      ...(selected.user === undefined ? {} : { selectedUser: selected.user }),
+      selectedVia: selected.via,
+    }),
     message: connections.length === 0
       ? 'No SSH target is saved yet. Add one under Settings → Remote connections, then choose it for this conversation.'
       : `Default ceilings: command ${String(settings.remoteTimeoutMs)} ms, output ${String(settings.maxOutputBytes)} bytes, transfer ${String(settings.maxTransferBytes)} bytes.`,
@@ -711,7 +749,7 @@ function runResult(result: Awaited<ReturnType<Ops['runCommand']>>): Record<strin
   const target = result.connection === undefined ? undefined : { id: result.connection.id, label: result.connection.label, host: result.connection.host }
   const failed = run.status !== 'succeeded'
   return {
-    action: 'run',
+    action: 'exec',
     ok: !failed,
     status: run.status,
     ...(target === undefined ? {} : { target }),
@@ -763,9 +801,15 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
   const where = target?.label ?? target?.host ?? args.target ?? 'the selected target'
   const lines: string[] = []
   switch (String(value.action)) {
-    case 'targets': {
+    case 'get_connection': {
       const rows = Array.isArray(value.targets) ? (value.targets as Record<string, unknown>[]) : []
       if (rows.length === 0) return String(value.message ?? 'No SSH target is saved yet.')
+      if (typeof value.selectedLabel === 'string') {
+        lines.push(`A later call would address: ${String(value.selectedLabel)} (${typeof value.selectedUser === 'string' ? `${String(value.selectedUser)}@` : ''}${String(value.selectedHost)}) — reached by ${String(value.selectedVia ?? 'argument')}.`)
+      } else {
+        lines.push('A later call could not choose a server: '
+          + (rows.length > 1 ? `${String(rows.length)} targets are saved, so name one with \`target\`.` : 'name it with `target`, or the single saved target is used.'))
+      }
       lines.push(`Saved SSH targets (${String(rows.length)}):`)
       for (const row of rows) {
         const authority = `${typeof row.user === 'string' ? `${row.user}@` : ''}${String(row.host)}`
@@ -784,7 +828,7 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
       if (typeof value.message === 'string') lines.push(value.message)
       return lines.join('\n')
     }
-    case 'run': {
+    case 'exec': {
       const command = typeof args.command === 'string' ? args.command : ''
       lines.push(`${where}$ ${command}`)
       const stdout = typeof value.stdout === 'string' ? value.stdout : ''
