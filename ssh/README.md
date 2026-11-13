@@ -182,7 +182,7 @@ bundle is the live proof of that).
 
 | Field | Shape |
 | --- | --- |
-| `action` | `targets` \| `run` \| `ls` \| `read` \| `write` \| `upload` \| `download` |
+| `action` | `targets` \| `run` \| `read` \| `write` \| `upload` \| `download` — `read` answers a directory listing, a file's text, or a refusal, depending on what the path is |
 | `localPath`, `recursive` | the local side of a transfer; relative paths resolve inside the conversation workspace |
 | `target` | id, display name (any case), `host`, or `user@host`; omitted means this conversation's chosen target, then a lone saved target |
 | `command` / `path` / `content` | the remote command line, an absolute remote path, and the exact text to write |

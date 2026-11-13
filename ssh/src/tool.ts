@@ -52,7 +52,7 @@ import { leadingProgram } from './transport.ts'
 import type { Ops, Params, RemoteFileResult } from './ops.ts'
 
 /** Actions the tool offers in 0.6.0; file transfer joins in the next stage. */
-export const REMOTE_TOOL_ACTIONS = ['targets', 'run', 'ls', 'read', 'write', 'upload', 'download'] as const
+export const REMOTE_TOOL_ACTIONS = ['targets', 'run', 'read', 'write', 'upload', 'download'] as const
 
 /** Preferred tool name, with a namespaced fallback if another plugin holds it. */
 /** The wire name this plugin claims. */
@@ -239,7 +239,8 @@ export function decideAccess(target: TargetSnapshot | undefined, args: RemoteCal
     }
   }
   const authority = target.user === undefined ? target.host : `${target.user}@${target.host}`
-  if (args.action === 'ls' || args.action === 'read') {
+  // One read answers a listing or the text of a file; both are reads.
+  if (args.action === 'read') {
     return { verdict: 'allow', reason: '' }
   }
   if (args.action === 'upload') {
@@ -393,7 +394,7 @@ export function describeRemote(targets: TargetBrief[]): string {
     : `Choose the server this conversation means and pass it as \`target\`. Available aliases: ${targets
       .map(target => `\`${target.label}\` (${target.user === undefined || target.user === '' ? '' : `${target.user}@`}${target.host})`)
       .join(', ')}.`
-  return `Runs commands and moves files on a stored SSH server, with the credentials the plugin holds. ${list} A call addresses one server: leave \`target\` out to reuse the one this conversation last used. Nothing is interpreted by a local shell; the command string is executed by the login shell on the server. \`targets\`, \`ls\`, \`read\`, and \`download\` are reads; \`run\`, \`write\`, and \`upload\` may be refused by the user, and \`run\` runs freely unless that target lists a command allowlist, in which case only the listed programs and simple single-program calls run freely.`
+  return `Runs commands and moves files on a stored SSH server, with the credentials the plugin holds. ${list} A call addresses one server: leave \`target\` out to reuse the one this conversation last used. Nothing is interpreted by a local shell; the command string is executed by the login shell on the server. \`targets\`, \`read\`, and \`download\` are reads; \`read\` answers with a directory listing when the path is a directory and with the file's text when it is a file; \`run\`, \`write\`, and \`upload\` may be refused by the user, and \`run\` runs freely unless that target lists a command allowlist, in which case only the listed programs and simple single-program calls run freely.`
 }
 
 /**
@@ -454,7 +455,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
         type: 'string',
         required: true,
         enum: [...REMOTE_TOOL_ACTIONS],
-        description: 'What to do: `targets` lists what is saved; `run` executes one command; `ls` lists a remote path; `read` returns a remote file as text; `write` sends text to a remote path.',
+        description: 'What to do: `targets` lists what is saved and resolves what this call would address; `run` executes one shell command on it; `read` returns a directory listing or the text of a file, depending on what the path is; `write` sends text to a remote path; `edit` replaces exact text inside a remote file; `upload` and `download` move files.',
       },
       target: { type: 'string', description: targetParamHint(deps.targetsOf?.() ?? []) },
       command: { type: 'string', description: 'For `run`: the command line to execute on the server, as one string. Quote anything that must survive the remote shell.' },
@@ -489,12 +490,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           {
             type: 'object',
             additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'list', required: true }, path: { type: 'string' }, entriesText: { type: 'string' }, exitCode: { oneOf: [{ type: 'integer' }, { type: 'null' }] }, durationMs: { type: 'integer' } },
-          },
-          {
-            type: 'object',
-            additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'read', required: true }, path: { type: 'string' }, content: { type: 'string' }, bytes: { type: 'integer' }, lines: { type: 'integer' }, truncated: { type: 'boolean' }, durationMs: { type: 'integer' } },
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'read', required: true }, path: { type: 'string' }, type: { type: 'string', enum: ['file', 'directory', 'other', 'missing'] }, size: { type: 'integer' }, content: { type: 'string' }, entriesText: { type: 'string' }, bytes: { type: 'integer' }, lines: { type: 'integer' }, truncated: { type: 'boolean' }, durationMs: { type: 'integer' } },
           },
           {
             type: 'object',
@@ -607,7 +603,6 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           await rememberSessionTarget(operations, sessionId, call, result)
           return { ...result, action: call.action } as never
         }
-        case 'ls':
         case 'read':
         case 'write': {
           if (call.path === undefined || call.path.trim() === '') {
@@ -624,11 +619,9 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
             params.mkdir = call.mkdir !== false
           }
           if (call.maxBytes !== undefined) params.maxOutputBytes = call.maxBytes
-          const result: RemoteFileResult = call.action === 'ls'
-            ? await operations.listRemote(params)
-            : call.action === 'read'
-              ? await operations.readRemote(params)
-              : await operations.writeRemote(params)
+          const result: RemoteFileResult = call.action === 'read'
+            ? await operations.readPath(params)
+            : await operations.writeRemote(params)
           await rememberSessionTarget(operations, sessionId, call, result)
           return { ...result } as never
         }
@@ -769,19 +762,25 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
       if (typeof value.hint === 'string') lines.push(`hint: ${String(value.hint)}`)
       return lines.join('\n')
     }
-    case 'list': {
-      lines.push(`${where}: ls ${String(value.path)}`)
-      const text = typeof value.entriesText === 'string' ? value.entriesText.trim() : ''
-      if (text === '') lines.push('(no output)')
-      else lines.push(text)
-      if (typeof value.message === 'string') lines.push(String(value.message))
-      return lines.join('\n')
-    }
     case 'read': {
+      // A directory answer and a file answer share one action, so the body picks
+      // its shape from what the server said the path was.
+      if (value.type === 'directory' || value.type === 'other' || typeof value.entriesText === 'string') {
+        lines.push(`${where}: ls ${String(value.path)}`)
+        const text = typeof value.entriesText === 'string' ? value.entriesText.trim() : ''
+        lines.push(text === '' ? '(no entries)' : text)
+        if (typeof value.message === 'string') lines.push(String(value.message))
+        if (typeof value.hint === 'string') lines.push(`hint: ${String(value.hint)}`)
+        return lines.join('\n')
+      }
       const content = typeof value.content === 'string' ? value.content : ''
-      lines.push(`${where}: ${String(value.path)} (${String(value.lines ?? 0)} lines, ${String(value.bytes ?? 0)} bytes${value.truncated === true ? ', truncated' : ''})`)
+      const clipped = value.truncated === true
+        ? `, truncated${typeof value.size === 'number' ? ` of a ${String(value.size)} byte file` : ''}`
+        : ''
+      lines.push(`${where}: ${String(value.path)} (${String(value.lines ?? 0)} lines, ${String(value.bytes ?? 0)} bytes${clipped})`)
       lines.push(content.replace(/\n$/u, ''))
       if (typeof value.message === 'string') lines.push(String(value.message))
+      if (typeof value.hint === 'string') lines.push(`hint: ${String(value.hint)}`)
       return lines.join('\n')
     }
     case 'upload':

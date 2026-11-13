@@ -4,6 +4,21 @@ All notable changes to `@jie2gg/dsh-plugin-ssh` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project uses [semantic versioning](https://semver.org/).
 
+## 0.14.0
+
+### Changed
+
+- **`ls` is gone: one `read` answers whatever the path is.** A directory comes back
+  as a listing, a file as its text, anything else (symlink, socket) as what it is,
+  and a miss as a refusal that names the parent directory as the next step. The tool
+  has one fewer decision to make and the model one fewer name to remember.
+- The read is still **one round trip**: the remote shell tests the path and prints a
+  marker line naming the case (`ssh-plugin: file 4096`) before its body, and the
+  plugin splits that line off. The reported size is kept apart from the bytes that
+  actually came back, so a read clipped by the output ceiling can say *how much was
+  left behind*. An answer with no marker is treated as plain file text rather than an
+  error, which is what a shell that could not run the test would have produced.
+
 ## 0.13.0
 
 ### Changed

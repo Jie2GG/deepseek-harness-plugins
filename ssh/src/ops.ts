@@ -48,8 +48,8 @@ export interface ResolveResult {
 
 /** One remote file operation's canonical result. */
 export interface RemoteFileResult {
-  /** `list`, `read`, or `write`. */
-  action: 'list' | 'read' | 'write'
+  /** `read` or `write`. */
+  action: 'read' | 'write'
   /** Whether the remote side accepted and completed the call. */
   ok: boolean
   /** Classified transport and command outcome. */
@@ -58,7 +58,11 @@ export interface RemoteFileResult {
   target: { id: string; label: string; host: string }
   /** The remote path the call addressed. */
   path: string
-  /** Listing text or written confirmation. */
+  /** What the path was: a directory is answered with a listing, a file with text. */
+  type?: 'file' | 'directory' | 'other' | 'missing'
+  /** The file's true size on the server, which may exceed what came back. */
+  size?: number
+  /** Listing text, when the path was a directory. */
   entriesText?: string
   /** File text, for a read. */
   content?: string
@@ -132,10 +136,8 @@ export interface Ops {
   setSessionTarget(params: Params): Promise<{ sessionTarget: { sessionId: string; targetId: string; setAt: string } | null }>
   /** Forget a conversation's chosen target. */
   clearSessionTarget(params: Params): Promise<{ sessionTarget: null }>
-  /** List one remote path. */
-  listRemote(params: Params): Promise<RemoteFileResult>
-  /** Read one remote file as text. */
-  readRemote(params: Params): Promise<RemoteFileResult>
+  /** Read one remote path, whether it is a file, a directory, or missing. */
+  readPath(params: Params): Promise<RemoteFileResult>
   /** Write one remote file from text, with the overwrite guard. */
   writeRemote(params: Params): Promise<RemoteFileResult>
   /** Replace the shared settings. */
@@ -361,7 +363,7 @@ export function createOps(deps: OpsDeps): Ops {
    * @returns the canonical result the route and the tool both return.
    */
   function fileResult(
-    action: 'list' | 'read' | 'write',
+    action: 'read' | 'write',
     record: ConnectionRecord,
     path: string,
     run: RemoteRunResult,
@@ -392,6 +394,26 @@ export function createOps(deps: OpsDeps): Ops {
     return base
   }
 
+
+  /**
+   * Split the marker line a read answered with from its body.
+   * @param text - the raw stdout of the read command.
+   * @returns the kind, the body, and the reported size, or `undefined` when the
+   *   answer carried no marker.
+   */
+  function splitMarker(text: string): { kind: 'file' | 'directory' | 'other' | 'missing'; text: string; size?: number } | undefined {
+    const newline = text.indexOf('\n')
+    const head = newline === -1 ? text : text.slice(0, newline)
+    const match = /^ssh-plugin:\s+(directory|file|other|missing)(?:\s+(\d+))?\s*$/u.exec(head.trim())
+    if (match === null) return undefined
+    const rest = newline === -1 ? '' : text.slice(newline + 1)
+    const size = match[2] === undefined ? undefined : Number(match[2])
+    return {
+      kind: (match[1] ?? 'file') as 'file' | 'directory' | 'other' | 'missing',
+      text: rest,
+      ...(size === undefined || !Number.isFinite(size) ? {} : { size }),
+    }
+  }
 
   /**
    * Read the handful of resolved keys this plugin's calls actually affect.
@@ -730,21 +752,40 @@ export function createOps(deps: OpsDeps): Ops {
       return { run, connection, connections: await viewsOf(state) }
     },
 
-    async listRemote(params: Params): Promise<RemoteFileResult> {
-      const { record, settings, auth, path } = await fileCall(params, 'list')
-      const run = await runner.run(targetOf(record), settings, auth, `ls -la -- ${shellQuote(path)}`, {
-        maxOutputBytes: settings.maxOutputBytes,
-      })
-      return fileResult('list', record, path, run, run.stdout === undefined || run.stdout.trim() === '' ? undefined : run.stdout, undefined)
-    },
-
-    async readRemote(params: Params): Promise<RemoteFileResult> {
+    async readPath(params: Params): Promise<RemoteFileResult> {
       const { record, settings, auth, path } = await fileCall(params, 'read')
-      const run = await runner.run(targetOf(record), settings, auth, `cat -- ${shellQuote(path)}`, {
+      // One round trip answers a file, a directory, and a miss. The remote shell
+      // prints a marker line naming which it found — `file` carries the byte size
+      // the server reported, so a clipped read can say how much was left behind —
+      // and everything after the first line is the answer itself. A reply with no
+      // marker is taken as plain file text, which is what a shell that could not
+      // run the test would have produced anyway.
+      const quoted = shellQuote(path)
+      const command = `if [ -d ${quoted} ]; then printf 'ssh-plugin: directory\\n'; ls -la -- ${quoted}; `
+        + `elif [ -f ${quoted} ]; then printf 'ssh-plugin: file %s\\n' "$(wc -c < ${quoted} | tr -dc 0-9)"; cat -- ${quoted}; `
+        + `elif [ -e ${quoted} ]; then printf 'ssh-plugin: other\\n'; ls -la -- ${quoted}; `
+        + `else printf 'ssh-plugin: missing\\n'; exit 20; fi`
+      const run = await runner.run(targetOf(record), settings, auth, command, {
         maxOutputBytes: options.maxOutputBytes ?? settings.maxOutputBytes,
       })
-      const content = run.stdout ?? ''
-      return fileResult('read', record, path, run, undefined, content)
+      const body = splitMarker(run.stdout ?? '')
+      if (body === undefined) {
+        return fileResult('read', record, path, run, undefined, run.stdout ?? '', { type: 'file' })
+      }
+      if (body.kind === 'directory' || body.kind === 'other') {
+        return fileResult('read', record, path, run, body.text, undefined, { type: body.kind })
+      }
+      if (body.kind === 'missing') {
+        return fileResult('read', record, path, run, undefined, '', {
+          type: 'missing',
+          message: `Nothing at ${path} on ${record.host}.`,
+          hint: 'List the parent directory with the same read call, or check the path.',
+        })
+      }
+      return fileResult('read', record, path, run, undefined, body.text, {
+        type: 'file',
+        ...(body.size === undefined ? {} : { size: body.size }),
+      })
     },
 
     async writeRemote(params: Params): Promise<RemoteFileResult> {
