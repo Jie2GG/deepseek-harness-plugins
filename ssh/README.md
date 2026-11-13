@@ -49,6 +49,9 @@ cd ssh
 pnpm install        # dependencies + the type-only peers
 pnpm run check      # tsc --noEmit
 pnpm run build      # tsc, then finalize lib/client.js as a classic script
+# Lint with the harness checkout's oxlint when it is near; it is the cheapest
+# check for the dead code a type pass leaves behind:
+#   /data/deepseek-harness/node_modules/.bin/oxlint src scripts
 ```
 
 The finalize step is not decorative: the web module table runs `lib/client.js`

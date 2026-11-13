@@ -503,7 +503,8 @@ window.__ModuleLoader__.load({
      * @returns the address the field shows.
      */
     function addressOf(record: ConnectionRecord): string {
-      const authority = record.user === undefined || record.user === '' ? record.host : `${record.user}@${record.host}`
+      // A bare colon-bearing host (IPv6) needs brackets before a port is appended,
+      // or the reader cannot tell the address from the port.
       const host = record.host.includes(':') && !record.host.startsWith('[') ? `[${record.host}]` : record.host
       const base = record.user === undefined || record.user === '' ? host : `${record.user}@${host}`
       return record.port === undefined ? base : `${base}:${String(record.port)}`

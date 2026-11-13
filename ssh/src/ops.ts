@@ -644,7 +644,7 @@ export function createOps(deps: OpsDeps): Ops {
     },
 
     async listRemote(params: Params): Promise<RemoteFileResult> {
-      const { state, record, settings, auth, path } = await fileCall(params, 'list')
+      const { record, settings, auth, path } = await fileCall(params, 'list')
       const run = await runner.run(targetOf(record), settings, auth, `ls -la -- ${shellQuote(path)}`, {
         maxOutputBytes: settings.maxOutputBytes,
       })
@@ -652,7 +652,7 @@ export function createOps(deps: OpsDeps): Ops {
     },
 
     async readRemote(params: Params): Promise<RemoteFileResult> {
-      const { state, record, settings, auth, path } = await fileCall(params, 'read')
+      const { record, settings, auth, path } = await fileCall(params, 'read')
       const run = await runner.run(targetOf(record), settings, auth, `cat -- ${shellQuote(path)}`, {
         maxOutputBytes: options.maxOutputBytes ?? settings.maxOutputBytes,
       })
@@ -661,7 +661,7 @@ export function createOps(deps: OpsDeps): Ops {
     },
 
     async writeRemote(params: Params): Promise<RemoteFileResult> {
-      const { state, record, settings, auth, path } = await fileCall(params, 'write')
+      const { record, settings, auth, path } = await fileCall(params, 'write')
       const content = typeof params.content === 'string' ? params.content : ''
       const append = params.append === true
       const mkdir = params.mkdir !== false

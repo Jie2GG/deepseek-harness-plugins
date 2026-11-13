@@ -17,7 +17,7 @@
 
 import { z } from 'zod'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
-import type { AuthMode, ConnectionRecord, SessionTarget, SshSettings } from './types.ts'
+import type { ConnectionRecord, SessionTarget, SshSettings } from './types.ts'
 
 /** Domain name, and the backend unit name it doubles as (`^[a-z][a-z0-9_]*$`). */
 export const DOMAIN_NAME = 'ssh_targets'
