@@ -490,7 +490,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           {
             type: 'object',
             additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'edit', required: true }, path: { type: 'string' }, type: { type: 'string', enum: ['file', 'directory', 'other', 'missing'] }, replaced: { type: 'integer' }, bytesBefore: { type: 'integer' }, bytesAfter: { type: 'integer' }, backup: { type: 'string' }, size: { type: 'integer' }, durationMs: { type: 'integer' } },
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'edit', required: true }, path: { type: 'string' }, type: { type: 'string', enum: ['file', 'directory', 'other', 'missing'] }, replaced: { type: 'integer' }, matches: { type: 'integer' }, bytesBefore: { type: 'integer' }, bytesAfter: { type: 'integer' }, backup: { type: 'string' }, size: { type: 'integer' }, durationMs: { type: 'integer' } },
           },
           {
             type: 'object',
@@ -884,11 +884,14 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
     }
     case 'edit': {
       lines.push(`${where}: edit ${String(value.path)}`)
-      if (typeof value.replaced === 'number') {
+      if (value.ok === true && typeof value.replaced === 'number') {
         const places = value.replaced === 1 ? '1 place' : `${String(value.replaced)} places`
         lines.push(typeof value.bytesBefore === 'number' && typeof value.bytesAfter === 'number'
           ? `replaced ${places}, ${String(value.bytesBefore)} -> ${String(value.bytesAfter)} bytes${typeof value.backup === 'string' ? ` (backup: ${String(value.backup)})` : ''}`
           : `replaced ${places}`)
+      } else if (typeof value.matches === 'number') {
+        // A refusal counts matches, not changes: nothing was written.
+        lines.push(`matched ${String(value.matches)} times, so nothing was written`)
       }
       if (typeof value.message === 'string') lines.push(String(value.message))
       if (typeof value.hint === 'string') lines.push(`hint: ${String(value.hint)}`)

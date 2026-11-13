@@ -77,6 +77,8 @@ export interface RemoteFileResult {
   overwrote?: boolean
   /** For `edit`: how many places were replaced. */
   replaced?: number
+  /** For a refused `edit`: how many places the text matched, which is why it stopped. */
+  matches?: number
   /** For `edit`: the size before and after the change. */
   bytesBefore?: number
   /** For `edit`: the size after the change. */
@@ -854,7 +856,7 @@ export function createOps(deps: OpsDeps): Ops {
           ...(read.durationMs === undefined ? {} : { durationMs: read.durationMs }),
           message: outcome.message,
           hint: outcome.hint,
-          ...(outcome.reason === 'ambiguous' ? { replaced: outcome.found } : {}),
+          ...(outcome.reason === 'ambiguous' ? { matches: outcome.found } : {}),
         }
       }
       // Written back through the same inode with `cat >`, so the file keeps its

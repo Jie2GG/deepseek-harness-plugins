@@ -19,6 +19,14 @@ project uses [semantic versioning](https://semver.org/).
   non-overlapping counting, byte sizes rather than characters, an empty `newText`
   meaning deletion, a no-op replacement refused — are tested without a server.
 
+### Fixed
+
+- A **refused** edit no longer reports a replacement count. The ambiguous case reused
+  `replaced` for the number of matches, so the transcript read `replaced 2 places`
+  immediately above `That text appears 2 times` — the opposite of what happened. The
+  refusal now carries `matches`, and the line says `matched 2 times, so nothing was
+  written`. Found by the first live ambiguous edit against the server.
+
 ### Changed
 
 - **Two action names became verbs of what they do.** `targets` is now
