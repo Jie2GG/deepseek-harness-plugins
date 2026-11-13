@@ -4,6 +4,24 @@ All notable changes to `@jie2gg/dsh-plugin-ssh` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project uses [semantic versioning](https://semver.org/).
 
+## 0.11.0
+
+### Removed
+
+- **The plugin no longer draws its own tool card.** The `tool.call.toolview`
+  registration is gone, so a `remote` call renders in the harness's standard tool
+  row exactly like every other tool's call — same icon column, same disclosure,
+  same 查看轨迹 affordance — and the seat's component, copy, and styles left with it.
+  Claiming the key had meant replacing the generic row outright, which put the
+  plugin in charge of chrome it could not make agree with the rest of the
+  transcript.
+
+### Notes
+
+- What the model and the reader see is unchanged: the outcome facts live in the
+  transcript text the tool renders (`proxy$ <command>`, stdout, `[stderr]`,
+  `status=… · exit=… · 705 ms`), which the standard row displays verbatim.
+
 ## 0.10.0
 
 ### Changed

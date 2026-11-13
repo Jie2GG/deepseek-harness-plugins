@@ -82,8 +82,10 @@ What runs without interrupting you:
 
 An allowlisted program is a bare name (`git`, `systemctl`); a pipeline, a redirect,
 or a substitution is never treated as one program, so it is always shown to you. A
-profile without an approval surface refuses the asking calls rather than running
-them unattended.
+conversation that will not ask at all — its approval policy is *never ask* — runs
+those calls instead of refusing them, because in that conversation an ask is settled
+as a rejection before anyone can weigh in; turning a target's **agent access** off is
+still the hard no.
 
 Local files live inside that conversation's workspace: a transfer path outside it,
 including one that walks up with `..`, is refused before anything moves.
@@ -178,15 +180,23 @@ ignored.
   workspace file is, because the plugin asks the file pipeline for permission before the
   copy starts. Two honest caveats: only the first change to a path within a turn keeps a
   before-image, and a sub-agent's conversation is not tracked by the recorder.
-- The page and its two tabs are the only surface; the agent cannot see or use
-  this list yet.
-- A probe authenticates but executes nothing beyond `true`; running a real remote
-  command with these secrets is the next step.
-- After the plugin package is replaced in place, the running Host keeps its old
-  module until it restarts. The page notices that and hides the authentication
-  choice with an explanation, rather than rejecting a field the old Host does not
-  know.
-- The page needs the Host's `/api` carrier, the subprocess provider, the
-  storage-domain facility, and the credential store; in a profile missing any of
-  them the plugin stays inactive instead of failing.
-- No Web UI beyond the settings page.
+- The settings page and its two tabs are the only **interface**; the conversation
+  reaches the same capability through the `remote` tool, whose call renders in the
+  harness's own tool row like any other tool's.
+- A page probe authenticates and then runs only `true` on the server; real commands
+  come from the agent's `run` action, and nothing on the server is installed or
+  upgraded by this plugin.
+- A remote call is waited for: no interactive session, no PTY, no background job to
+  poll, so a command that needs terminal input or outlives one reply hits its
+  deadline.
+- After the plugin package is replaced, the running Host keeps its previous module
+  until it restarts: before that, the agent has no `remote` tool and new ceilings
+  are not in effect. The settings page follows the browser bundle and updates on its
+  own, and it recognises an older Host, hiding the authentication section with an
+  explanation instead of rejecting a field that Host does not know.
+- The page needs the Host's `/api` carrier, the subprocess provider, the storage
+  domain, the credential store, the tool registry, and the mounted filesystem and
+  working-directory services; a profile missing any of them keeps the plugin
+  inactive rather than failing. `write` and `upload` replace files in place: nothing
+  on the server is versioned or rolled back, and a directory download must be asked
+  for recursively.

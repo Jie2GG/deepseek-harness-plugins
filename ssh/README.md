@@ -277,12 +277,12 @@ the 0.5.1 fix, so the next round does not have to re-derive them:
   so a plugin listener cannot rescue an ask there; the effective policy is
   `overrideOf(session) ?? config.policy ?? 'ask'`, both reachable on the public
   service surface, and `ctx.get('approval')` reads it without injecting.
-- Claiming a `tool.call.toolview` key replaces the generic row **completely**, so the card
-  must cover every phase (`preparing` / `start` / `result`) and every action; both possible
-  wire names are claimed and the unregistered one never renders. The seat supplies
-  `useDisclosure`, `openFile`, `inspect`, `cwd`, and `home`, and its arguments arrive as
-  `argsRaw` once sealed and as a lazy partial-JSON view while streaming — read during
-  render, never parked in state keyed by block identity.
+- Claiming a `tool.call.toolview` key replaces the generic row **completely**: the owner
+  must then cover every phase (`preparing` / `start` / `result`) and every action, with the
+  seat's `useDisclosure`, `openFile`, `inspect`, `cwd`, and `home`, and with arguments read
+  from `argsRaw` once sealed or from the lazy partial-JSON view while streaming (during
+  render, never parked in state keyed by block identity). This plugin tried that and gave it
+  up: owning the chrome bought nothing the rendered transcript text did not already say.
 
 - A spawned child has **no terminal**: stdin is ignored, and the Host process is
   not attached to one. That makes the interactive host-key question unanswerable,
