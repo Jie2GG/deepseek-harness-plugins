@@ -56,10 +56,12 @@ keeps running while you edit values on the second.
 
 ## Using it from the chat
 
-Open a conversation and choose the server in the composer's session menu (the row
-labelled **Remote server**, next to the model and reasoning controls). From then on
-the agent can call `remote` without naming a host: it lists what is saved, runs a
-command, lists or reads a remote path, writes a file, and uploads or downloads one.
+Just ask. The agent sees the saved aliases — each with where it goes — among the
+things it can call, picks the one your conversation is about, and passes it. It can
+run a command, list or read a path, write a file, and upload or download; once it
+names a server, that conversation keeps using it, so a follow-up like "now the disk
+usage" does not repeat the host. Add or remove a target and the choices the agent
+sees follow on the next turn, with no conversation restart.
 
 What runs without interrupting you:
 

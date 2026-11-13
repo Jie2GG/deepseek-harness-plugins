@@ -154,6 +154,12 @@ export interface OpsDeps {
   askpass: () => { ready: boolean; path?: string | undefined; failure?: string | undefined }
   /** Whether a local path already exists, so a download can refuse to overwrite. */
   localExists?: ((path: string) => boolean | Promise<boolean>) | undefined
+  /**
+   * Called after the saved inventory changes. The tool description lists the
+   * aliases the model chooses between, and the parameter DSL is static, so the
+   * holder of the registration decides whether to re-register.
+   */
+  onInventoryChanged?: (() => void) | undefined
   /** Optional per-call overrides the tool layer passes down. */
   options?: FileCallOptions
 }
@@ -284,6 +290,7 @@ export function createOps(deps: OpsDeps): Ops {
   const { runner, store, secrets, askpass } = deps
   const options = deps.options ?? {}
   const localExists = deps.localExists
+  const inventoryChanged = deps.onInventoryChanged
 
   /** One stored record as the page sees it. */
   async function viewOf(state: TargetStore, record: ConnectionRecord): Promise<ConnectionView> {
@@ -615,6 +622,7 @@ export function createOps(deps: OpsDeps): Ops {
         if (holder === undefined) throw new SshError('secret-error', 'This plugin cannot reach the credential store on this Host.')
         await holder.apply(connection.id, patch)
       }
+      inventoryChanged?.()
       return { connection: await viewOf(state, connection), connections: await viewsOf(state) }
     },
 
@@ -634,6 +642,7 @@ export function createOps(deps: OpsDeps): Ops {
           orphanSecrets = true
         }
       }
+      inventoryChanged?.()
       return { removed: true, orphanSecrets, connections: await viewsOf(state) }
     },
 

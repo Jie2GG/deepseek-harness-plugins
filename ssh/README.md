@@ -268,90 +268,12 @@ the 0.5.1 fix, so the next round does not have to re-derive them:
   A size and type pre-check (`stat -c '%s %F' -- '<path>'`, GNU coreutils here) runs
   before a download so an oversized or directory payload is refused without
   touching the disk. `rsync` is absent on this machine and is therefore not used.
-- The composer's session-options seat (`conversation.input.model.options`) declares
-  no owner props and receives `sessionId` among its standard props; a live check in
-  this profile showed the plugin's `ssh-target` occupant registered and active
-  beside the shipped `agent-team` one.
-- Tool authoring, as documented in `docs/cookbook/adding-a-tool.md` and
-  `packages/core/tools`: `output` with `{ schema, render }` is mandatory;
-  `execute` returns only the canonical JSON value that the registry validates,
-  freezes, and hands to `render`; a thrown or invalid value becomes `isError`.
-  `ToolRegistrationOptions` has exactly one field (`when`), scope comes from the
-  calling context (registering at profile root makes the tool global), and the
-  registration is effect-owned, so disposing the fiber unregisters it.
-  `presentCall` / `presentResult` are consumed by native presenters only — the Web
-  client renders from `tool/call` and `tool/result` events, and a plugin that wants
-  a custom chat card registers its wire name in `tool.call.toolview`. The reserved
-  name `run_code` cannot be taken.
-- `ctx.storageDomain.open(spec)` → `Domain` with `table(name)` (`get`, `keys()`,
-  `entries()` as `[key, value]`, `size`, `put`, `delete`, `deleteMany`,
-  `update(key, fn)` atomic read-modify-write), `global.get()` /
-  `global.set(value)`, and `close()`; writes serialize on one chain and emit
-  `domain/changed` after landing. `defineDomain` rejects a name outside
-  `/^[a-z][a-z0-9_]*$/` at module load, and an invalid stored record rejects the
-  whole `open` with `invalid-record` (authoritative-data policy, kept deliberately).
-- The json backend stores one document per unit, hence one
-  `storages/ssh_targets.json` beside the profile's existing `storages/workspace.json`.
-  A unit has exactly one live handle: `kv.open` throws if the same unit is opened
-  twice, and the storage-domain facility enforces one open per domain name, which
-  is why this plugin opens once in `apply` and closes in its disposer.
-- `ctx.connection.fetch.register({ path, methods, requestBody: 'buffered', fetch })`
-  is the third-party bundle's channel: no Typert generator runs for an external
-  package, so there is no generated `ctx.remote` namespace to call.
-- `settings.section` registration is `{ id, order?, label?, locale?, inject? }`
-  and its owner props are only `{ close }`; shipped sections sit at
-  `signin` -1, `general` 0, `models` 10, `plugins` 15, `agent-presets` 20, so 25
-  and 26 land last, one per page. `settings.section.icon` addresses a section by
-  its exact id and is rendered with `{ size: 16, active }`; an unmatched id never
-  renders and an unregistered one falls back to the shell glyph. Both pages and
-  both icons were observed live in the `web` profile at 0.3.0 (`active: true`).
-- `ctx.locale.register(ns, language, dict)` requires both `en` and `zh`; a
-  registration after mount is picked up without a remount, and a `label` thunk is
-  re-read on every projection, so the nav text follows the language without
-  re-registering.
-- The browser module table seeds `react`, `react/jsx-runtime`, `react-dom`,
-  `@deepseek-ai/cordis`, `zod`, `@tanstack/react-virtual`,
-  `dsh-client-store`, `dsh-client-ui-slots`, `dsh-client-ui-primitives`,
-  `dsh-client-ui-dockkit`. Only `react` is required here, and the live theme
-  exposes the `--dsw-alias-*` tokens this page styles with.
-- The host tab primitive lives in
-  `packages/client/ui-primitives/src/SegmentedControl.tsx` and its stylesheet:
-  tab ids `<id>-<value>`, the panel `<id>-<value>-panel` labelled back with
-  `aria-labelledby`, a roving `tabIndex`, an Arrow / Up / Down / Home / End walk
-  that steps enabled neighbours and wraps, focus that follows the selection, and
-  a sliding indicator placed arithmetically from two custom properties rather
-  than by measuring the DOM. Every token that strip uses is defined in
-  `packages/client/ui-theme/src/styles/` (`--dsw-alias-interactive-bg-hover`,
-  `--dsw-radius-md`, `--dsw-radius-sm`, `--dsw-elevation-soft`,
-  `--dsw-focus-ring-width`, `--dsw-focus-ring-color`), so copying the rules gives
-  a plugin the same look without loading the primitive as a module.
-- Child processes start from the parent environment minus names matching
-  `/KEY|PASSWORD|SECRET|TOKEN/i` and minus every `DSH_*` name, so
-  `SSH_AUTH_SOCK` reaches `ssh` (an agent keeps working) while a
-  passphrase-shaped variable would not — a secret therefore has to be handed to
-  `spawn` explicitly, which is what the askpass plumbing does.
-- OpenSSH on this machine is `OpenSSH_10.0p2`, and `SSH_ASKPASS_REQUIRE=force`
-  (8.4+) is what makes an askpass answer possible with no tty and no `DISPLAY`.
-  Verified end to end by running the generated helper with `/bin/sh`: a
-  `Enter passphrase for key …` prompt returns the passphrase, a `password:`
-  prompt returns the password, and an empty environment answers an empty line
-  instead of hanging.
-- Mode-to-command mapping, asserted against a fake subprocess provider: `key`
-  keeps `BatchMode=yes -o PreferredAuthentications=publickey`; `key` with a
-  passphrase and `key+password` set `BatchMode=no`, `NumberOfPasswordPrompts=1`,
-  and export the helper; `password` adds `PubkeyAuthentication=no` with
-  `PreferredAuthentications=password,keyboard-interactive` and no key
-  restriction. A mode that needs a secret while the helper is unavailable is
-  refused as `secret-error` rather than left to burn the deadline.
-- Since 0.5.0 the page offers two modes: `connectionInputSchema` and
-  `probeDraftSchema` accept `key | password`, while `connectionRecordSchema` still
-  accepts the 0.4.0-only `key+password` and `SshRunner` still implements its
-  branch, so a legacy or hand-edited record reads and probes without turning the
-  list into a `storage-error`. The record format stays at version 2.
-- The probe command line, asserted by the offline smoke run:
-  `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=3
-  -o ServerAliveInterval=1 -o PreferredAuthentications=publickey -p 22022
-  -i /home/j/.ssh/id -J jump -o PreferredAuthentications=publickey jiegg@build-box true`.
+- Claiming a `tool.call.toolview` key replaces the generic row **completely**, so the card
+  must cover every phase (`preparing` / `start` / `result`) and every action; both possible
+  wire names are claimed and the unregistered one never renders. The seat supplies
+  `useDisclosure`, `openFile`, `inspect`, `cwd`, and `home`, and its arguments arrive as
+  `argsRaw` once sealed and as a lazy partial-JSON view while streaming — read during
+  render, never parked in state keyed by block identity.
 
 - A spawned child has **no terminal**: stdin is ignored, and the Host process is
   not attached to one. That makes the interactive host-key question unanswerable,

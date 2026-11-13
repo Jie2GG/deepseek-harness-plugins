@@ -78,8 +78,25 @@ export interface RemoteToolDeps {
   sessionOf?: ((exec: Readonly<PendingCall>) => string | undefined) | undefined
   /** The target one conversation chose, read from the plugin's own storage. */
   sessionTargetOf?: ((sessionId: string) => string | undefined) | undefined
+  /**
+   * The saved aliases, read at build time. The parameter DSL takes only static
+   * strings — `defineTool` projects the schema once, so a thunk would freeze —
+   * which is why a changed inventory makes the caller re-register rather than
+   * pretend the list updates in place.
+   */
+  targetsOf?: (() => TargetBrief[]) | undefined
   /** The conversation workspace one transfer call may touch. */
   local?: RemoteLocalBridge | undefined
+}
+
+/** One saved target as the tool description presents it to the model. */
+export interface TargetBrief {
+  /** The alias the model should pass. */
+  label: string
+  /** Where that alias goes. */
+  host: string
+  /** The user the probe would send, when the record names one. */
+  user?: string | undefined
 }
 
 /**
@@ -335,14 +352,72 @@ const OUTCOME_SHAPE = {
 } as const
 
 /**
+ * The tool description the model reads, naming the aliases it may choose between.
+ * @param targets - the saved targets, in the order the page lists them.
+ * @returns the description text.
+ */
+export function describeRemote(targets: TargetBrief[]): string {
+  const list = targets.length === 0
+    ? 'No SSH target is saved yet: call `targets` after the user adds one in Settings → Remote connections.'
+    : `Choose the server this conversation means and pass it as \`target\`. Available aliases: ${targets
+      .map(target => `\`${target.label}\` (${target.user === undefined || target.user === '' ? '' : `${target.user}@`}${target.host})`)
+      .join(', ')}.`
+  return `Runs commands and moves files on a stored SSH server, with the credentials the plugin holds. ${list} A call addresses one server: leave \`target\` out to reuse the one this conversation last used. Nothing is interpreted by a local shell; the command string is executed by the login shell on the server. \`targets\`, \`ls\`, \`read\`, and \`download\` are reads; \`run\`, \`write\`, and \`upload\` may be refused by the user, and \`run\` needs its program on that target's allowlist to skip asking.`
+}
+
+/**
+ * The parameter hint for `target`, listing the same aliases.
+ * @param targets - the saved targets.
+ * @returns the parameter description.
+ */
+export function targetParamHint(targets: TargetBrief[]): string {
+  if (targets.length === 0) {
+    return 'Which saved SSH target to use: its id, display name, or host (optionally `user@host`). None is saved yet, so the call will report the candidates.'
+  }
+  return `Which SSH target to address: one of ${targets.map(target => `\`${target.label}\``).join(', ')}, or its id, host, or \`user@host\`. Omit it to reuse the target this conversation last used.`
+}
+
+/**
  * Build the tool definition over the wired dependencies.
  * @param deps - the operations, the catalog reader, and the session hook.
  * @returns the definition the plugin registers.
  */
+/**
+ * Keep the target the model picked for this conversation, so the next call can
+ * leave `target` out. Only an explicitly named target is remembered: a call that
+ * resolved through the stored choice or a lone saved server would write noise.
+ * @param operations - the shared operations object.
+ * @param sessionId - the conversation, when one is known.
+ * @param call - the call as read.
+ * @param payload - the result, whose `target` names what was used.
+ * @returns resolution once the write lands; failures are swallowed.
+ */
+async function rememberSessionTarget(
+  operations: Ops,
+  sessionId: string | undefined,
+  call: RemoteCallArgs,
+  payload: unknown,
+): Promise<void> {
+  if (sessionId === undefined || sessionId === '') return
+  if (typeof call.target !== 'string' || call.target.trim() === '') return
+  const record = payload as { target?: { id?: unknown }; run?: { target?: { id?: unknown } } } | null
+  const state = payload as { ok?: unknown } | null
+  if (state?.ok !== true) return
+  const direct = record?.target?.id
+  const nested = record?.run?.target?.id
+  const targetId = typeof direct === 'string' ? direct : typeof nested === 'string' ? nested : ''
+  if (targetId === '') return
+  try {
+    await operations.setSessionTarget({ sessionId, targetId })
+  } catch {
+    // A failed memory is not a failed remote call.
+  }
+}
+
 export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
   return defineTool({
     name: REMOTE_TOOL_NAME,
-    description: 'Run commands and move files on an SSH server this plugin has stored, using the credentials saved with it. A call addresses one target: pass `target` (its id, display name, or host), or leave it out to use the target chosen for this conversation. Nothing is interpreted by a local shell; the remote command string is executed by the login shell on the server. `ls` and `read` are reads, while `run` and `write` may be refused by the user, and `run` needs the program to be allowlisted on the target to skip asking. The settings page is Settings → Remote connections.',
+    description: describeRemote(deps.targetsOf?.() ?? []),
     parameters: {
       action: {
         type: 'string',
@@ -350,7 +425,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
         enum: [...REMOTE_TOOL_ACTIONS],
         description: 'What to do: `targets` lists what is saved; `run` executes one command; `ls` lists a remote path; `read` returns a remote file as text; `write` sends text to a remote path.',
       },
-      target: { type: 'string', description: 'Which saved target to use: its id, its display name, or its host (optionally `user@host`). Omit it to use the target chosen for this conversation.' },
+      target: { type: 'string', description: targetParamHint(deps.targetsOf?.() ?? []) },
       command: { type: 'string', description: 'For `run`: the command line to execute on the server, as one string. Quote anything that must survive the remote shell.' },
       path: { type: 'string', description: 'For `ls`, `read`, `write`: an absolute remote path, or one starting with `~/`. Shell metacharacters are refused.' },
       content: { type: 'string', description: 'For `write`: the exact text to put in the remote file; it is sent on stdin, never as an argument.' },
@@ -437,7 +512,11 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           if (call.timeoutMs !== undefined) params.timeoutMs = call.timeoutMs
           if (call.maxBytes !== undefined) params.maxOutputBytes = call.maxBytes
           const result = await operations.runCommand(params)
-          return runResult(result) as never
+          // Remembered from the mapped payload: that is where the target this call
+          // actually used is spelled out.
+          const payload = runResult(result)
+          await rememberSessionTarget(operations, sessionId, call, payload)
+          return payload as never
         }
         case 'upload':
         case 'download': {
@@ -494,6 +573,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           if (call.recursive === true) params.recursive = true
           if (call.maxBytes !== undefined) params.maxBytes = call.maxBytes
           const result = call.action === 'upload' ? await operations.upload(params) : await operations.download(params)
+          await rememberSessionTarget(operations, sessionId, call, result)
           return { ...result, action: call.action } as never
         }
         case 'ls':
@@ -518,6 +598,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
             : call.action === 'read'
               ? await operations.readRemote(params)
               : await operations.writeRemote(params)
+          await rememberSessionTarget(operations, sessionId, call, result)
           return { ...result } as never
         }
       }
@@ -707,13 +788,28 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
  * plugin down with another bundle's choice.
  * @param ctx - the Host plugin context, carrying `tools`.
  * @param deps - the wired dependencies.
- * @returns the name the tool was registered under.
+ * @returns the registered name and a disposer for both registrations.
  */
-export function registerRemoteTool(ctx: Context, deps: RemoteToolDeps): string {
-  ctx.effect(() => ctx.on('tools/pre-execute', (exec, next) => {
-    if (exec.name !== REMOTE_TOOL_NAME && exec.name !== REMOTE_TOOL_FALLBACK_NAME) return next()
-    return gateRemoteCall(deps, exec, next)
-  }), 'ssh: remote policy gate')
+/**
+ * A live `remote` registration. Re-registering is how the alias list the model
+ * chooses between stays honest: the parameter DSL freezes its strings at
+ * `defineTool` time, so a changed inventory means disposing this handle and
+ * claiming the name again with the new text.
+ */
+export interface RemoteToolHandle {
+  /** The name the tool was registered under. */
+  name: string
+  /** Undo the tool and gate registrations. Calling it twice is a no-op. */
+  dispose(): void
+}
+
+export function registerRemoteTool(ctx: Context, deps: RemoteToolDeps): RemoteToolHandle {
+  const disposers: Array<() => void> = [
+    ctx.effect(() => ctx.on('tools/pre-execute', (exec, next) => {
+      if (exec.name !== REMOTE_TOOL_NAME && exec.name !== REMOTE_TOOL_FALLBACK_NAME) return next()
+      return gateRemoteCall(deps, exec, next)
+    }), 'ssh: remote policy gate'),
+  ]
 
   // The tool name is a shared extension point, so the registry is asked before it
   // is claimed: probing beats relying on how a duplicate error surfaces.
@@ -729,9 +825,14 @@ export function registerRemoteTool(ctx: Context, deps: RemoteToolDeps): string {
     ctx.logger.warn(`ssh: another plugin already registers the "${REMOTE_TOOL_NAME}" tool, so this one uses "${REMOTE_TOOL_FALLBACK_NAME}"`)
   }
   const definition = buildRemoteTool(deps)
-  const payload = chosen === REMOTE_TOOL_NAME ? definition : { ...definition, name: chosen }
+  const claim = (name: string): void => {
+    disposers.push(ctx.effect(
+      () => ctx.tools.register(name === REMOTE_TOOL_NAME ? definition : { ...definition, name }),
+      `ssh: ${name} tool`,
+    ))
+  }
   try {
-    ctx.effect(() => ctx.tools.register(payload), `ssh: ${chosen} tool`)
+    claim(chosen)
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error)
     if (chosen !== REMOTE_TOOL_NAME || !/already registered/u.test(message)) throw error
@@ -739,7 +840,15 @@ export function registerRemoteTool(ctx: Context, deps: RemoteToolDeps): string {
     // fall back once rather than lose the capability to a race.
     ctx.logger.warn(`ssh: the "${REMOTE_TOOL_NAME}" tool was taken at registration, so this one uses "${REMOTE_TOOL_FALLBACK_NAME}" (${message})`)
     chosen = REMOTE_TOOL_FALLBACK_NAME
-    ctx.effect(() => ctx.tools.register({ ...definition, name: chosen }), `ssh: ${chosen} tool`)
+    claim(chosen)
   }
-  return chosen
+  let released = false
+  return {
+    name: chosen,
+    dispose(): void {
+      if (released) return
+      released = true
+      while (disposers.length > 0) disposers.pop()?.()
+    },
+  }
 }

@@ -23,6 +23,7 @@ import { AskPassHelper } from './askpass.ts'
 import { SshTransport } from './transport.ts'
 import { createOps } from './ops.ts'
 import { registerRemoteTool } from './tool.ts'
+import type { RemoteToolDeps, RemoteToolHandle, TargetBrief } from './tool.ts'
 import type { TargetSnapshot } from './tool.ts'
 import { createRpcHandler } from './rpc.ts'
 import { RPC_ROUTE_PATH, SshError } from './types.ts'
@@ -85,6 +86,9 @@ export function apply(ctx: Context): void {
     secrets: () => secrets,
     askpass: () => ({ ready: askpass.ready, ...(askpass.path === undefined ? {} : { path: askpass.path }), ...(askpass.failure === undefined ? {} : { failure: askpass.failure }) }),
     localExists: path => existsLocally(path),
+    // The model chooses between the saved aliases, and the tool's description is
+    // frozen at definition time, so an inventory change means re-registering.
+    onInventoryChanged: () => { rerenderRemoteTool() },
   })
 
   /** The agent-facing view of the stored targets, for the gate and for `targets`. */
@@ -109,8 +113,42 @@ export function apply(ctx: Context): void {
     }
   }
 
-  registerRemoteTool(ctx, {
-    ops: async () => ops,
+  /** The aliases as the model sees them, cached so a registration is synchronous. */
+  let briefs: TargetBrief[] = []
+  let handle: RemoteToolHandle | undefined
+  let refreshing = false
+
+  /**
+   * Re-claim the tool so its description and its `target` hint list the aliases
+   * that exist right now.
+   * @returns nothing; the work runs on the activation fiber.
+   */
+  function rerenderRemoteTool(): void {
+    if (refreshing) return
+    refreshing = true
+    void (async () => {
+      try {
+        try {
+          briefs = (await catalog()).map(row => ({
+            label: row.label,
+            host: row.host,
+            ...(row.user === undefined ? {} : { user: row.user }),
+          }))
+        } catch {
+          // A failed read keeps the last list rather than blanking the model's hint.
+        }
+        handle?.dispose()
+        handle = registerRemoteTool(ctx, remoteToolDeps())
+      } finally {
+        refreshing = false
+      }
+    })()
+  }
+
+  /** The dependencies of one `remote` registration, read at claim time. */
+  function remoteToolDeps(): RemoteToolDeps {
+    return {
+      ops: async () => ops,
     catalog,
     local: {
       async dirOf(exec) {
@@ -130,9 +168,15 @@ export function apply(ctx: Context): void {
         return kind === 'createIfAbsent' || kind === 'replaceIfVersion' ? { kind } : undefined
       },
     },
-    sessionOf: exec => (exec.agent as { id?: string } | undefined)?.id,
-    sessionTargetOf: sessionId => store?.getSessionTarget(sessionId)?.targetId,
-  })
+      sessionOf: exec => (exec.agent as { id?: string } | undefined)?.id,
+      sessionTargetOf: sessionId => store?.getSessionTarget(sessionId)?.targetId,
+      targetsOf: () => briefs,
+    }
+  }
+
+  handle = registerRemoteTool(ctx, remoteToolDeps())
+  // First read of the inventory lands the real alias list into the description.
+  rerenderRemoteTool()
   const handler = createRpcHandler(ops)
 
   ctx.effect(async () => {

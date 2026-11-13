@@ -4,6 +4,30 @@ All notable changes to `@jie2gg/dsh-plugin-ssh` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project uses [semantic versioning](https://semver.org/).
 
+## 0.9.0
+
+### Changed
+
+- **The model picks the server, not a menu.** The tool description names every
+  saved alias with where it goes — `` `proxy` (root@10.100.1.205)`` and so on — and
+  says to choose the one the conversation means; the `target` parameter repeats the
+  list. Add a server and the agent's choices follow, without a hand-picked default.
+- The composer's session-options row (**Remote server**) is gone — seat, component,
+  and copy: choosing a target in the input area was the wrong shape for a capability
+  the model can route itself.
+- **The conversation remembers what the model chose.** A call that named a target
+  records it as that conversation's default so the next can leave `target` out; a
+  call that resolved through the stored default or a lone saved server records
+  nothing, and a failed record never fails the remote call.
+
+### Added
+
+- `registerRemoteTool` answers with a `{ name, dispose }` handle instead of a bare
+  name, because keeping the alias list honest means re-claiming the tool: the
+  parameter DSL takes static strings and `defineTool` projects them once, so a thunk
+  would freeze anyway. The inventory is cached at registration time and the tool is
+  re-registered after every save or remove.
+
 ## 0.8.0
 
 ### Added

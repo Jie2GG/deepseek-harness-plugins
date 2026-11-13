@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "SSH 管理",
-    "description": "在已保存的 SSH 服务器上执行命令、传输文件：设置页负责清单与凭据，对话里通过 remote 工具直接使用同一套能力。",
+    "description": "在已保存的 SSH 服务器上执行命令、传输文件：设置页负责清单与凭据；remote 工具把别名清单交给模型，由它按对话内容选择连哪台。",
     "detail": "docs/DETAIL.zh.md"
   }
 }
