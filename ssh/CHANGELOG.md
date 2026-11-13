@@ -67,12 +67,21 @@ project uses [semantic versioning](https://semver.org/).
   `action` to the name `transfer` while the body returns the real action
   (`upload` or `download`). Both are corrected — the common outcome fields moved
   into the shared shape and the transfer branch declares the actions it serves.
+- A **download copied from the local filesystem**: `transfer()` built the
+  `host:path` argument only for uploads, so a download passed the bare remote path
+  and `scp` reported the server's path as a missing *local* file
+  (`cp: 对 '/tmp/…' 调用 stat 失败`) even though `read` of the same path had just
+  succeeded. The far end is now named the same way in both directions, and the
+  suite asserts the download argv (remote spec, then the workspace destination)
+  instead of only the upload one.
 - The offline suites had asserted the payload *values* without ever validating
   them against the projected JSON Schema, which is how this survived 71 tool
   assertions. Section 5b of the tool suite and 5b of the transfer suite now run
   every action's payload through the registry's own `validateJsonSchemaValue`,
-  plus two negative cases (an undeclared field and an unknown action must still
-  be rejected). 376 assertions across seven suites.
+  plus two negative cases (an undeclared field and an unknown action must still be
+  rejected), and both transfer directions now assert the built command line. A
+  refusal that never reached a target no longer invents a host name in the
+  transcript line. 379 assertions across seven suites.
 
 ### Notes
 

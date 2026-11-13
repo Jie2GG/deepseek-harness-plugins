@@ -97,10 +97,11 @@ export async function transfer(
   request: TransferRequest,
 ): Promise<TransferOutcome> {
   const startedAt = Date.now()
-  const authority = request.direction === 'upload'
-    ? `${target.user === undefined || target.user === '' ? '' : `${target.user}@`}${target.host}`
-    : undefined
-  const remote = authority === undefined ? `${request.remotePath}` : `${authority}:${request.remotePath}`
+  // scp identifies the far end by the `host:path` form of an argument, in both
+  // directions: a download that passed the bare remote path copied from the local
+  // filesystem instead, and reported the server's path as a missing local file.
+  const authority = `${target.user === undefined || target.user === '' ? '' : `${target.user}@`}${target.host}`
+  const remote = `${authority}:${request.remotePath}`
   const src = request.direction === 'upload' ? request.localPath : remote
   const dst = request.direction === 'upload' ? remote : request.localPath
 

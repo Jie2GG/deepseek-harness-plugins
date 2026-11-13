@@ -624,8 +624,11 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
     }
     case 'upload':
     case 'download': {
-      const toward = value.action === 'upload' ? 'up to' : 'down from'
-      lines.push(`${String(value.action)} ${toward} ${where}: ${String(value.localPath)} <-> ${String(value.remotePath)}`)
+      // A refusal that never reached a target has no host to name, so the line
+      // drops the preposition rather than inventing "the selected target".
+      const known = value.target !== undefined || args.target !== undefined
+      const head = known ? `${String(value.action)} ${value.action === 'upload' ? 'up to' : 'down from'} ${where}` : String(value.action)
+      lines.push(`${head}: ${String(value.localPath)} <-> ${String(value.remotePath)}`)
       if (typeof value.bytes === 'number') lines.push(`${String(value.bytes)} bytes${value.recursive === true ? ' (directory)' : ''}${value.overwrote === true ? ', replaced an existing file' : ''}`)
       if (typeof value.message === 'string') lines.push(String(value.message))
       if (typeof value.hint === 'string') lines.push(`hint: ${String(value.hint)}`)

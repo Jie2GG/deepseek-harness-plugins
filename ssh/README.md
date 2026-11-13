@@ -247,6 +247,8 @@ the 0.5.1 fix, so the next round does not have to re-derive them:
   the same `-o BatchMode` / `StrictHostKeyChecking=accept-new` / `-i` / `-J` /
   `PreferredAuthentications` flags, and reads the remote end as one `host:path`
   argument, so no local shell is involved and a path with spaces needs no quoting.
+  Both directions name the far end `host:path` — a download that passed the bare
+  remote path copied locally instead, which is what the first live check caught.
   A size and type pre-check (`stat -c '%s %F' -- '<path>'`, GNU coreutils here) runs
   before a download so an oversized or directory payload is refused without
   touching the disk. `rsync` is absent on this machine and is therefore not used.
