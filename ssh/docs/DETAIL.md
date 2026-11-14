@@ -3,10 +3,11 @@
 Manages the SSH targets this machine reaches: a named list of hosts and OpenSSH
 aliases, how each one logs in, and a connectivity test you can run from the
 browser. From **0.6.0** the conversation can use that server too: the agent gets
-one `ssh_client` tool that runs commands, lists and reads files, writes text, and moves
-files with `scp` — all against the target you picked for the conversation, with the
-credentials you stored on this page. Nothing is installed or upgraded on either
-side.
+one `ssh_client` tool that runs commands (or leaves a long one running in the
+background and polls it later), lists and reads files, writes text, replaces
+exact text inside a file, and moves files with `scp` — all against the target you
+picked for the conversation, with the credentials you stored on this page.
+Nothing is installed or upgraded on either side.
 
 ## Where the page is
 
@@ -15,8 +16,9 @@ Open **Settings** and pick **Remote connections** in the navigation (中文：�
 General settings. Across its top sit two tabs:
 
 - **SSH targets** — the list: add, edit, delete, and test.
-- **Client settings** — the `ssh` executable, the probe timeout, and the output
-  ceiling every probe honours, next to the bounds the plugin fixes in code.
+- **Client settings** — the `ssh` executable, the probe and command timeouts, the
+  output ceiling, and the transfer ceiling, next to the bounds the plugin fixes
+  in code.
 
 Both tabs read and write one page state, so a probe you started on the first tab
 keeps running while you edit values on the second.
@@ -50,15 +52,18 @@ keeps running while you edit values on the second.
   key not trusted, timed out, or `ssh` not found, and the last result is kept
   with its timestamp and the captured output tail.
 - **Client settings**, on the second tab: the `ssh` executable (a name on
-  `PATH` or an absolute path), the probe timeout, and the captured output
-  ceiling. That tab also states the bounds the plugin fixes in code, so a value
-  outside a range is not a surprise.
+  `PATH` or an absolute path), the probe timeout, the captured output ceiling,
+  the command timeout every agent-issued remote call obeys, and the
+  file-transfer ceiling a copy may not exceed. That tab also states the bounds
+  the plugin fixes in code, so a value outside a range is not a surprise.
 
 ## Using it from the chat
 
 Just ask. The agent sees the saved aliases — each with where it goes — among the
 things it can call, picks the one your conversation is about, and passes it. It can
-run a command, list or read a path, write or precisely edit a file, and upload or download; once it
+run a command, list or read a path, write or precisely edit a file, upload or
+download, and hand a long-running command to the background to read its output in
+pieces or stop it later. Once it
 names a server, that conversation keeps using it, so a follow-up like "now the disk
 usage" does not repeat the host. Add or remove a target and the choices the agent
 sees follow on the next turn, with no conversation restart.
@@ -76,14 +81,16 @@ What runs without interrupting you:
 | The call | What happens |
 | --- | --- |
 | list a directory, read a file, download, or ask which server this is (`get_connection`) | runs immediately |
-| a command whose program is on that target's **command allowlist**, or any command where the target lists no allowlist | runs immediately |
+| a single-program command whose one bare program is on that target's **command allowlist** | runs immediately |
 | an edit of a remote file (exact text, refused when it matches more than once) | asks you first |
 | a command left running in the background (`background: true`) | the same verdict as the same command run in the foreground |
 | any other command, and any write or upload | asks you first, in your language, showing the server and the exact command or path |
 | anything against a target with **agent access** turned off | refused |
 
-An allowlisted program is a bare name (`git`, `systemctl`); a pipeline, a redirect,
-or a substitution is never treated as one program, so it is always shown to you. A
+A fresh target has an **empty allowlist**, and that asks about every command on
+it; list the programs you trust if those should run unattended. An allowlisted
+program is a bare name (`git`, `systemctl`); a pipeline, a redirect, or a
+substitution is never treated as one program, so it is always shown to you. A
 conversation that will not ask at all — its approval policy is *never ask* — runs
 those calls instead of refusing them, because in that conversation an ask is settled
 as a rejection before anyone can weigh in; turning a target's **agent access** off is
@@ -128,8 +135,9 @@ back to the browser:
 
 Two honest limits: the store is readable by your own OS user, and agent tool
 processes run as that same user, so a stored secret is private from other users
-rather than hidden from the agent. And a stored secret still only ever runs `true`
-on the remote machine — the plugin executes nothing else there yet.
+rather than hidden from the agent. And the page's own test still runs nothing but
+`true` on the server: every wider use of those credentials — commands, edits,
+transfers — goes through the chat tool, under the approval rules above.
 
 ## When your terminal connects but the page does not
 
@@ -161,13 +169,14 @@ an unanswerable question.
 
 ## Planned behaviour
 
-1. An interactive or long-running remote session (a PTY, or a background job the
-   conversation can poll), so commands that need input or outlive one reply fit.
-2. Showing the settings `ssh -G` resolves for a target, so an alias can be checked
-   against what the OpenSSH client would really use.
-3. Reading the aliases in `~/.ssh/config` as a suggested inventory.
+1. A terminal you can type into live: a command can already be given a
+   pseudo-terminal (`tty`), an answer to a prompt (`input`), or a background job
+   the conversation polls and can stop — but there is no interactive session.
+2. Reading the aliases in `~/.ssh/config` as a suggested inventory.
 
-None of these exist yet, and the interface may still change.
+Neither exists yet, and the interface may still change. What used to head this
+list — the pollable background job and the `ssh -G` resolve view — shipped in
+0.16.0 and 0.7.0 respectively.
 
 ## Configuration
 
@@ -188,11 +197,13 @@ ignored.
 - A page probe authenticates and then runs only `true` on the server; real commands
   come from the agent's `exec` action, and nothing on the server is installed or
   upgraded by this plugin.
-- A remote call is waited for: there is no terminal to type into live and no
-  background job to poll. A command that needs a terminal can be given one
+- A foreground remote call is waited for: there is no terminal to type into live.
+  A command that needs a terminal can be given one
   (`tty: true`) and handed its answer (`input: "…"`). A command that will outlive one
   reply can be left running with `background: true`, which returns a job id to poll with
-  `job_output` and stop with `job_kill`. What is still missing is a terminal you type
+  `job_output` and stop with `job_kill`; it runs to a deadline of its own (thirty
+  minutes or more) and holds one of the plugin's four concurrent remote operations
+  until it settles. What is still missing is a terminal you type
   into live, and a command that keeps running on the server after this conversation
   ends — that one wants `nohup` or a systemd unit, which `exec` can set up.
 - After the plugin package is replaced, the running Host keeps its previous module

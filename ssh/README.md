@@ -3,7 +3,9 @@
 Manage the SSH targets this machine reaches from the Harness settings panel: a
 named inventory written in one address field, two authentication modes (key or
 password) whose secrets live in the credential store, and the connectivity probes
-and client settings that use them. User-facing wording lives
+and client settings that use them. The same operations reach a conversation
+through one agent tool, `ssh_client`, which runs under the policy gate described
+below. User-facing wording lives
 in [docs/DETAIL.md](docs/DETAIL.md) (and
 [docs/DETAIL.zh.md](docs/DETAIL.zh.md) for Chinese).
 
@@ -32,6 +34,7 @@ ssh/
     ├── transfer.ts           # scp moves, with a remote size and type pre-check
     ├── local-path.ts         # the workspace boundary a local transfer path obeys
     ├── edit.ts               # the pure match-and-replace rules behind `edit`
+    ├── jobs.ts               # a backgrounded remote command on the harness job registry
     ├── ops.ts                # one method per RPC name, transport-agnostic
     ├── rpc.ts                # Request → Response, failure code → HTTP status
     ├── client.ts             # browser half: the page, its tabs, and its icon
@@ -90,7 +93,7 @@ never rewrites the profile patch file or restarts the plugin.
 Body `{ method, params? }`, result `{ ok: true, result }` or
 `{ ok: false, error: { code, message, field?, hint? } }`. Codes are a closed set:
 `bad-input` 400, `not-found` 404, `busy` 409, `storage-error` 500,
-`internal` 500.
+`secret-error` 500, `internal` 500.
 
 | Method | Params | Returns |
 | --- | --- | --- |
@@ -98,7 +101,7 @@ Body `{ method, params? }`, result `{ ok: true, result }` or
 | `save` | `{ connection, secrets? }` (no `id` = create) | `{ connection, connections }` |
 | `remove` | `{ id }` | `{ removed, orphanSecrets, connections }` |
 | `probe` | `{ id }` or `{ draft, secrets? }` | `{ connection?, probe?, connections }` |
-| `exec` | `{ command, target?, sessionId?, timeoutMs?, maxOutputBytes? }` | `{ run, connection?, connections }` |
+| `run` | `{ command, target?, sessionId?, timeoutMs?, maxOutputBytes?, tty?, input? }` | `{ run, connection?, connections }` |
 | `resolve` | `{ target?, sessionId? }` | `{ action: 'resolve', ok, target, resolved, stored, differs, text? }` |
 | `upload` / `download` | `{ path, localPath, localDir?, target?, sessionId?, recursive?, overwrite?, maxBytes?, timeoutMs? }` | the transfer result |
 | `setSessionTarget` / `clearSessionTarget` | `{ sessionId, targetId? }` | `{ sessionTarget }` |
@@ -148,7 +151,11 @@ backend:
 Bounds live in `src/storage.ts`: 64 targets, 4 concurrent remote operations
 shared by probes and commands, 12 per `probeAll` round, 1 s–120 s probe timeout,
 1 s–300 s command timeout, 1 KiB–4 MiB output ceiling, 1 KiB–512 MiB transfer
-ceiling, and at most 32 allowlisted program names of 64 characters each.
+ceiling, and at most 32 allowlisted program names of 64 characters each. A
+backgrounded command runs to its own 30-minute deadline
+(`BACKGROUND_DEADLINE_MS`, whichever is larger against the configured command
+timeout), text fed to a command's stdin is capped at 1,000,000 characters, and a
+remote command line at 8,192.
 
 Record format is `version: 3` with `compatibleVersions: [1, 2]`.
 
@@ -196,20 +203,39 @@ bundle is the live proof of that).
 | `timeoutMs` / `maxBytes` | per-call overrides of the shared ceilings |
 | `output` | `oneOf` per action, each `additionalProperties: false`; `execute` returns the canonical value and `output.render` writes the transcript text. The registry validates that value against the projected schema, so a branch that omits a field the producer emits rejects the whole call — the suites therefore validate every action's payload with `validateJsonSchemaValue`, not just its contents |
 
+Two honest notes on that field table, both verified against the shipped
+implementation rather than the schema text:
+
+- Naming a target with an explicit `target` argument records it as this
+  conversation's choice (`rememberSessionTarget` writes the `sessions` row only
+  for a call that succeeded and named a server on purpose), so the next call can
+  leave `target` out.
+- The `parameters` schema declares thirteen of the fields above; `oldText`,
+  `newText`, `all`, `replaceFirst`, `backup`, `tty`, and `input` arrive undeclared
+  and are read defensively by `readArgs` — they work, but a model meets them only
+  through the action description and this document.
+
 Policy is decided in `tools/pre-execute`, not inside the tool, which is what the
 tool-authoring docs prescribe for deployment policy:
 
 | Call | Verdict |
 | --- | --- |
 | `get_connection`, `read` (a listing or a file's text), `download` | allow |
-| `exec`, program in the target's `allowedCommands`, or no allowlist at all | allow | (the same verdict applies to a backgrounded command)
-| `exec`, program not on a non-empty allowlist | **ask** |
-| `exec`, a pipeline / redirection / substitution (no single leading program) | **ask** |
+| `exec`, its one bare leading program is on a **non-empty** `allowedCommands` | allow — the same verdict applies to a backgrounded command |
+| `exec`, any other command: an unlisted program, an **empty allowlist** (what a fresh target has, so every command is asked), or a pipeline / redirection / substitution (no single leading program) | **ask** |
 | any `ask`, in a conversation whose approval policy is `never` | **allow** — the core rejects unanswered asks by policy, so asking there is a self-inflicted refusal |
 | `write`, `edit`, `upload` | **ask** |
 | `download` | allow (it reads the server and writes inside the session workspace, which the file pipeline already governs) |
 | any action on a target with `agentAccess: off` | deny, naming the settings page |
 | storage unreadable at gate time | deny — running blind on a remote host is worse |
+
+This table states `decideAccess` as it runs today (confirmed against the
+compiled gate). Two model-facing strings still carry the opposite reading of the
+empty-allowlist case — `describeRemote`'s "runs freely unless that target lists a
+command allowlist", landing in commit 3786005, and the `allowlist=none(no
+restriction)` suffix `get_connection` renders — while `decideAccess` asks about
+every command when the list is empty, which is what `storage.ts` documents as the
+safe default. Those strings are a follow-up code fix, not a docs question.
 
 An `ask` is resolved by the harness approval UI (`ctx.approval`, answered through
 the standard tool-approval surface) with `displayReason` supplied in English and
@@ -305,21 +331,26 @@ the 0.5.1 fix, so the next round does not have to re-derive them:
   deployment the Host runs as uid 1024 with no `passwd` entry while the shell
   account is uid 1000 — exactly the confusion the identity card answers.
 
-## Planned surface for the next round
+## Remaining surface
 
-1. An agent tool over the same `ops` methods (`list` / `probe` / `runCommand`), which
-   is why every operation already returns an explicit status rather than a
-   rendered string, and why the probe classification is a pure function.
-2. File transfer over the same transport (`upload`, `download`, directories
-   through `scp -r`), which is the remaining action pair of this tool.
-3. A `tool.call.toolview` card registered under the tool's wire name, so a remote
-   command reads like the built-in terminal card instead of a generic row.
-4. Optional: read `~/.ssh/config` aliases as a suggested inventory (`ctx.fs`).
+The old four-item plan has landed: the agent tool (0.6.0), file transfer over the
+same transport (0.9.0), and — through 0.15.0/0.16.0 — a pseudo-terminal, stdin
+answers, and background jobs on the harness job registry. What is still open:
 
-## Limits of 0.6.0
+1. A terminal one can type into live: `tty` plus `input` answers a prompt, and
+   `background: true` streams output out of band, but there is no interactive
+   session.
+2. Optional: read `~/.ssh/config` aliases as a suggested inventory (`ctx.fs`).
+3. Tried and deliberately dropped: claiming the `tool.call.toolview` seat, so a
+   remote call keeps rendering in the harness's generic tool row — see the note
+   under **Verified contracts**.
 
-- One settings page, its two tabs, is the only surface; the agent cannot see the
-  list yet.
+## Limits of 0.16.0
+
+- The settings page is inventory, probes, resolve, and ceilings only: running
+  commands, editing files, and moving bytes reach the server through the
+  conversation's `ssh_client` tool — the page has no run console, no transfer
+  picker, and no job list.
 - A probe reads the **Host account's** ssh world — its `~/.ssh/config`, keys,
   agent, and `known_hosts` — not the terminal user's, so a working alias in a
   shell can still resolve differently here. The Client settings tab names the
@@ -328,8 +359,19 @@ the 0.5.1 fix, so the next round does not have to re-derive them:
   an in-place package swap keeps the previous one until the process restarts.
 - A page probe still authenticates and runs only `true`; real commands come from
   the agent's `exec` action.
-- Remote calls are synchronous: no PTY, no terminal input, no background job. A
-  command that waits for a prompt hits its deadline.
+- A foreground call is waited for. `tty: true` gives the command a pseudo-terminal
+  (`ssh -tt`, with its stderr-merges-into-stdout and CRLF costs) and `input` feeds
+  its stdin; `background: true` hands the command to the harness job registry — the
+  call answers with a job id, output streams through `job_output` from the
+  provider's own offsets, `job_kill` stops it, and the job holds one of the four
+  concurrent lanes until it settles. The connection lives in the Host process:
+  stopping the job, ending the conversation, or restarting the Host ends the
+  remote command, and `job_kill` interrupts the local client — whether the
+  server-side process dies with the session is the server's choice. There is no
+  terminal to type into live.
+- `edit` refuses a file larger than the read ceiling rather than replacing text it
+  never saw, and `write` / `edit` / `upload` change the server in place: nothing
+  there is versioned beyond the optional `<path>.dsh-bak` copy an `edit` takes.
 - A download dispatches `fs/write-intent` before `scp` runs, with the tool
   execution as the actor, which is how the external write still lands in the
   conversation's change summary (the recorder reads the before-image from that

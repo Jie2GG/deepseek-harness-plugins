@@ -54,6 +54,23 @@ project uses [semantic versioning](https://semver.org/).
   refusals rather than queueing silently forever.
 - Backgrounding is refused in a profile with no job registry, with a hint to drop the
   flag; the registry is read through `ctx.get`, so the plugin still activates without it.
+- **The documentation was realigned with the shipped code** (no behavior changed): the
+  developer README gained `src/jobs.ts` in its layout map, its route table now names
+  `run` (not `exec`) and carries `tty`/`input`, its bounds list carries the background
+  deadline and the stdin cap, and its "planned" and "limits" sections moved from the
+  0.6.0 story to this release. Both detail pages state the five editable Client settings,
+  the background job, and the empty-allowlist rule, and the Chinese page lost a
+  duplicated opening sentence and two headings that had no blank line before them. The
+  package `description` now names the tool `ssh_client`, which is what it was renamed to
+  in 0.12.0.
+- Two model-facing strings still describe the allowlist the other way round, verified
+  against the compiled `decideAccess`: it asks about **every** command when the
+  allowlist is empty (the safe default `storage.ts` documents), while `describeRemote`
+  says a command "runs freely unless that target lists a command allowlist" and
+  `get_connection` renders `allowlist=none(no restriction)`. Also, the fields `oldText`,
+  `newText`, `all`, `replaceFirst`, `backup`, `tty`, and `input` are consumed by the
+  body but not declared in the tool's `parameters` schema. Both are follow-up code
+  fixes; the docs now state the gate.
 
 ## 0.15.0
 
