@@ -16,7 +16,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-subprocess'
-import { MAX_CONCURRENT_PROBES, MIN_REMOTE_TIMEOUT_MS } from './storage.ts'
+import { MAX_CONCURRENT_PROBES, MIN_REMOTE_TIMEOUT_MS, PROBE_TIMEOUT_MS, SCP_EXECUTABLE, SCP_FALLBACK_PATHS, SSH_EXECUTABLE, SSH_FALLBACK_PATHS } from './storage.ts'
 import { SshError } from './types.ts'
 import type { AuthMode, ProbeOutcome, ProbeStatus, RemoteRunResult, RemoteStatus, SshSettings } from './types.ts'
 
@@ -256,6 +256,11 @@ export class SshTransport {
   readonly #askpass: AskPassSource | undefined
   #inFlight = 0
   readonly #controllers = new Set<AbortController>()
+  // The programs the plugin dials with, found on first use: no page names them
+  // any more. Only a hit is cached, so installing openssh between calls takes
+  // effect without a restart; a miss re-runs the search.
+  #sshPath: string | undefined
+  #scpPath: string | undefined
 
   /**
    * @param ctx - Host context that carries `subprocess`.
@@ -275,6 +280,8 @@ export class SshTransport {
   dispose(): void {
     for (const controller of this.#controllers) controller.abort()
     this.#controllers.clear()
+    this.#sshPath = undefined
+    this.#scpPath = undefined
   }
 
   /**
@@ -290,6 +297,46 @@ export class SshTransport {
       if (signal?.aborted === true) throw error
       return undefined
     }
+  }
+
+  /** The first name of the candidates the provider can resolve, or `undefined`. */
+  async #firstPresent(names: readonly string[], signal?: AbortSignal): Promise<string | undefined> {
+    for (const name of names) {
+      const found = await this.resolveExecutable(name, signal)
+      if (found !== undefined) return found
+    }
+    return undefined
+  }
+
+  /**
+   * The ssh program to dial with, found on first use and then kept: the bare
+   * name through `PATH` first, since that honours whatever openssh the account
+   * actually prefers, then the usual absolute install locations.
+   * @param signal - cancellation of the lookup.
+   * @returns the resolved executable, or `undefined` when none of them exists.
+   */
+  async resolveSsh(signal?: AbortSignal): Promise<string | undefined> {
+    if (this.#sshPath !== undefined) return this.#sshPath
+    this.#sshPath = await this.#firstPresent([SSH_EXECUTABLE, ...SSH_FALLBACK_PATHS], signal)
+    return this.#sshPath
+  }
+
+  /**
+   * The scp to move bytes with, searched the same way. A resolved ssh's own
+   * sibling wins, so a non-standard install keeps its two programs together;
+   * otherwise the bare name and the usual locations are tried in order.
+   * @param signal - cancellation of the lookup.
+   * @returns the resolved executable, or `undefined` when none of them exists.
+   */
+  async resolveScp(signal?: AbortSignal): Promise<string | undefined> {
+    if (this.#scpPath !== undefined) return this.#scpPath
+    const ssh = await this.resolveSsh(signal)
+    const sibling = ssh !== undefined && ssh.endsWith('/ssh') ? `${ssh.slice(0, -'/ssh'.length)}/scp` : undefined
+    const names = sibling === undefined
+      ? [SCP_EXECUTABLE, ...SCP_FALLBACK_PATHS]
+      : [sibling, SCP_EXECUTABLE, ...SCP_FALLBACK_PATHS.filter(path => path !== sibling)]
+    this.#scpPath = await this.#firstPresent(names, signal)
+    return this.#scpPath
   }
 
   /**
@@ -557,15 +604,15 @@ export class SshTransport {
   async probe(target: RemoteTarget, settings: SshSettings, auth?: RemoteAuth): Promise<ProbeOutcome> {
     const controller = this.#takeLane('probe')
     try {
-      const deadline = settings.probeTimeoutMs
+      const deadline = PROBE_TIMEOUT_MS
       const { flags, env } = this.sshOptions(target, settings, auth ?? {}, deadline)
-      const program = await this.resolveExecutable(settings.command, controller.signal)
+      const program = await this.resolveSsh(controller.signal)
       if (program === undefined) {
         return {
           at: new Date().toISOString(),
           status: 'ssh-missing',
           durationMs: 0,
-          detail: `Could not resolve the ssh executable "${settings.command}".`,
+          detail: 'No ssh program was found: PATH and the usual install locations were tried.',
         }
       }
       const collected = await this.#collect(program, [...flags, this.authority(target), 'true'], settings, env, deadline, controller)
@@ -622,11 +669,11 @@ export class SshTransport {
   async resolve(target: RemoteTarget, settings: SshSettings): Promise<Collected> {
     const controller = this.#takeLane('config resolution')
     try {
-      const program = await this.resolveExecutable(settings.command, controller.signal)
+      const program = await this.resolveSsh(controller.signal)
       if (program === undefined) {
         return {
           outcome: 'error',
-          error: `Could not resolve the ssh executable "${settings.command}".`,
+          error: 'No ssh program was found: PATH and the usual install locations were tried.',
           exitCode: null,
           signal: null,
           stdout: '',
@@ -676,7 +723,7 @@ export class SshTransport {
   ): Promise<RemoteJob | undefined> {
     const deadline = Math.max(MIN_REMOTE_TIMEOUT_MS, options.timeoutMs ?? settings.remoteTimeoutMs)
     const controller = this.#takeLane('background command')
-    const program = await this.resolveExecutable(settings.command, controller.signal)
+    const program = await this.resolveSsh(controller.signal)
     if (program === undefined) {
       this.#controllers.delete(controller)
       this.#inFlight -= 1
@@ -757,13 +804,13 @@ export class SshTransport {
     const controller = this.#takeLane('remote command')
     try {
       const { flags, env } = this.sshOptions(target, bounded, auth, deadline)
-      const program = await this.resolveExecutable(bounded.command, controller.signal)
+      const program = await this.resolveSsh(controller.signal)
       if (program === undefined) {
         return {
           at: new Date().toISOString(),
           status: 'ssh-missing',
           durationMs: 0,
-          stderr: `Could not resolve the ssh executable "${bounded.command}".`,
+          stderr: 'No ssh program was found: PATH and the usual install locations were tried.',
         }
       }
       // `-tt` must precede the destination, like every other ssh option. Two t's,

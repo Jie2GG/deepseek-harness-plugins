@@ -9,8 +9,10 @@
  * the only ordinary writer.
  *
  * Format history: 1 = targets only; 2 = added `auth`; 3 = added the agent-access
- * fields and the `sessions` table. Older records keep opening because every
- * added field is optional and its default reproduces what that version meant.
+ * fields and the `sessions` table; 4 = the global slot shrank to the three
+ * ceilings (the executable is detected now, and the probe deadline is fixed).
+ * Older records keep opening because every added field is optional, and every
+ * retired field is accepted and ignored, so no stored file is refused.
  *
  * @module @jie2gg/dsh-plugin-ssh/storage
  */
@@ -23,14 +25,16 @@ import type { ConnectionRecord, SessionTarget, SshSettings } from './types.ts'
 export const DOMAIN_NAME = 'ssh_targets'
 
 /**
- * Current record format version. 2 added `auth`, 3 added the agent-access
- * fields and the `sessions` table; the current schemas accept both earlier
- * shapes, so no stored file is rewritten or refused on upgrade.
+ * Current record format version. 2 added `auth`, 3 added the agent fields and
+ * the `sessions` table, 4 shrank the global slot to the three ceilings the page
+ * still edits — the executable is detected and the probe deadline is fixed.
+ * The current schemas accept every earlier shape, so no stored file is
+ * rewritten or refused on upgrade.
  */
-export const DOMAIN_VERSION = 3
+export const DOMAIN_VERSION = 4
 
 /** Older stored records the current schemas still accept. */
-export const COMPATIBLE_VERSIONS = [1, 2]
+export const COMPATIBLE_VERSIONS = [1, 2, 3]
 
 /** Ceiling on how many targets the page may keep. */
 export const MAX_CONNECTIONS = 64
@@ -44,13 +48,24 @@ export const MAX_ALLOWED_COMMANDS = 32
 /** Longest single allowlisted command name. */
 export const MAX_COMMAND_LENGTH = 64
 
-/** `ssh` executable used when the user changed nothing. */
-export const DEFAULT_COMMAND = 'ssh'
+/**
+ * The program one call dials with. Since 0.0.18 the page does not name it: the
+ * transport tries this bare name on `PATH` first, then {@link SSH_FALLBACK_PATHS},
+ * and remembers the first hit until the plugin unloads.
+ */
+export const SSH_EXECUTABLE = 'ssh'
+export const SSH_FALLBACK_PATHS: readonly string[] = ['/usr/bin/ssh', '/usr/local/bin/ssh', '/bin/ssh', '/opt/homebrew/bin/ssh']
 
-/** Probe deadline bounds, in whole milliseconds. */
-export const DEFAULT_PROBE_TIMEOUT_MS = 10_000
-export const MIN_PROBE_TIMEOUT_MS = 1_000
-export const MAX_PROBE_TIMEOUT_MS = 120_000
+/** The transfer sibling, searched the same way; a resolved ssh's own sibling wins. */
+export const SCP_EXECUTABLE = 'scp'
+export const SCP_FALLBACK_PATHS: readonly string[] = ['/usr/bin/scp', '/usr/local/bin/scp', '/bin/scp', '/opt/homebrew/bin/scp']
+
+/**
+ * The deadline one connectivity probe — and the download size pre-check —
+ * waits to. Fixed in code since 0.0.18; 10 seconds was the default the page
+ * used to offer, and it fit every recorded deployment without being raised.
+ */
+export const PROBE_TIMEOUT_MS = 10_000
 
 /** How long one backgrounded remote command may run before it is called timed out. */
 export const BACKGROUND_DEADLINE_MS = 1_800_000
@@ -143,22 +158,23 @@ export const connectionRecordSchema = z.object({
   maxOutputBytes: z.number().int().min(MIN_MAX_OUTPUT_BYTES).max(MAX_MAX_OUTPUT_BYTES).optional(),
 }).strict()
 
-/** The domain's global slot: settings the whole page shares. */
+/** The domain's global slot: the three ceilings the whole page shares. */
 export const settingsRecordSchema = z.object({
-  command: z.string().trim().min(1).max(256).refine(
-    value => value === DEFAULT_COMMAND || value.startsWith('/') || /^[a-z0-9._-]+$/u.test(value),
-    { message: 'Expected "ssh", an absolute path, or a simple executable name' },
-  ).default(DEFAULT_COMMAND),
-  probeTimeoutMs: z.number().int().min(MIN_PROBE_TIMEOUT_MS).max(MAX_PROBE_TIMEOUT_MS).default(DEFAULT_PROBE_TIMEOUT_MS),
   maxOutputBytes: z.number().int().min(MIN_MAX_OUTPUT_BYTES).max(MAX_MAX_OUTPUT_BYTES).default(DEFAULT_MAX_OUTPUT_BYTES),
   remoteTimeoutMs: z.number().int().min(MIN_REMOTE_TIMEOUT_MS).max(MAX_REMOTE_TIMEOUT_MS).default(DEFAULT_REMOTE_TIMEOUT_MS),
   maxTransferBytes: z.number().int().min(MIN_MAX_TRANSFER_BYTES).max(MAX_MAX_TRANSFER_BYTES).default(DEFAULT_MAX_TRANSFER_BYTES),
+  /**
+   * The two fields a pre-0.0.18 page could edit. A stored slot written before
+   * then still carries them; the strict schema accepts and ignores them, and
+   * the next save drops them. Keeping them optional here is what lets an old
+   * file keep opening rather than surfacing as a storage-error.
+   */
+  command: z.string().trim().min(1).max(256).optional(),
+  probeTimeoutMs: z.number().int().min(1_000).max(120_000).optional(),
 }).strict()
 
 /** Initial settings served before the first write; not written as such. */
 export const DEFAULT_SETTINGS: SshSettings = {
-  command: DEFAULT_COMMAND,
-  probeTimeoutMs: DEFAULT_PROBE_TIMEOUT_MS,
   maxOutputBytes: DEFAULT_MAX_OUTPUT_BYTES,
   remoteTimeoutMs: DEFAULT_REMOTE_TIMEOUT_MS,
   maxTransferBytes: DEFAULT_MAX_TRANSFER_BYTES,
@@ -212,12 +228,10 @@ export const draftSecretSchema = z.object({
   passphrase: z.string().min(1).max(4096).optional(),
 }).strict()
 
-/** What the page may send for the global settings; every field is optional. */
+/** What the page may send for the shared settings; every field is optional. */
 export const settingsInputSchema = z.object({
-  command: z.string().trim().min(1).max(256).optional(),
-  probeTimeoutMs: z.number().int().min(MIN_PROBE_TIMEOUT_MS).max(MAX_PROBE_TIMEOUT_MS).optional(),
-  remoteTimeoutMs: z.number().int().min(MIN_REMOTE_TIMEOUT_MS).max(MAX_REMOTE_TIMEOUT_MS).optional(),
   maxOutputBytes: z.number().int().min(MIN_MAX_OUTPUT_BYTES).max(MAX_MAX_OUTPUT_BYTES).optional(),
+  remoteTimeoutMs: z.number().int().min(MIN_REMOTE_TIMEOUT_MS).max(MAX_REMOTE_TIMEOUT_MS).optional(),
   maxTransferBytes: z.number().int().min(MIN_MAX_TRANSFER_BYTES).max(MAX_MAX_TRANSFER_BYTES).optional(),
 }).strict()
 

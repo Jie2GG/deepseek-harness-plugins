@@ -186,12 +186,12 @@ export interface RemoteRunResult {
   stdinBytes?: number | undefined
 }
 
-/** Plugin-wide settings, held in the domain's global slot. */
+/**
+ * Plugin-wide settings, held in the domain's global slot. The three ceilings
+ * the page can still change: which executable dials and how long a probe waits
+ * are decided in code (`storage.ts`), not stored here.
+ */
 export interface SshSettings {
-  /** `ssh` executable: a bare name resolved on `PATH`, or an absolute path. */
-  command: string
-  /** Deadline for one probe, in whole milliseconds. */
-  probeTimeoutMs: number
   /** Per-stream capture ceiling for a probe or a remote command, in bytes. */
   maxOutputBytes: number
   /** Deadline for one agent-issued remote command, in whole milliseconds. */
@@ -255,8 +255,6 @@ export interface RemoteTransferResult {
 
 /** The page's settings write, with every field optional. */
 export interface SettingsInput {
-  command?: string | undefined
-  probeTimeoutMs?: number | undefined
   maxOutputBytes?: number | undefined
   remoteTimeoutMs?: number | undefined
   maxTransferBytes?: number | undefined

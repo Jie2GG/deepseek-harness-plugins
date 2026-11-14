@@ -35,6 +35,7 @@ test('list carries the views, the limits, the askpass health, and the run identi
   assert.deepEqual(out.connections[0].secrets, { password: true, passphrase: false })
   assert.equal(out.limits.maxConnections, 64)
   assert.equal(out.limits.transferMaxBytes, 536_870_912)
+  assert.equal(out.limits.probeTimeoutMs, 10_000) // one fixed fact, not a range any more
   assert.equal(out.askpass, 'ready')
   assert.equal(out.sessionTarget, 'ssh-a1b2c3d4e5')
   assert.equal(out.probing, 0)
@@ -437,11 +438,20 @@ test('the session target writes only when a real row is named, and the settings 
   assert.equal((await ops.list({ sessionId: 's' })).sessionTarget, undefined)
   const cfg = await ops.configUpdate({ settings: { remoteTimeoutMs: 45_000 } })
   assert.equal(cfg.settings.remoteTimeoutMs, 45_000)
-  assert.equal(cfg.settings.command, 'ssh') // untouched fields keep their values
+  // The saved slot carries only the three ceilings: the next save drops whatever
+  // pre-0.0.18 keys the stored file still had.
+  assert.deepEqual(Object.keys(cfg.settings).sort(), ['maxOutputBytes', 'maxTransferBytes', 'remoteTimeoutMs'])
   let rejected
   try {
-    await ops.configUpdate({ settings: { probeTimeoutMs: 10 } })
+    await ops.configUpdate({ settings: { remoteTimeoutMs: 10 } })
   } catch (error) { rejected = error }
   assert.equal(rejected?.code, 'bad-input')
-  assert.equal(rejected.field, 'probeTimeoutMs')
+  assert.equal(rejected.field, 'remoteTimeoutMs')
+  // The retired fields are no one's to write any more: the page that still
+  // sends probeTimeoutMs gets a clean refusal, not a silent ignore.
+  let stale
+  try {
+    await ops.configUpdate({ settings: { probeTimeoutMs: 10_000 } })
+  } catch (error) { stale = error }
+  assert.equal(stale?.code, 'bad-input')
 })

@@ -134,8 +134,8 @@ include `secret-error` (500).
 
 ### Storage
 
-One domain, `ssh_targets` (`version: 3`, reading `version: 1` and `2` records through
-`compatibleVersions`), on the backend the profile routes for
+One domain, `ssh_targets` (`version: 4`, reading `version: 1` through `3` records
+through `compatibleVersions`), on the backend the profile routes for
 it — the `json` backend writes one document per unit, at
 `$DSH_HOME/storages/ssh_targets.json`:
 
@@ -143,36 +143,44 @@ it — the `json` backend writes one document per unit, at
 - table `sessions`: `{ sessionId, targetId, setAt }` — the target one conversation
   picked, so a remote call can omit `target`. `remove` clears the rows that point
   at a deleted target.
-- global slot: `{ command, probeTimeoutMs, maxOutputBytes, remoteTimeoutMs, maxTransferBytes }`.
+- global slot: `{ maxOutputBytes, remoteTimeoutMs, maxTransferBytes }`. A slot
+  written before 0.0.18 also carries `command` and `probeTimeoutMs`; the schema
+  accepts and ignores them, and the next save drops them.
 
 Format history: 1 = targets only, 2 = added `auth`, 3 = added the agent fields and
-the `sessions` table. Every added field is optional with a default that reproduces
-what the earlier version meant, so an existing file keeps opening — and the
-`json` backend stamps the unit with the version it last wrote.
+the `sessions` table, 4 = the global slot shrank to the three ceilings. Every
+added field is optional with a default that reproduces what the earlier version
+meant, every retired field is accepted and ignored, so an existing file keeps
+opening — and the `json` backend stamps the unit with the version it last wrote.
 
 The file's shape, asserted by an integration run against the published json
 backend:
 
 ```json
-{ "unit": { "name": "ssh_targets", "version": 3 },
-  "global": { "command": "ssh", "probeTimeoutMs": 10000, "maxOutputBytes": 65536, "remoteTimeoutMs": 30000, "maxTransferBytes": 33554432 },
+{ "unit": { "name": "ssh_targets", "version": 4 },
+  "global": { "maxOutputBytes": 65536, "remoteTimeoutMs": 30000, "maxTransferBytes": 33554432 },
   "tables": { "connections": { "ssh-0123456789": { "id": "…", "label": "…", "host": "…", "auth": "password", "agentAccess": "on", "allowedCommands": ["git"], "extraArgs": ["-4"], "createdAt": "…", "updatedAt": "…", "lastProbe": { "status": "auth-failed" } } }, "sessions": { "session-77": { "sessionId": "session-77", "targetId": "ssh-0123456789", "setAt": "…" } } }
 ```
 
 Bounds live in `src/storage.ts`: 64 targets, 4 concurrent remote operations
-shared by probes and commands, 12 per `probeAll` round, 1 s–120 s probe timeout,
-1 s–300 s command timeout, 1 KiB–4 MiB output ceiling, 1 KiB–512 MiB transfer
-ceiling, and at most 32 allowlisted program names of 64 characters each. A
-backgrounded command runs to its own 30-minute deadline
-(`BACKGROUND_DEADLINE_MS`, whichever is larger against the configured command
-timeout), text fed to a command's stdin is capped at 1,000,000 characters, and a
-remote command line at 8,192.
+shared by probes and commands, 12 per `probeAll` round, a fixed 10 s probe
+deadline (`PROBE_TIMEOUT_MS`, also the download size pre-check's), 1 s–300 s
+command timeout, 1 KiB–4 MiB output ceiling, 1 KiB–512 MiB transfer ceiling, and
+at most 32 allowlisted program names of 64 characters each. A backgrounded
+command runs to its own 30-minute deadline (`BACKGROUND_DEADLINE_MS`, whichever
+is larger against the configured command timeout), text fed to a command's stdin
+is capped at 1,000,000 characters, and a remote command line at 8,192. Which
+program dials is not a bound at all: `SSH_EXECUTABLE` and `SSH_FALLBACK_PATHS`
+(and the same pair for scp) are the auto-detection search.
 
-Record format is `version: 3` with `compatibleVersions: [1, 2]`.
+Record format is `version: 4` with `compatibleVersions: [1, 2, 3]`.
 
-The shared settings slot now carries five fields; the two ceilings the agent
-uses (`remoteTimeoutMs`, `maxTransferBytes`) are editable on the Client settings
-tab beside the probe ones.
+The shared settings slot carries the three ceilings the page still edits.
+Since 0.0.18 the ssh/scp programs are found at run time — bare name on `PATH`
+first, then the usual install locations, first hit cached until unload, misses
+re-tried — and one probe waits a fixed 10 seconds, so neither is stored or
+edited any more. A `configUpdate` that still sends a retired field is refused
+as `bad-input` rather than quietly dropped.
 
 ### Credentials
 
@@ -302,8 +310,9 @@ next round does not have to re-derive them:
   reported as such. The session change recorder attaches the edit by **object
   identity** of the actor it saw at `tools/pre-execute`, which is why the plugin
   hands the live tool execution to the waterfall and not a look-alike.
-- File transfer: `scp` is the sibling of the configured `ssh` executable
-  (`/usr/bin/ssh` → `/usr/bin/scp`); it takes the port as `-P` (not `-p`), accepts
+- File transfer: `scp` is the sibling of the **detected** ssh executable
+  (`/usr/bin/ssh` → `/usr/bin/scp`, else its own `PATH`-then-locations search);
+  it takes the port as `-P` (not `-p`), accepts
   the same `-o BatchMode` / `StrictHostKeyChecking=accept-new` / `-i` / `-J` /
   `PreferredAuthentications` flags, and reads the remote end as one `host:path`
   argument, so no local shell is involved and a path with spaces needs no quoting.
@@ -358,7 +367,7 @@ still open:
    remote call keeps rendering in the harness's generic tool row — see the note
    under **Verified contracts**.
 
-## Limits of 0.0.17
+## Limits of 0.0.18
 
 - The settings page is inventory, probes, resolve, and ceilings only: running
   commands, editing files, and moving bytes reach the server through the

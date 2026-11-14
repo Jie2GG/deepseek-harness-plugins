@@ -837,7 +837,7 @@ function runHint(status: string, stderr: string | undefined): string {
     case 'cancelled':
       return 'The call was cancelled.'
     case 'ssh-missing':
-      return 'The ssh executable named in Settings → Remote connections could not be resolved.'
+      return 'No ssh program was found: the plugin tried ssh on PATH and the usual install locations.'
     default:
       return (stderr ?? 'The call failed.').slice(0, 400)
   }

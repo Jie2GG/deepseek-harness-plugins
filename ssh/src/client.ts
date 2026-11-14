@@ -57,8 +57,6 @@ window.__ModuleLoader__.load({
         tabList: 'SSH targets',
         tabSettings: 'Client settings',
         settingsTitle: 'Client settings',
-        settingsCommand: 'ssh executable',
-        settingsProbeTimeout: 'Probe timeout (ms)',
         settingsMaxOutput: 'Output ceiling (bytes)',
         settingsRemoteTimeout: 'Command timeout (ms)',
         settingsMaxTransfer: 'Transfer ceiling (bytes)',
@@ -67,14 +65,14 @@ window.__ModuleLoader__.load({
         settingsSave: 'Save settings',
         settingsSaved: 'Saved.',
         settingsHint: 'A probe runs with BatchMode=yes unless it needs a secret, in which case the askpass helper answers the prompt for it.',
-        commandHint: 'A name resolved on PATH, or an absolute path. Nothing is installed or upgraded: an executable that cannot be resolved is reported as its own result.',
+        settingsAuto: 'The ssh and scp programs are found by themselves: each is tried as a bare name on PATH first, then the usual install locations, and the first hit is kept until the plugin reloads. A connectivity probe waits a fixed 10 seconds. Neither is a setting any more; nothing is installed or upgraded, and a program that cannot be found is reported as its own result.',
         runAsTitle: 'Probe identity',
         runAsHint: 'A probe runs as the account the Harness Host process uses, so it reads and records keys in that account\'s ~/.ssh — often not the account your own terminal uses. An unknown host key is recorded on first contact, and a changed key still fails.',
         boundsTitle: 'Fixed bounds',
         boundsTargets: 'Targets per profile',
         boundsConcurrency: 'Probes at once',
         boundsPerRound: 'Targets per “Test all” round',
-        boundsTimeout: 'Probe timeout accepts',
+        boundsTimeout: 'Probe timeout is fixed at',
         boundsOutput: 'Output ceiling accepts',
         boundsRemoteTimeout: 'Command timeout accepts',
         boundsTransfer: 'Transfer ceiling accepts',
@@ -160,7 +158,7 @@ window.__ModuleLoader__.load({
         asOf: 'as of {at}',
         took: '{ms} ms',
         hintUnknownHost: 'OpenSSH refused this host key. A first contact is recorded automatically, so this usually means the key changed: confirm the fingerprint with whoever runs the server, then update the known_hosts file of the Host account.',
-        hintSshMissing: 'The configured ssh executable could not be resolved. Install OpenSSH or set its path in Client settings.',
+        hintSshMissing: 'No ssh program was found: the plugin tried ssh on PATH, then the usual install locations. Install OpenSSH, or put it where one of those searches can find it.',
         hintAuthFailed: 'The connection reached the server but no credential was accepted. For a password or an encrypted key, fill the secret field; for an agent key, check that the agent is running.',
         hintUnreachable: 'The host did not accept the session: check the address, the port, and any jump host.',
         hintTimeout: 'The probe ran out of time. Raise the probe timeout if this host is slow to answer.',
@@ -179,8 +177,6 @@ window.__ModuleLoader__.load({
         tabList: 'SSH 目标清单',
         tabSettings: '客户端参数',
         settingsTitle: '客户端参数',
-        settingsCommand: 'ssh 可执行文件',
-        settingsProbeTimeout: '探测超时（毫秒）',
         settingsMaxOutput: '输出上限（字节）',
         settingsRemoteTimeout: '命令超时（毫秒）',
         settingsMaxTransfer: '传输上限（字节）',
@@ -189,14 +185,14 @@ window.__ModuleLoader__.load({
         settingsSave: '保存参数',
         settingsSaved: '已保存。',
         settingsHint: '不需要凭据的探测以 BatchMode=yes 运行；需要用凭据时，由 askpass 助手应答提示。',
-        commandHint: '填 PATH 能解析到的名字，或绝对路径。插件不会安装或升级程序：解析不到就单独作为一种结果报告。',
+        settingsAuto: 'ssh 与 scp 程序由插件自行探测：先按裸名在 PATH 上找，找不到再试常见安装位置，命中哪个用哪个，直到插件重载。连通性探测固定等待 10 秒。这两项不再是可设置的参数；插件不安装也不升级任何程序，找不到程序会作为一种结果报告出来。',
         runAsTitle: '探测运行身份',
         runAsHint: '探测以 Harness Host 进程所属的账号运行，因此读取与写入的是那个账号的 ~/.ssh，往往不是你终端所用的账号。首次遇到的主机密钥会被自动记录；主机密钥发生变化时仍会失败。',
         boundsTitle: '固定边界',
         boundsTargets: '每个 profile 可存的目标数',
         boundsConcurrency: '同时进行的探测数',
         boundsPerRound: '「全部测试」单轮覆盖的目标数',
-        boundsTimeout: '探测超时可填范围',
+        boundsTimeout: '探测超时固定为',
         boundsOutput: '输出上限可填范围',
         boundsRemoteTimeout: '命令超时可填范围',
         boundsTransfer: '传输上限可填范围',
@@ -282,7 +278,7 @@ window.__ModuleLoader__.load({
         asOf: '截至 {at}',
         took: '{ms} 毫秒',
         hintUnknownHost: 'OpenSSH 拒绝了这台主机的密钥。首次联系会被自动记录，所以这通常表示主机密钥已变：请与服务器管理方确认 fingerprint，再更新探测所用账号的 known_hosts。',
-        hintSshMissing: '无法解析设置里的 ssh 可执行文件。请安装 OpenSSH，或在客户端参数里填写它的路径。',
+        hintSshMissing: '没找到 ssh 程序：插件试过 PATH 上的 ssh 和常见安装位置。请安装 OpenSSH，或把它放到搜索得到的位置。',
         hintAuthFailed: '已经连上服务端，但没有凭据被接受。密码或带口令的私钥请填写对应的凭据输入框；用 agent 的密钥请确认 agent 在运行。',
         hintUnreachable: '主机没有接受这次会话：请检查地址、端口以及跳板主机。',
         hintTimeout: '探测用时耗尽。若这台主机响应较慢，请调大探测超时。',
@@ -847,8 +843,8 @@ window.__ModuleLoader__.load({
       const t = translator(props)
       const [tab, setTab] = React.useState('list')
       const [connections, setConnections] = React.useState([] as ConnectionView[])
-      const [settings, setSettings] = React.useState(null as { command: string; probeTimeoutMs: number; maxOutputBytes: number } | null)
-      const [limits, setLimits] = React.useState({ maxConnections: 64, concurrentProbes: 4, probeAllLimit: 12, probeTimeoutMinMs: 1000, probeTimeoutMaxMs: 120000, remoteTimeoutMinMs: 1000, remoteTimeoutMaxMs: 300000, outputMinBytes: 1024, outputMaxBytes: 4194304, transferMinBytes: 1024, transferMaxBytes: 536870912 })
+      const [settings, setSettings] = React.useState(null as { maxOutputBytes: number; remoteTimeoutMs: number; maxTransferBytes: number } | null)
+      const [limits, setLimits] = React.useState({ maxConnections: 64, concurrentProbes: 4, probeAllLimit: 12, probeTimeoutMs: 10000, remoteTimeoutMinMs: 1000, remoteTimeoutMaxMs: 300000, outputMinBytes: 1024, outputMaxBytes: 4194304, transferMinBytes: 1024, transferMaxBytes: 536870912 })
       const [askpass, setAskpass] = React.useState('ready')
       // Whose ~/.ssh the probes read: reported by the Host, never inferred here.
       const [runsAs, setRunsAs] = React.useState(null as { uid: number | null; user: string; home: string } | null)
@@ -868,7 +864,7 @@ window.__ModuleLoader__.load({
       // Resolved client configuration per target, kept by id so one row's answer
       // survives a re-render of the list.
       const [resolved, setResolved] = React.useState({} as Record<string, any>)
-      const [settingsDraft, setSettingsDraft] = React.useState({ command: '', probeTimeoutMs: '', maxOutputBytes: '', remoteTimeoutMs: '', maxTransferBytes: '' })
+      const [settingsDraft, setSettingsDraft] = React.useState({ maxOutputBytes: '', remoteTimeoutMs: '', maxTransferBytes: '' })
       const alive = React.useRef(true)
 
       React.useEffect(() => {
@@ -887,8 +883,6 @@ window.__ModuleLoader__.load({
           setConnections(result.connections ?? [])
           setSettings(result.settings ?? null)
           setSettingsDraft({
-            command: result.settings?.command ?? '',
-            probeTimeoutMs: String(result.settings?.probeTimeoutMs ?? ''),
             maxOutputBytes: String(result.settings?.maxOutputBytes ?? ''),
             remoteTimeoutMs: String(result.settings?.remoteTimeoutMs ?? ''),
             maxTransferBytes: String(result.settings?.maxTransferBytes ?? ''),
@@ -1065,15 +1059,11 @@ window.__ModuleLoader__.load({
           return trimmed === '' ? undefined : Number(trimmed)
         }
         await act('settings', async () => {
-          const command = (settingsDraft.command ?? '').trim()
-          const timeout = whole(settingsDraft.probeTimeoutMs)
           const output = whole(settingsDraft.maxOutputBytes)
           const remote = whole(settingsDraft.remoteTimeoutMs)
           const transfer = whole(settingsDraft.maxTransferBytes)
           const result = await rpc('configUpdate', {
             settings: {
-              ...(command === '' ? {} : { command }),
-              ...(timeout === undefined || Number.isNaN(timeout) ? {} : { probeTimeoutMs: timeout }),
               ...(output === undefined || Number.isNaN(output) ? {} : { maxOutputBytes: output }),
               ...(remote === undefined || Number.isNaN(remote) ? {} : { remoteTimeoutMs: remote }),
               ...(transfer === undefined || Number.isNaN(transfer) ? {} : { maxTransferBytes: transfer }),
@@ -1083,8 +1073,6 @@ window.__ModuleLoader__.load({
           setSettings(result.settings ?? null)
           if (result.settings !== undefined) {
             setSettingsDraft({
-              command: result.settings.command ?? '',
-              probeTimeoutMs: String(result.settings.probeTimeoutMs ?? ''),
               maxOutputBytes: String(result.settings.maxOutputBytes ?? ''),
               remoteTimeoutMs: String(result.settings.remoteTimeoutMs ?? ''),
               maxTransferBytes: String(result.settings.maxTransferBytes ?? ''),
@@ -1524,10 +1512,8 @@ window.__ModuleLoader__.load({
           }, busy === 'settings' ? t('saving') : t('settingsSave')),
         ),
         h('p', { class: 'dshssh-muted' }, t('settingsHint')),
-        h('p', { class: 'dshssh-muted' }, t('commandHint')),
+        h('p', { class: 'dshssh-muted' }, t('settingsAuto')),
         h('div', { class: 'dshssh-grid' },
-          h(TextField, { label: t('settingsCommand'), value: settingsDraft.command, disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, command: value })) } }),
-          h(TextField, { label: t('settingsProbeTimeout'), value: settingsDraft.probeTimeoutMs, type: 'number', disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, probeTimeoutMs: value })) } }),
           h(TextField, { label: t('settingsMaxOutput'), value: settingsDraft.maxOutputBytes, type: 'number', disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, maxOutputBytes: value })) } }),
           h(TextField, { label: t('settingsRemoteTimeout'), value: settingsDraft.remoteTimeoutMs, type: 'number', disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, remoteTimeoutMs: value })) } }),
           h(TextField, { label: t('settingsMaxTransfer'), value: settingsDraft.maxTransferBytes, type: 'number', disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, maxTransferBytes: value })) } }),
@@ -1551,7 +1537,7 @@ window.__ModuleLoader__.load({
           h('div', { class: 'dshssh-bound', key: 'targets' }, h('dt', {}, t('boundsTargets')), h('dd', {}, String(limits.maxConnections))),
           h('div', { class: 'dshssh-bound', key: 'lanes' }, h('dt', {}, t('boundsConcurrency')), h('dd', {}, String(limits.concurrentProbes))),
           h('div', { class: 'dshssh-bound', key: 'round' }, h('dt', {}, t('boundsPerRound')), h('dd', {}, String(limits.probeAllLimit))),
-          h('div', { class: 'dshssh-bound', key: 'timeout' }, h('dt', {}, t('boundsTimeout')), h('dd', {}, `${measure(limits.probeTimeoutMinMs, 'ms')} – ${measure(limits.probeTimeoutMaxMs, 'ms')}`)),
+          h('div', { class: 'dshssh-bound', key: 'timeout' }, h('dt', {}, t('boundsTimeout')), h('dd', {}, measure(limits.probeTimeoutMs, 'ms'))),
           h('div', { class: 'dshssh-bound', key: 'remote' }, h('dt', {}, t('boundsRemoteTimeout')), h('dd', {}, `${measure(limits.remoteTimeoutMinMs, 'ms')} – ${measure(limits.remoteTimeoutMaxMs, 'ms')}`)),
           h('div', { class: 'dshssh-bound', key: 'output' }, h('dt', {}, t('boundsOutput')), h('dd', {}, `${measure(limits.outputMinBytes, 'bytes')} – ${measure(limits.outputMaxBytes, 'bytes')}`)),
           h('div', { class: 'dshssh-bound', key: 'transfer' }, h('dt', {}, t('boundsTransfer')), h('dd', {}, `${measure(limits.transferMinBytes, 'bytes')} – ${measure(limits.transferMaxBytes, 'bytes')}`)),

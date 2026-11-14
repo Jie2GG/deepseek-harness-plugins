@@ -10,7 +10,7 @@
  * @module @jie2gg/dsh-plugin-ssh/ops
  */
 
-import { connectionInputSchema, draftSecretSchema, remotePathSchema, transferInputSchema, sessionTargetInputSchema, BACKGROUND_DEADLINE_MS, MAX_CONCURRENT_PROBES, MAX_CONNECTIONS, MAX_MAX_OUTPUT_BYTES, MAX_MAX_TRANSFER_BYTES, MAX_PROBE_TIMEOUT_MS, MAX_REMOTE_TIMEOUT_MS, MIN_MAX_OUTPUT_BYTES, MIN_MAX_TRANSFER_BYTES, MIN_PROBE_TIMEOUT_MS, MIN_REMOTE_TIMEOUT_MS, probeDraftSchema, remoteRunSchema, secretPatchSchema, settingsInputSchema } from './storage.ts'
+import { connectionInputSchema, draftSecretSchema, remotePathSchema, transferInputSchema, sessionTargetInputSchema, BACKGROUND_DEADLINE_MS, MAX_CONCURRENT_PROBES, MAX_CONNECTIONS, MAX_MAX_OUTPUT_BYTES, MAX_MAX_TRANSFER_BYTES, MAX_REMOTE_TIMEOUT_MS, MIN_MAX_OUTPUT_BYTES, MIN_MAX_TRANSFER_BYTES, MIN_REMOTE_TIMEOUT_MS, PROBE_TIMEOUT_MS, probeDraftSchema, remoteRunSchema, secretPatchSchema, settingsInputSchema } from './storage.ts'
 import { SshError } from './types.ts'
 import type { AuthMode, ConnectionRecord, ConnectionView, ProbeOutcome, ResolvedConfig, RemoteRunResult, RemoteTransferResult, SshSettings } from './types.ts'
 import { transfer } from './transfer.ts'
@@ -127,8 +127,8 @@ export interface ListResult {
     maxConnections: number
     concurrentProbes: number
     probeAllLimit: number
-    probeTimeoutMinMs: number
-    probeTimeoutMaxMs: number
+    /** The fixed probe deadline, shown on the bounds card as a fact, not a range. */
+    probeTimeoutMs: number
     remoteTimeoutMinMs: number
     remoteTimeoutMaxMs: number
     outputMinBytes: number
@@ -654,8 +654,7 @@ export function createOps(deps: OpsDeps): Ops {
           maxConnections: MAX_CONNECTIONS,
           concurrentProbes: MAX_CONCURRENT_PROBES,
           probeAllLimit: PROBE_ALL_LIMIT,
-          probeTimeoutMinMs: MIN_PROBE_TIMEOUT_MS,
-          probeTimeoutMaxMs: MAX_PROBE_TIMEOUT_MS,
+          probeTimeoutMs: PROBE_TIMEOUT_MS,
           outputMinBytes: MIN_MAX_OUTPUT_BYTES,
           outputMaxBytes: MAX_MAX_OUTPUT_BYTES,
           remoteTimeoutMinMs: MIN_REMOTE_TIMEOUT_MS,
@@ -1020,7 +1019,7 @@ export function createOps(deps: OpsDeps): Ops {
             ...(input.tty === undefined ? {} : { tty: input.tty }),
           })
           if (live === undefined) {
-            return { message: `Could not resolve the ssh executable "${settings.command}".` }
+            return { message: 'No ssh program was found: PATH and the usual install locations were tried.' }
           }
           return {
             sources: live.sources.map(source => ({
@@ -1082,8 +1081,6 @@ export function createOps(deps: OpsDeps): Ops {
         throw new SshError('bad-input', messageOf(error), { field: fieldOf(error), hint: 'Fix the reported value or range and save again.' })
       }
       const settings = await state.saveSettings({
-        command: patch.command ?? current.command,
-        probeTimeoutMs: patch.probeTimeoutMs ?? current.probeTimeoutMs,
         maxOutputBytes: patch.maxOutputBytes ?? current.maxOutputBytes,
         remoteTimeoutMs: patch.remoteTimeoutMs ?? current.remoteTimeoutMs,
         maxTransferBytes: patch.maxTransferBytes ?? current.maxTransferBytes,

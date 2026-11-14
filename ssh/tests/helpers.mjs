@@ -52,6 +52,14 @@ export function fakeRunner () {
     async resolveExecutable (name) {
       state.calls.push({ kind: 'resolveExecutable', name })
       return name === 'scp' ? '/usr/bin/scp' : '/usr/bin/ssh'
+    },
+    async resolveSsh () {
+      state.calls.push({ kind: 'resolveSsh' })
+      return '/usr/bin/ssh'
+    },
+    async resolveScp () {
+      state.calls.push({ kind: 'resolveScp' })
+      return '/usr/bin/scp'
     }
   }
   return { runner, state }
@@ -62,8 +70,6 @@ export function fakeStore ({ records = [], settings, session = null } = {}) {
   const rows = new Map(records.map(row => [row.id, row]))
   const sessions = new Map(session === null ? [] : [[session.sessionId, session]])
   const defaults = {
-    command: 'ssh',
-    probeTimeoutMs: 10_000,
     maxOutputBytes: 65_536,
     remoteTimeoutMs: 30_000,
     maxTransferBytes: 33_554_432

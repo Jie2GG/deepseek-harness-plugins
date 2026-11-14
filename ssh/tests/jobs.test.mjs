@@ -72,8 +72,8 @@ test('timeouts, start failures, and nonzero exits all say what happened', async 
   assert.deepEqual(await timeout.spec.run({}).done, { status: 'failed', detail: 'the command ran out of its deadline', result: 'timed out after 1800000 ms' })
 
   const unresolvable = fakeRegistry()
-  startRemoteJob(unresolvable, { label: 'x', start: async () => ({ message: 'Could not resolve the ssh executable "ssh".' }) })
-  assert.deepEqual(await unresolvable.spec.run({}).done, { status: 'failed', detail: 'Could not resolve the ssh executable "ssh".' })
+  startRemoteJob(unresolvable, { label: 'x', start: async () => ({ message: 'No ssh program was found: PATH and the usual install locations were tried.' }) })
+  assert.deepEqual(await unresolvable.spec.run({}).done, { status: 'failed', detail: 'No ssh program was found: PATH and the usual install locations were tried.' })
 
   const boom = fakeRegistry()
   startRemoteJob(boom, { label: 'x', start: async () => { throw new Error('spawn exploded') } })

@@ -12,7 +12,7 @@
  */
 
 import { shellQuote } from './transport.ts'
-import { SshError } from './types.ts'
+import { PROBE_TIMEOUT_MS } from './storage.ts'
 import type { AskPassSource, RemoteAuth, RemoteTarget, SshTransport } from './transport.ts'
 import type { SshSettings } from './types.ts'
 
@@ -69,7 +69,7 @@ export async function remoteStat(
   path: string,
 ): Promise<{ bytes: number; kind: string } | undefined> {
   const run = await transport.run(target, settings, auth, `stat -c '%s %F' -- ${shellQuote(path)}`, {
-    timeoutMs: settings.probeTimeoutMs,
+    timeoutMs: PROBE_TIMEOUT_MS,
   })
   if (run.status !== 'succeeded') return undefined
   const match = /^(\d+)\s+(.+)$/u.exec((run.stdout ?? '').trim())
@@ -134,15 +134,9 @@ export async function transfer(
     }
   }
 
-  let scp: string
-  try {
-    scp = scpCommand(settings.command)
-  } catch (error: unknown) {
-    return { status: 'failed', durationMs: Date.now() - startedAt, message: error instanceof SshError ? error.message : String(error) }
-  }
-  const program = await transport.resolveExecutable(scp)
+  const program = await transport.resolveScp(request.signal)
   if (program === undefined) {
-    return { status: 'failed', durationMs: Date.now() - startedAt, message: `Could not resolve the transfer executable "${scp}".` }
+    return { status: 'failed', durationMs: Date.now() - startedAt, message: 'No scp program was found: PATH and the usual install locations were tried.' }
   }
   // scp takes -P for the port and -q to keep the transcript quiet; the ssh-side
   // defaults (accept-new, BatchMode, the askpass environment) come from the same
@@ -172,18 +166,4 @@ export async function transfer(
     ...(knownBytes === undefined ? {} : { bytes: knownBytes }),
     ...(request.recursive === true ? { kind: 'directory' } : {}),
   }
-}
-
-/**
- * Build the `scp` executable name from the configured `ssh` one.
- * @param command - the configured ssh executable.
- * @returns the sibling scp name.
- */
-export function scpCommand(command: string): string {
-  if (command.endsWith('ssh')) return `${command.slice(0, -3)}scp`
-  if (command === 'ssh') return 'scp'
-  throw new SshError('bad-input', `The ssh executable "${command}" has no obvious scp sibling.`, {
-    field: 'command',
-    hint: 'Set the executable to "ssh", or to an absolute path ending in ssh, so scp can be derived.',
-  })
 }

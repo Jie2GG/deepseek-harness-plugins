@@ -4,7 +4,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   DOMAIN_NAME, DOMAIN_VERSION, COMPATIBLE_VERSIONS, MAX_CONNECTIONS, MAX_CONCURRENT_PROBES,
-  MAX_ALLOWED_COMMANDS, BACKGROUND_DEADLINE_MS, DEFAULT_SETTINGS,
+  MAX_ALLOWED_COMMANDS, BACKGROUND_DEADLINE_MS, DEFAULT_SETTINGS, PROBE_TIMEOUT_MS,
+  SSH_EXECUTABLE, SSH_FALLBACK_PATHS,
   connectionRecordSchema, connectionInputSchema, settingsRecordSchema, remotePathSchema,
   remoteRunSchema, transferInputSchema, secretPatchSchema, probeDraftSchema,
   sessionTargetInputSchema, probeOutcomeSchema, sshTargetsDomain
@@ -20,8 +21,8 @@ const base = {
 
 test('the domain declares its version ladder and tables', () => {
   assert.equal(DOMAIN_NAME, 'ssh_targets')
-  assert.equal(DOMAIN_VERSION, 3)
-  assert.deepEqual([...COMPATIBLE_VERSIONS], [1, 2])
+  assert.equal(DOMAIN_VERSION, 4)
+  assert.deepEqual([...COMPATIBLE_VERSIONS], [1, 2, 3])
   assert.deepEqual(Object.keys(sshTargetsDomain.tables).sort(), ['connections', 'sessions'])
 })
 
@@ -61,14 +62,10 @@ test('a page input may carry an id or clear an override with null, and never key
   assert.throws(() => probeOutcomeSchema.parse({ at: '2026-01-01T00:00:00.000Z', status: 'sort-of' }))
 })
 
-test('settings land on their defaults and every bound is enforced', () => {
+test('settings carry the three ceilings, each with its bound', () => {
   const out = settingsRecordSchema.parse({})
   assert.deepEqual(out, DEFAULT_SETTINGS)
-  assert.throws(() => settingsRecordSchema.parse({ command: 'my ssh' })) // whitespace in an executable name
-  assert.equal(settingsRecordSchema.parse({ command: '/usr/bin/ssh' }).command, '/usr/bin/ssh')
-  assert.equal(settingsRecordSchema.parse({ command: 'ssh-ng' }).command, 'ssh-ng')
-  assert.throws(() => settingsRecordSchema.parse({ probeTimeoutMs: 999 }))
-  assert.throws(() => settingsRecordSchema.parse({ probeTimeoutMs: 120_001 }))
+  assert.deepEqual(Object.keys(out).sort(), ['maxOutputBytes', 'maxTransferBytes', 'remoteTimeoutMs'])
   assert.throws(() => settingsRecordSchema.parse({ remoteTimeoutMs: 300_001 }))
   assert.throws(() => settingsRecordSchema.parse({ maxOutputBytes: 1023 }))
   assert.throws(() => settingsRecordSchema.parse({ maxOutputBytes: 4_194_305 }))
@@ -76,6 +73,26 @@ test('settings land on their defaults and every bound is enforced', () => {
   assert.equal(BACKGROUND_DEADLINE_MS, 1_800_000)
   assert.equal(MAX_CONNECTIONS, 64)
   assert.equal(MAX_CONCURRENT_PROBES, 4)
+})
+
+test('a pre-0.0.18 global slot still opens: the retired fields are accepted, ignored, ranged', () => {
+  const legacy = settingsRecordSchema.parse({
+    command: '/opt/openssh-portable/bin/ssh',
+    probeTimeoutMs: 45_000,
+    maxOutputBytes: 65_536,
+    remoteTimeoutMs: 30_000,
+    maxTransferBytes: 33_554_432
+  })
+  assert.equal(legacy.command, '/opt/openssh-portable/bin/ssh') // present but read by no one
+  assert.equal(legacy.probeTimeoutMs, 45_000)
+  // The old bounds still apply to the old keys, so a hand-mangled value is
+  // still a storage-error rather than a silently ignored one.
+  assert.throws(() => settingsRecordSchema.parse({ command: 'x'.repeat(257) }))
+  assert.throws(() => settingsRecordSchema.parse({ probeTimeoutMs: 999 }))
+  // The values the plugin now uses are code, not config.
+  assert.equal(PROBE_TIMEOUT_MS, 10_000)
+  assert.equal(SSH_EXECUTABLE, 'ssh')
+  assert.ok(SSH_FALLBACK_PATHS.includes('/usr/bin/ssh'))
 })
 
 test('remote paths are absolute or ~/, and never carry shell punctuation', () => {

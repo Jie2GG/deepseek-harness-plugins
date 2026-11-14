@@ -17,6 +17,28 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.18
+
+### Changed
+
+- **The Client settings tab went from five fields to three.** The `ssh`
+  executable and the probe timeout are no longer settings:
+- **The program is detected.** Each call now finds its own `ssh` (then `scp`
+  for transfers): bare name on `PATH` first, so the account's preferred install
+  wins, then the usual absolute install locations. A hit is cached until the
+  plugin reloads; a miss re-runs the search, so installing openssh mid-session
+  takes effect without a restart. `scp` prefers the resolved ssh's own sibling
+  before falling back to its names. Nothing is still installed or upgraded, and
+  a program nobody can find keeps reporting as its own result (`ssh-missing`).
+- **The probe deadline is fixed** at ten seconds (`PROBE_TIMEOUT_MS`), which is
+  the value every deployment used; the download size pre-check shares it.
+- **The storage domain is version 4** and reads 1 through 3. A pre-0.0.18
+  global slot's `command` and `probeTimeoutMs` are accepted and ignored, and the
+  next settings save drops them; `configUpdate` refuses a request that still
+  sends one of the retired fields rather than quietly discarding it. The page
+  keeps its three real ceilings - output, command timeout, transfer - and the
+  bounds card now states the probe deadline and the detection as fixed facts.
+
 ## 0.0.17
 
 ### Added

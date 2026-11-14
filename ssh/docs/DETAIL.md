@@ -16,9 +16,9 @@ Open **Settings** and pick **Remote connections** in the navigation (中文：�
 General settings. Across its top sit two tabs:
 
 - **SSH targets** — the list: add, edit, delete, and test.
-- **Client settings** — the `ssh` executable, the probe and command timeouts, the
-  output ceiling, and the transfer ceiling, next to the bounds the plugin fixes
-  in code.
+- **Client settings** — the output ceiling, the command timeout, and the
+  transfer ceiling, next to the bounds the plugin fixes in code (which include
+  how it finds `ssh` and `scp` by itself and the fixed 10-second probe deadline).
 
 Both tabs read and write one page state, so a probe you started on the first tab
 keeps running while you edit values on the second.
@@ -51,11 +51,13 @@ keeps running while you edit values on the second.
   Results are classified as reachable, authentication failed, unreachable, host
   key not trusted, timed out, or `ssh` not found, and the last result is kept
   with its timestamp and the captured output tail.
-- **Client settings**, on the second tab: the `ssh` executable (a name on
-  `PATH` or an absolute path), the probe timeout, the captured output ceiling,
-  the command timeout every agent-issued remote call obeys, and the
-  file-transfer ceiling a copy may not exceed. That tab also states the bounds
-  the plugin fixes in code, so a value outside a range is not a surprise.
+- **Client settings**, on the second tab: the captured output ceiling, the
+  command timeout every agent-issued remote call obeys, and the file-transfer
+  ceiling a copy may not exceed. Which program dials and how long a connectivity
+  test waits are no longer settings at all: `ssh` and `scp` are found by
+  themselves (`PATH` first, then the usual install locations), and a probe waits
+  a fixed ten seconds. That tab also states the bounds the plugin fixes
+  in code, so a value outside a range is not a surprise.
 
 ## Using it from the chat
 
