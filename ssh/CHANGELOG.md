@@ -34,6 +34,16 @@ project uses [semantic versioning](https://semver.org/).
 
 ### Notes
 
+- **A stopped job is reported as stopped.** Killing the local client makes `ssh` exit
+  255, the same code as an ordinary connection failure, so a cancelled job settled
+  `failed · exit=255` and the reader had to guess that it had asked for the stop. The
+  intent now decides the classification: a requested stop settles `killed`, naming the
+  reason, and says what the client exited with in passing.
+- **`job_kill` interrupts the local connection, not the server.** The remote command
+  normally dies when the session closes, but that is the server's choice, not a promise
+  this plugin makes. A command that must be certain to stop on the server needs its own
+  pid recorded and killed, which `exec` can do.
+
 - What this does **not** buy: the connection lives in this process, so stopping the job,
   the conversation ending, or a Host restart ends the remote command — nothing is
   double-forked on the server, and there is no shell to type into. A command that needs

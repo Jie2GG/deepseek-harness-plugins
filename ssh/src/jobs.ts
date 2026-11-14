@@ -169,6 +169,16 @@ export function startRemoteJob(
         // reach it, or the command would run on with no one left to stop it.
         if (killedBy !== undefined) started.kill()
         const result = await started.finished
+        // A cancelled client exits 255 like any other ssh failure, so the intent is
+        // what classifies this: if a stop was asked for, the answer is `killed`,
+        // whatever code the child reported on its way out.
+        if (killedBy !== undefined) {
+          return {
+            status: 'killed',
+            detail: killedBy,
+            result: `stopped after ${String(result.durationMs)} ms${result.exitCode === null ? '' : ` (the ssh client exited ${String(result.exitCode)})`}`,
+          }
+        }
         if (result.outcome === 'cancelled') {
           return {
             status: 'killed',
