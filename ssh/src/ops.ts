@@ -976,9 +976,16 @@ export function createOps(deps: OpsDeps): Ops {
     async execBackground(params: Params): Promise<BackgroundRunResult> {
       const state = await store()
       const globalSettings = state.settings()
+      // The job registry's bookkeeping travels with the call, but it is not part of
+      // what a remote command takes: read it off first so the strict run schema does
+      // not reject a well-formed call.
+      const { callId, rootCallId, ...runInput } = params
+      const toolCall = typeof callId === 'string' && typeof rootCallId === 'string'
+        ? { callId, rootCallId }
+        : undefined
       let input: ReturnType<typeof remoteRunSchema.parse>
       try {
-        input = remoteRunSchema.parse(params.command !== undefined ? params : { command: params })
+        input = remoteRunSchema.parse(runInput.command !== undefined ? runInput : { command: runInput })
       } catch (error: unknown) {
         throw new SshError('bad-input', messageOf(error), { field: fieldOf(error) ?? 'command', hint: 'Fix the reported value and try again.' })
       }
@@ -998,9 +1005,6 @@ export function createOps(deps: OpsDeps): Ops {
       }
       const auth = await authFor(record.id, record.auth)
       const owner = typeof input.sessionId === 'string' ? input.sessionId : undefined
-      const toolCall = typeof params.callId === 'string' && typeof params.rootCallId === 'string'
-        ? { callId: params.callId, rootCallId: params.rootCallId }
-        : undefined
       // A backgrounded command is not bounded by the foreground deadline: the whole
       // point is to outlive one reply. It still ends when the reader stops it, when
       // the conversation that owns it goes away, or when the Host process exits.

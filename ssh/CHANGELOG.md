@@ -21,6 +21,17 @@ project uses [semantic versioning](https://semver.org/).
 - The started result says plainly what to do next and no longer claims an exit code the
   command has not produced yet.
 
+### Fixed
+
+- **A well-formed background call was rejected by its own schema.** The tool forwards
+  the job registry's bookkeeping (`callId`, `rootCallId`) alongside the command, and
+  `execBackground` handed that whole object to the strict run schema, which answered
+  `Unrecognized keys: "callId", "rootCallId"`. The identity is now read off before the
+  run input is validated, so the ids land on the job record where they belong. Found by
+  running it against the live server, which is also how the job tests got honest: the
+  fake registry had never been calling `run`, so three of its assertions were measuring
+  a path that did not execute.
+
 ### Notes
 
 - What this does **not** buy: the connection lives in this process, so stopping the job,
