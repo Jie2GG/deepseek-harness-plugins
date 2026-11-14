@@ -14,7 +14,7 @@ commit 同步本表。「状态」列仅限 `stable` / `experimental` / `depreca
 
 | 插件目录 | 包名（`@jie2gg/dsh-plugin-*`） | 简介 | 状态 |
 | --- | --- | --- | --- |
-| `ssh/` | `@jie2gg/dsh-plugin-ssh` | 在设置页管理命名 SSH 目标与凭据（密钥 / 密码）；`ssh_client` 工具把别名清单交给模型按对话选择，可远程执行、读写文件、scp 上传下载 | experimental |
+| `ssh/` | `@jie2gg/dsh-plugin-ssh` | 在设置页管理命名 SSH 目标与凭据（密钥 / 密码）；`ssh_client` 工具把别名清单交给模型按对话选择，可远程执行（长任务可挂后台）、读写与精确编辑文件、scp 上传下载 | experimental |
 
 ## 使用
 
