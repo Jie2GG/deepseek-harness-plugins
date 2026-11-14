@@ -4,7 +4,20 @@ All notable changes to `@jie2gg/dsh-plugin-ssh` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project uses [semantic versioning](https://semver.org/).
 
-## 0.16.0
+## Versioning scheme — synced to the repository's three-segment rule
+
+The repository now fixes each segment's meaning: `major` = 大版本, a breaking
+line decided by the user; `minor` = 用户认可版本, moved up only when the user
+accepts the accumulated work, with `patch` reset to zero; `patch` = Agent 自动
+迭代版本, one step per completed round of changes. No entry below was ever
+user-accepted, so this plugin folds its history into the patch segment: the
+current version is **0.0.16** (16 iterations, zero user-blessed lines).
+Historical headings and old numbers (`0.1.0` … `0.16.0`, `0.5.1`) keep their
+pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoption
+is a remapping, not a new round: the next change to this plugin is `0.0.17`,
+and the first user acceptance moves the line to `0.1.0`.
+
+## 0.0.16
 
 ### Added
 

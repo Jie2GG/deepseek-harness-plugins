@@ -2,7 +2,7 @@
 
 Manages the SSH targets this machine reaches: a named list of hosts and OpenSSH
 aliases, how each one logs in, and a connectivity test you can run from the
-browser. From **0.6.0** the conversation can use that server too: the agent gets
+browser. The conversation can use that server too: the agent gets
 one `ssh_client` tool that runs commands (or leaves a long one running in the
 background and polls it later), lists and reads files, writes text, replaces
 exact text inside a file, and moves files with `scp` — all against the target you
@@ -40,7 +40,7 @@ keeps running while you edit values on the second.
 - **Two ways to log in.** Pick **Key** (ssh-agent or a private key, with an
   optional passphrase when the key is encrypted) or **Password** (publickey offers
   are skipped). The choice is remembered per target and shown on its row. The
-  **Key + password** choice 0.4.0 offered is gone from the picker: a saved target
+  **Key + password** choice an earlier release offered is gone from the picker: a saved target
   that still carries it keeps its label and still probes exactly as before, it can
   only no longer be selected or written anew.
 - **Connectivity test.** `Test` runs one probe per target; `Test all` covers the
@@ -153,7 +153,7 @@ own `ssh-agent`, and its own `known_hosts`, so:
   the first probe records it instead of asking.
 
 The stored password path does not depend on any of that: it authenticates by
-itself, which is why 0.5.1 made an unknown host key a recorded fact rather than
+itself, which is why an earlier release made an unknown host key a recorded fact rather than
 an unanswerable question.
 
 ## What the page never touches
@@ -175,8 +175,7 @@ an unanswerable question.
 2. Reading the aliases in `~/.ssh/config` as a suggested inventory.
 
 Neither exists yet, and the interface may still change. What used to head this
-list — the pollable background job and the `ssh -G` resolve view — shipped in
-0.16.0 and 0.7.0 respectively.
+list — the pollable background job and the `ssh -G` resolve view — have both shipped.
 
 ## Configuration
 

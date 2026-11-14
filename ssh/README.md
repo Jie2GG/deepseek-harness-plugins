@@ -276,8 +276,9 @@ unmounting removes it.
 ## Verified contracts
 
 Facts checked against the running DSH (`0.2.2-rc.1`, `web` profile) while 0.2.0
-was written and re-checked through 0.5.1, and reproduced against a live server for
-the 0.5.1 fix, so the next round does not have to re-derive them:
+was written and re-checked through 0.5.1 (plugin numbers here are pre-rule; see
+`CHANGELOG.md`), and reproduced against a live server for the 0.5.1 fix, so the
+next round does not have to re-derive them:
 
 - `ssh -G <target>` is a **local** operation: it prints the resolved
   configuration and exits without dialing, so the Resolve button cannot hang,
@@ -335,7 +336,9 @@ the 0.5.1 fix, so the next round does not have to re-derive them:
 
 The old four-item plan has landed: the agent tool (0.6.0), file transfer over the
 same transport (0.9.0), and — through 0.15.0/0.16.0 — a pseudo-terminal, stdin
-answers, and background jobs on the harness job registry. What is still open:
+answers, and background jobs on the harness job registry; those are pre-rule
+numbers, mapped in the versioning note at the top of `CHANGELOG.md`. What is
+still open:
 
 1. A terminal one can type into live: `tty` plus `input` answers a prompt, and
    `background: true` streams output out of band, but there is no interactive
@@ -345,7 +348,7 @@ answers, and background jobs on the harness job registry. What is still open:
    remote call keeps rendering in the harness's generic tool row — see the note
    under **Verified contracts**.
 
-## Limits of 0.16.0
+## Limits of 0.0.16
 
 - The settings page is inventory, probes, resolve, and ceilings only: running
   commands, editing files, and moving bytes reach the server through the
