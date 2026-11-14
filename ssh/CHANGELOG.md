@@ -10,12 +10,54 @@ The repository now fixes each segment's meaning: `major` = 大版本, a breaking
 line decided by the user; `minor` = 用户认可版本, moved up only when the user
 accepts the accumulated work, with `patch` reset to zero; `patch` = Agent 自动
 迭代版本, one step per completed round of changes. No entry below was ever
-user-accepted, so this plugin folds its history into the patch segment: the
-current version is **0.0.16** (16 iterations, zero user-blessed lines).
+user-accepted, so this plugin folds its history into the patch segment: at
+adoption the version became **0.0.16** (16 iterations, zero user-blessed lines).
 Historical headings and old numbers (`0.1.0` … `0.16.0`, `0.5.1`) keep their
 pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoption
-is a remapping, not a new round: the next change to this plugin is `0.0.17`,
-and the first user acceptance moves the line to `0.1.0`.
+is a remapping, not a new round. The first change under the new scheme is
+`0.0.17`; the first user acceptance moves the line to `0.1.0`.
+
+## 0.0.17
+
+### Added
+
+- **The seven consumed fields are now declared.** The tool's `parameters` schema
+  carries `oldText`, `newText`, `all`, `replaceFirst`, `backup`, `tty`, and
+  `input`, the way the body and the documents have always described them. Until
+  now a model met them only through prose; they arrived undeclared and survived
+  on the defensive reader alone.
+- **The offline suites live in the repository.** `ssh/tests/` carries eight
+  `node:test` files and their fake transport/store/secrets helpers, run by
+  `pnpm test` (builds first, then `node --test tests/*.test.mjs`): 80 tests over
+  the policy gate and every payload's schema agreement, the whole `ops` surface
+  at its transport seam including the read marker protocol, the fingerprint
+  tables, the zod bounds, the background-job lifecycle, and the two pure
+  refusal rules. The CHANGELOG has cited suites since the beginning; none of
+  them was ever checked in, so every one of those claims was unverifiable by
+  anyone but the author. It is not now.
+
+### Fixed
+
+- **The model-facing wording and the gate now say the same thing about an empty
+  allowlist.** `describeRemote` told a model a command "runs freely unless that
+  target lists a command allowlist", and `get_connection` rendered
+  `allowlist=none(no restriction)`, while `decideAccess` — since it was written —
+  asks about every command on a target that lists no programs. The tool text and
+  the render line now state the rule the gate runs, and a test asserts the
+  description and the verdict agree on the same call.
+
+### Notes
+
+- The suites pinned one real gap found while covering the surface: the tool's
+  `maxBytes` reaches `exec` and the transfers, but `read`, `write`, and `edit`
+  build their remote call from the stored ceiling only — a per-call
+  `maxOutputBytes` handed to `ops` for a file action is ignored by `fileCall`.
+  `tests/ops.test.mjs` documents the current behaviour; fixing it is a code
+  change for a next iteration.
+- The suites also record that a bare `Permission denied, please try again.`
+  carries no method tag, so the auth table classifies it `failed` rather than
+  `auth-failed`: the retry prompt OpenSSH prints between attempts is not in the
+  table's patterns.
 
 ## 0.0.16
 

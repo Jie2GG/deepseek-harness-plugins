@@ -22,6 +22,16 @@ ssh/
 ├── docs/DETAIL.zh.md         # plugin detail page, Chinese
 ├── locale/en.json            # meta.title / meta.description / meta.detail
 ├── locale/zh.json            # same, Chinese; its meta.detail names DETAIL.zh.md
+├── tests/                    # the offline suites: plain node:test against lib/ — build first
+│   ├── helpers.mjs           # fake transport, store, secrets; the payload-schema checker
+│   ├── tool.test.mjs         # gate, resolution, arguments, wording, every payload vs the schema
+│   ├── ops.test.mjs          # every operation at its transport seam, marker protocol included
+│   ├── storage.test.mjs      # the zod bounds and the strict records
+│   ├── transport.test.mjs    # quoting, program extraction, the fingerprint tables
+│   ├── jobs.test.mjs         # the background-job lifecycle and its outcome classes
+│   ├── edit.test.mjs         # the exact-match rules, refusal by counted occurrence
+│   ├── local-path.test.mjs   # the workspace boundary a transfer obeys
+│   └── rpc.test.mjs          # method allowlisting and the failure-code-to-status map
 └── src/
     ├── index.ts              # Host entry: name, inject, apply (domain open + route)
     ├── types.ts              # route path, method list, failure codes (client type-only)
@@ -53,9 +63,10 @@ cd ssh
 pnpm install        # dependencies + the type-only peers
 pnpm run check      # tsc --noEmit
 pnpm run build      # tsc, then finalize lib/client.js as a classic script
+pnpm test           # build, then node --test tests/*.test.mjs (the offline suites)
 # Lint with the harness checkout's oxlint when it is near; it is the cheapest
 # check for the dead code a type pass leaves behind:
-#   /data/deepseek-harness/node_modules/.bin/oxlint src scripts
+#   /data/deepseek-harness/node_modules/.bin/oxlint src tests scripts
 ```
 
 The finalize step is not decorative: the web module table runs `lib/client.js`
@@ -203,17 +214,16 @@ bundle is the live proof of that).
 | `timeoutMs` / `maxBytes` | per-call overrides of the shared ceilings |
 | `output` | `oneOf` per action, each `additionalProperties: false`; `execute` returns the canonical value and `output.render` writes the transcript text. The registry validates that value against the projected schema, so a branch that omits a field the producer emits rejects the whole call — the suites therefore validate every action's payload with `validateJsonSchemaValue`, not just its contents |
 
-Two honest notes on that field table, both verified against the shipped
-implementation rather than the schema text:
+Two notes on that field table, both pinned by `tests/tool.test.mjs`:
 
 - Naming a target with an explicit `target` argument records it as this
   conversation's choice (`rememberSessionTarget` writes the `sessions` row only
   for a call that succeeded and named a server on purpose), so the next call can
   leave `target` out.
-- The `parameters` schema declares thirteen of the fields above; `oldText`,
-  `newText`, `all`, `replaceFirst`, `backup`, `tty`, and `input` arrive undeclared
-  and are read defensively by `readArgs` — they work, but a model meets them only
-  through the action description and this document.
+- The `parameters` schema now declares all twenty fields the body reads; until
+  0.0.16 the seven the `edit` and prompt-answering calls use (`oldText`, `newText`,
+  `all`, `replaceFirst`, `backup`, `tty`, `input`) arrived undeclared and survived
+  only the defensive reader.
 
 Policy is decided in `tools/pre-execute`, not inside the tool, which is what the
 tool-authoring docs prescribe for deployment policy:
@@ -229,13 +239,13 @@ tool-authoring docs prescribe for deployment policy:
 | any action on a target with `agentAccess: off` | deny, naming the settings page |
 | storage unreadable at gate time | deny — running blind on a remote host is worse |
 
-This table states `decideAccess` as it runs today (confirmed against the
-compiled gate). Two model-facing strings still carry the opposite reading of the
-empty-allowlist case — `describeRemote`'s "runs freely unless that target lists a
-command allowlist", landing in commit 3786005, and the `allowlist=none(no
-restriction)` suffix `get_connection` renders — while `decideAccess` asks about
-every command when the list is empty, which is what `storage.ts` documents as the
-safe default. Those strings are a follow-up code fix, not a docs question.
+This table states `decideAccess` as it runs today, and since 0.0.17 the
+model-facing strings state it too: `describeRemote` tells the model a command
+runs unasked only when its bare leading program is named by a non-empty
+allowlist, and the `get_connection` render line prints `allowlist=none(ask
+every command)` — both pinned by `tests/tool.test.mjs`, which asserts the
+description and the gate agree on the same call. (`0.10.0` intended this; the
+strings drifted at 3786005 and the gate never moved.)
 
 An `ask` is resolved by the harness approval UI (`ctx.approval`, answered through
 the standard tool-approval surface) with `displayReason` supplied in English and
@@ -348,7 +358,7 @@ still open:
    remote call keeps rendering in the harness's generic tool row — see the note
    under **Verified contracts**.
 
-## Limits of 0.0.16
+## Limits of 0.0.17
 
 - The settings page is inventory, probes, resolve, and ceilings only: running
   commands, editing files, and moving bytes reach the server through the

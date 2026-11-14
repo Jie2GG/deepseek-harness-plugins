@@ -51,7 +51,7 @@ export type GateDecision =
 import { leadingProgram } from './transport.ts'
 import type { Ops, Params, RemoteFileResult } from './ops.ts'
 
-/** Actions the tool offers in 0.6.0; file transfer joins in the next stage. */
+/** Actions the tool offers: reads (`get_connection`, `read`, `download`) and writes (`exec`, `write`, `edit`, `upload`). */
 export const REMOTE_TOOL_ACTIONS = ['get_connection', 'exec', 'read', 'write', 'edit', 'upload', 'download'] as const
 
 /** Preferred tool name, with a namespaced fallback if another plugin holds it. */
@@ -428,7 +428,7 @@ export function describeRemote(targets: TargetBrief[]): string {
     : `Choose the server this conversation means and pass it as \`target\`. Available aliases: ${targets
       .map(target => `\`${target.label}\` (${target.user === undefined || target.user === '' ? '' : `${target.user}@`}${target.host})`)
       .join(', ')}.`
-  return `Runs commands and moves files on a stored SSH server, with the credentials the plugin holds. ${list} A call addresses one server: leave \`target\` out to reuse the one this conversation last used. Nothing is interpreted by a local shell; the command string is executed by the login shell on the server. \`get_connection\`, \`read\`, and \`download\` are reads; \`read\` answers with a directory listing when the path is a directory and with the file's text when it is a file; \`exec\`, \`write\`, \`edit\`, and \`upload\` may be refused by the user, and \`exec\` runs freely unless that target lists a command allowlist, in which case only the listed programs and simple single-program calls run freely. Add \`background: true\` to leave a long command running, then poll it with the harness's \`job_output\` and \`job_kill\` tools.`
+  return `Runs commands and moves files on a stored SSH server, with the credentials the plugin holds. ${list} A call addresses one server: leave \`target\` out to reuse the one this conversation last used. Nothing is interpreted by a local shell; the command string is executed by the login shell on the server. \`get_connection\`, \`read\`, and \`download\` are reads; \`read\` answers with a directory listing when the path is a directory and with the file's text when it is a file; \`exec\`, \`write\`, \`edit\`, and \`upload\` may be refused by the user, and an \`exec\` runs unasked only when its one bare leading program is named by that target's command allowlist — a fresh target names no programs there, so every command on it is asked about first. Add \`background: true\` to leave a long command running, then poll it with the harness's \`job_output\` and \`job_kill\` tools.`
 }
 
 /**
@@ -503,6 +503,13 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
       timeoutMs: { type: 'integer', description: 'For `exec`: override the command deadline for this call, in milliseconds.' },
       background: { type: 'boolean', description: 'For `exec`: start the command as a background job and return its id at once instead of waiting for it. Poll it with the `job_output` tool and stop it with `job_kill`; the command also ends when this conversation ends.' },
       maxBytes: { type: 'integer', description: 'For `exec` and `read`: the largest amount of output to bring back.' },
+      tty: { type: 'boolean', description: 'For `exec`: run under `ssh -tt`, for a program that inspects its own terminal (it then merges stderr into stdout and ends lines with CRLF).' },
+      input: { type: 'string', description: 'For `exec`: text fed to the command stdin, to answer a prompt or pipe a body.' },
+      oldText: { type: 'string', description: 'For `edit`: the exact text to find, copied from a read; it must match once unless `all` or `replaceFirst` is set.' },
+      newText: { type: 'string', description: 'For `edit`: the replacement text; an empty string deletes the match.' },
+      all: { type: 'boolean', description: 'For `edit`: replace every occurrence instead of refusing when the text matches more than once.' },
+      replaceFirst: { type: 'boolean', description: 'For `edit`: replace only the first occurrence when the text matches more than once.' },
+      backup: { type: 'boolean', description: 'For `edit`: defaults to true, leaving a `<path>.dsh-bak` copy; pass false to skip it.' },
     },
     output: {
       schema: {
@@ -864,7 +871,7 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
           authority,
           `auth=${String(row.auth ?? 'key')}`,
           row.agentAccess === 'off' ? 'agent off' : 'agent on',
-          Array.isArray(row.allowedCommands) && row.allowedCommands.length > 0 ? `allowlist=${row.allowedCommands.join(',')}` : 'allowlist=none(no restriction)',
+          Array.isArray(row.allowedCommands) && row.allowedCommands.length > 0 ? `allowlist=${row.allowedCommands.join(',')}` : 'allowlist=none(ask every command)',
           row.hasPassword === true ? 'password stored' : '',
           row.hasPassphrase === true ? 'passphrase stored' : '',
           typeof row.lastProbe === 'string' ? `last probe: ${row.lastProbe}` : '',
