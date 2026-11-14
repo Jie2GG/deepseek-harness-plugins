@@ -88,9 +88,26 @@
 - `files` 同步列入 client 构建产物；slot 注册与展示资源细则见官方
   `cordis-plugin-development` skill 的 `references/ui-plugin.md` 与 decoration 模板。
 
+## 版本号三段语义
+
+每个插件的 `version` 使用三段式 `major.minor.patch`，三段各有固定语义，不得互相挪用：
+
+| 段 | 语义 | 递增时机 |
+| --- | --- | --- |
+| `major` | 大版本 | 破坏性变更（数据格式、API、安装方式）；由用户拍板 |
+| `minor` | 用户认可版本 | 用户对 agent 当前累积的工作**明确表示认可**时 +1，`patch` 同时归零 |
+| `patch` | Agent 自动迭代版本 | agent 每完成一轮改动（功能、修复、文档）+1，不等认可 |
+
+- agent 日常提交只动 `patch`：**未经用户认可不得递增 `minor`**，也不得把未认可的
+  工作伪装成新的用户线。
+- 每次版本变动附对应 CHANGELOG 条目。
+- 存量插件同步本规则时不改写历史条目：未被用户认可过的插件把历史迭代数折算进
+  `patch` 段（`minor` 记 0），旧编号在历史条目与正文中保留原样，仅在 CHANGELOG
+  顶部记一条折算对照；此后的新版本一律按新语义编号。
+
 ## 版本与安装验证
 
-1. 每次改动更新 `version` 并附 CHANGELOG 条目（可选但推荐）。
+1. 每次改动按上文「版本号三段语义」递增 `version`，并附对应 CHANGELOG 条目。
 2. 本地验证：DSH 中 `plugin_manager` → `install_bundle` 指定该目录 / 包名，
    确认无 manifest 诊断（标题、描述、图标、详情文档均正常显示），再到设置页
    切换中英文检查文案。
