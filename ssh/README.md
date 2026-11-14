@@ -367,7 +367,7 @@ still open:
    remote call keeps rendering in the harness's generic tool row — see the note
    under **Verified contracts**.
 
-## Limits of 0.0.18
+## Limits of 0.0.19
 
 - The settings page is inventory, probes, resolve, and ceilings only: running
   commands, editing files, and moving bytes reach the server through the

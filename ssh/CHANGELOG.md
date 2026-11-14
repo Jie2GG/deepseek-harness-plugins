@@ -17,6 +17,19 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.19
+
+### Changed
+
+- **The Client settings card is fields only.** The four muted paragraphs — how
+  probes use BatchMode and askpass, how ssh and scp are found and what the probe
+  deadline is, what the command timeout and the output ceiling mean, what the
+  transfer ceiling allows — are gone from the page, both languages, along with
+  their dictionary entries. The three inputs and the save button stand alone;
+  the fixed facts they used to explain are still on the bounds card beside them,
+  and the longer prose lives where readers with time for it go: the plugin's
+  detail page.
+
 ## 0.0.18
 
 ### Changed
