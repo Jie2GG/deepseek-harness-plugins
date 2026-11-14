@@ -17,6 +17,52 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.20
+
+### Added
+
+- **Elevation: `exec` can now run as another account, answered by the stored
+  secret.** Two mechanisms, one parameter each:
+  - `as: "root"` (or any account name) elevates through **sudo**: the plugin
+    prefixes the command, forces a pseudo-terminal, and injects the target's
+    **stored login password** into the command's stdin — sudo asks, the plugin
+    answers, and the password never appears in the conversation, the transcript,
+    or the result. A command the caller already wrote as `sudo …` is kept
+    verbatim and only gets the terminal and the answer. When no login password
+    is stored, sudo runs with `-n`: a NOPASSWD host answers immediately, a
+    prompting one fails fast with `sudo: a password is required` instead of
+    waiting out the deadline. An explicit `input` always wins over the stored
+    secret.
+  - `su: true` reaches root through **su** and her **own password**: a third
+    secret slot per target (`ssh/<id>-root` in the credential store, a
+    `root 密码（su 提权用）` field in the target form with the same
+    typed/cleared/untouched three-state as the other two), injected the same
+    invisible way. The command moves whole into `su root -c '…'` so pipelines
+    survive the switch. With no stored root password the call is refused with
+    a hint pointing at the form, or at `as: "root"` as the other road.
+- **A third chip and payload fields:** `get_connection` reports
+  `root password stored`, elevated results echo `elevated: <account>` so the
+  model can see which identity ran, and the storage slot schema takes `root`
+  with the usual tri-state. `as` and `su` together are a `bad-input` refusal.
+- **New auth-table fingerprints:** `sudo: a password is required`,
+  `… incorrect password …`, and `su: Authentication failure` classify as
+  `auth-failed` — with a hint that names the elevation secret, not the ssh
+  credential — instead of a bare nonzero exit.
+
+### Notes
+
+- Elevated calls **always ask first**, even when the inner command is on the
+  target's allowlist: sudo is a master key, and an allowlist hit on
+  `systemctl` never consented to running it as another account. The approval
+  prompt names the account and says which secret will be spent (login password
+  for sudo, root password for su), in both languages.
+- `background: true` with `as`/`su` is refused: a job streams output but has no
+  stdin channel to inject a password into. Backgrounded sudo still works if
+  the server is NOPASSWD and the command says so itself.
+- The password travels to the server as the command's stdin and is subject to
+  whatever the session's encryption carries; what the plugin guarantees is
+  that it never enters the model's context, argv, or transcript.
+
 ## 0.0.19
 
 ### Changed

@@ -41,6 +41,10 @@ test('classifyProbe takes the exit code at its word first', () => {
   assert.equal(classifyProbe(255, 'Too many authentication failures for deploy'), 'auth-failed')
   assert.equal(classifyProbe(255, 'Received disconnect: Server refused our key'), 'auth-failed')
   assert.equal(classifyProbe(255, 'no supported authentication methods'), 'auth-failed')
+  // Elevation prompts answer to the same classification: spent secrets, wrong secrets.
+  assert.equal(classifyProbe(1, 'sudo: 1 incorrect password attempt'), 'auth-failed')
+  assert.equal(classifyProbe(1, 'sudo: a password is required'), 'auth-failed')
+  assert.equal(classifyProbe(1, 'su: Authentication failure'), 'auth-failed')
   assert.equal(classifyProbe(255, 'Host key for example.com did not match.'), 'unknown-host')
   assert.equal(classifyProbe(255, 'Offending ED25519 key in /home/u/.ssh/known_hosts:3'), 'unknown-host')
   assert.equal(classifyProbe(255, 'REMOTE HOST IDENTIFICATION HAS CHANGED'), 'unknown-host') // case-insensitive

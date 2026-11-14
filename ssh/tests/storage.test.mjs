@@ -112,6 +112,21 @@ test('a remote command line has a length bound, no NUL, and a bounded stdin', ()
   assert.throws(() => remoteRunSchema.parse({ command: 'x', sessionId: 's', stray: 1 }))
 })
 
+test('elevation fields: sudo wants a bare account name, and one mechanism per call', () => {
+  assert.equal(remoteRunSchema.parse({ command: 'id', as: 'postgres' }).as, 'postgres')
+  assert.equal(remoteRunSchema.parse({ command: 'id', su: true }).su, true)
+  assert.throws(() => remoteRunSchema.parse({ command: 'id', as: 'Postgres' })) // POSIX names are lowercase
+  assert.throws(() => remoteRunSchema.parse({ command: 'id', as: 'a b' }))
+  assert.throws(() => remoteRunSchema.parse({ command: 'id', as: '$(id)' })) // not one for the shell either
+  assert.throws(() => remoteRunSchema.parse({ command: 'id', as: 'root', su: true })) // alternatives, pinned to su
+  // The root password rides the save patch, with the same tri-state as the others.
+  assert.equal(secretPatchSchema.parse({ root: 'pw' }).root, 'pw')
+  assert.equal(secretPatchSchema.parse({ root: null }).root, null)
+  assert.throws(() => secretPatchSchema.parse({ root: '' }))
+  // A draft probe still speaks only login and passphrase: root is stored, never transient.
+  assert.throws(() => draftSecretSchema.parse({ root: 'pw' }))
+})
+
 test('transfer and session inputs demand what they need; secrets are never blank', () => {
   assert.throws(() => transferInputSchema.parse({ path: '/x' })) // localPath required
   assert.throws(() => transferInputSchema.parse({ path: '/x', localPath: 'a', maxBytes: 1023 }))

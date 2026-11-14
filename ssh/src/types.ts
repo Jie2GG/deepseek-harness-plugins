@@ -42,10 +42,12 @@ export interface SecretStatus {
   password: boolean
   /** Whether a private-key passphrase is stored. */
   passphrase: boolean
+  /** Whether the root account's own password is stored, for `su` elevation. */
+  root: boolean
 }
 
 /** One secret write: a string stores, `null` forgets, absence leaves as-is. */
-export type SecretPatch = { password?: string | null | undefined; passphrase?: string | null | undefined }
+export type SecretPatch = { password?: string | null | undefined; passphrase?: string | null | undefined; root?: string | null | undefined }
 
 /** A stored target as the page reads it: the record plus its secret presence. */
 export interface ConnectionView extends ConnectionRecord {
@@ -184,6 +186,8 @@ export interface RemoteRunResult {
   tty?: boolean | undefined
   /** Bytes handed to the command's stdin, when stdin was used. */
   stdinBytes?: number | undefined
+  /** The account an elevated call ran as: the `as` name, or `su:root`. */
+  elevated?: string | undefined
 }
 
 /**

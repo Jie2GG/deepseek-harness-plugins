@@ -73,6 +73,11 @@ const AUTH_PATTERNS: readonly RegExp[] = [
   /server refused our key/iu,
   /could not open a connection to your authentication agent/iu,
   /permission denied \(publickey/iu,
+  // Elevation answers come from the same kind of secret, and a wrong one must
+  // read as an authentication failure rather than a plain nonzero exit.
+  /incorrect password/iu,
+  /sudo: a password is required/iu,
+  /su: authentication failure/iu,
 ]
 
 /** stderr text meaning the network or the host itself refused the session. */

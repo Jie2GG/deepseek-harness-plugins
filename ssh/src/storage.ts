@@ -209,6 +209,8 @@ export const connectionInputSchema = z.object({
 export const secretPatchSchema = z.object({
   password: z.string().min(1).max(4096).nullable().optional(),
   passphrase: z.string().min(1).max(4096).nullable().optional(),
+  /** The root account's own password, which `su` elevation answers with. */
+  root: z.string().min(1).max(4096).nullable().optional(),
 }).strict()
 
 /** What the page may send for one unsaved draft target: no label, no id. */
@@ -284,7 +286,30 @@ export const remoteRunSchema = z.object({
   tty: z.boolean().optional(),
   /** Text sent to the command's stdin, for a prompt answer or a piped body. */
   input: z.string().max(1_000_000).optional(),
-}).strict()
+  /**
+   * Elevation through sudo: run the command as this account. `root` is the
+   * plain elevation case; any other name needs that account reachable by
+   * `sudo -u`. The plugin injects the target's stored login password when the
+   * call is not already given an `input` and no NOPASSWD is configured.
+   */
+  as: z.string().trim().regex(/^[a-z_][a-z0-9._-]{0,63}$/u, {
+    message: 'Expected a bare account name such as root or postgres',
+  }).optional(),
+  /**
+   * Elevation through su: switch to root with the root account's own stored
+   * password (the third secret slot), for hosts where sudo is unavailable and
+   * the root password differs from the login password.
+   */
+  su: z.boolean().optional(),
+}).strict().superRefine((value, ctx) => {
+  if (value.as !== undefined && value.su === true) {
+    ctx.addIssue({
+      code: 'custom',
+      message: 'as and su are alternatives: sudo reaches an account through the login password, su through the stored root password. Pick one.',
+      path: ['su'],
+    })
+  }
+})
 
 /** The one domain this plugin owns. */
 export const sshTargetsDomain = defineDomain({

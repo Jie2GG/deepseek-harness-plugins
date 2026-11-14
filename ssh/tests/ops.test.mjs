@@ -247,6 +247,74 @@ test('edit refuses what it cannot see whole, and skips the backup on request', a
   assert.equal(run.command.startsWith('cat > '), true) // no cp prefix
 })
 
+// ── elevation: as (sudo) and su (root's own secret) ────────────────────────
+test('as: elevates through sudo, forces a terminal, and answers from the stored login password', async () => {
+  const withPw = build({ secrets: fakeSecrets({ password: true, passphrase: false, root: false }, { password: 'hunter2' }) })
+  await withPw.ops.runCommand({ command: 'systemctl restart nginx', as: 'root' })
+  const call = withPw.state.calls[0]
+  assert.equal(call.command, 'sudo systemctl restart nginx')
+  assert.equal(call.options.tty, true)
+  assert.equal(call.options.stdin, 'hunter2\n') // injected by the plugin, never echoed back
+  const other = build({ secrets: fakeSecrets({ password: true, passphrase: false, root: false }, { password: 'pw' }) })
+  await other.ops.runCommand({ command: 'psql -c "select 1"', as: 'postgres' })
+  assert.equal(other.state.calls[0].command, "sudo -u 'postgres' psql -c \"select 1\"")
+  // A caller who wrote their own sudo line keeps it verbatim.
+  const mine = build({ secrets: fakeSecrets({ password: true, passphrase: false, root: false }, { password: 'pw' }) })
+  await mine.ops.runCommand({ command: 'sudo apt update', as: 'root' })
+  assert.equal(mine.state.calls[0].command, 'sudo apt update')
+  // No stored password: sudo -n, so a NOPASSWD host answers at once and a
+  // prompting one fails fast rather than waiting out the deadline.
+  const bare = build()
+  await bare.ops.runCommand({ command: 'whoami', as: 'root' })
+  assert.equal(bare.state.calls[0].command, 'sudo -n whoami')
+  assert.equal(bare.state.calls[0].options.stdin, undefined)
+  // An explicit input is the caller's answer and wins over the stored secret.
+  const chosen = build({ secrets: fakeSecrets({ password: true, passphrase: false, root: false }, { password: 'stored' }) })
+  await chosen.ops.runCommand({ command: 'passwd', as: 'root', input: 'typed\n' })
+  assert.equal(chosen.state.calls[0].command, 'sudo passwd')
+  assert.equal(chosen.state.calls[0].options.stdin, 'typed\n')
+})
+
+test('su: reaches root through its own stored password, and refuses cleanly without one', async () => {
+  const withRoot = build({ secrets: fakeSecrets({ password: false, passphrase: false, root: true }, { root: 'rootpw' }) })
+  await withRoot.ops.runCommand({ command: "id && hostname", su: true })
+  const call = withRoot.state.calls[0]
+  assert.equal(call.command, "su root -c 'id && hostname'") // the whole line moves into one -c word
+  assert.equal(call.options.tty, true)
+  assert.equal(call.options.stdin, 'rootpw\n')
+  assert.notEqual(call.command.includes('rootpw'), true) // the secret is in stdin, not the command line
+  const missing = build()
+  let thrown
+  try {
+    await missing.ops.runCommand({ command: 'id', su: true })
+  } catch (error) { thrown = error }
+  assert.equal(thrown?.code, 'bad-input')
+  assert.equal(thrown.field, 'su')
+  assert.match(thrown.hint, /as: "root"/)
+})
+
+test('as and su together never reach the server: the schema refuses first', async () => {
+  const { ops } = build()
+  let thrown
+  try {
+    await ops.runCommand({ command: 'id', as: 'root', su: true })
+  } catch (error) { thrown = error }
+  assert.equal(thrown?.code, 'bad-input')
+  assert.equal(thrown.field, 'su')
+})
+
+test('backgrounded elevation is refused: a job has no stdin channel to inject into', async () => {
+  const jobs = { start () { return 'ssh-j1' } }
+  const { ops } = build({ jobs })
+  let thrown
+  try {
+    await ops.execBackground({ command: 'apt update', as: 'root' })
+  } catch (error) { thrown = error }
+  assert.equal(thrown?.code, 'bad-input')
+  assert.equal(thrown.field, 'background')
+  assert.match(thrown.hint, /NOPASSWD/)
+})
+
 // ── probes ──────────────────────────────────────────────────────────────────
 test('a stored probe persists onto the record; a draft probe never does', async () => {
   const { ops, store } = build()

@@ -1,5 +1,6 @@
 /**
- * The password and passphrase a target authenticates with.
+ * The login password, the key pass phrase, and the root account's own password
+ * a target authenticates or elevates with.
  *
  * These values never enter the storage domain and never reach the browser: they
  * live as `grant` records in the Harness credential store, addressed
@@ -17,10 +18,10 @@ import { SshError } from './types.ts'
 import type { SecretPatch, SecretStatus } from './types.ts'
 
 /** One secret slot a target owns. */
-export type SecretKind = 'password' | 'passphrase'
+export type SecretKind = 'password' | 'passphrase' | 'root'
 
-/** Both slots, in the order the page renders them. */
-export const SECRET_KINDS: readonly SecretKind[] = ['password', 'passphrase']
+/** All slots, in the order the page renders them. */
+export const SECRET_KINDS: readonly SecretKind[] = ['password', 'passphrase', 'root']
 
 /** The credential scope these records belong to: this plugin's name. */
 const SCOPE = 'ssh'
@@ -60,7 +61,7 @@ export class TargetSecrets {
    * @returns the presence flags.
    */
   async status(id: string): Promise<SecretStatus> {
-    const seen: Record<SecretKind, boolean> = { password: false, passphrase: false }
+    const seen: Record<SecretKind, boolean> = { password: false, passphrase: false, root: false }
     for (const kind of SECRET_KINDS) {
       try {
         const info = await this.#credentials.describeRecord(this.keyFor(id, kind))
@@ -117,10 +118,10 @@ export class TargetSecrets {
   /**
    * Forget every secret a target owns, used when the target is deleted.
    * @param id - the stored target id.
-   * @returns resolution once both slots are cleared.
+   * @returns resolution once every slot is cleared.
    */
   async clearAll(id: string): Promise<void> {
-    await this.apply(id, { password: null, passphrase: null })
+    await this.apply(id, { password: null, passphrase: null, root: null })
   }
 
   /**

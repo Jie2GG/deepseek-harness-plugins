@@ -65,7 +65,12 @@ Just ask. The agent sees the saved aliases — each with where it goes — among
 things it can call, picks the one your conversation is about, and passes it. It can
 run a command, list or read a path, write or precisely edit a file, upload or
 download, and hand a long-running command to the background to read its output in
-pieces or stop it later. Once it
+pieces or stop it later. Commands can also be run elevated: as another account
+through sudo (the plugin answers sudo with that target's stored login password),
+or — where sudo is missing — as root through su (answered with a third secret
+slot, root's own password, which you save on the target form). Either way the
+password is injected into the command behind the scenes: it never appears in the
+conversation. Once it
 names a server, that conversation keeps using it, so a follow-up like "now the disk
 usage" does not repeat the host. Add or remove a target and the choices the agent
 sees follow on the next turn, with no conversation restart.
@@ -83,6 +88,7 @@ What runs without interrupting you:
 | The call | What happens |
 | --- | --- |
 | list a directory, read a file, download, or ask which server this is (`get_connection`) | runs immediately |
+| a command run elevated (sudo as another account, or su to root) | always asks you first, even when the command itself is allowlisted — the prompt names the account and says which stored password it will spend |
 | a single-program command whose one bare program is on that target's **command allowlist** | runs immediately |
 | an edit of a remote file (exact text, refused when it matches more than once) | asks you first |
 | a command left running in the background (`background: true`) | the same verdict as the same command run in the foreground |
@@ -128,12 +134,17 @@ back to the browser:
 - Leaving a secret field empty means “keep what is stored”; ticking **Forget the
   stored value** removes it.
 - The list states only whether a slot is filled, never its contents.
-- Deleting a target forgets both of its secrets.
+- A third slot, **root's own password**, is used only when the agent asks for a
+  command through `su`; sudo uses the login password instead. All of them follow
+  the same rules above.
+- Deleting a target forgets all three of its secrets.
 - A password typed into an unsaved form is used once, by **Test before saving**,
   and is stored only if you save.
 - `ssh` reads the secret through the plugin's askpass helper instead of a terminal
   or a command line, so it never appears in the process list. A private key is
-  still referenced by path only.
+  still referenced by path only. When a command is elevated, the password rides
+  the encrypted channel as that command's own standard input — outside the
+  conversation, the transcript, and the process table alike.
 
 Two honest limits: the store is readable by your own OS user, and agent tool
 processes run as that same user, so a stored secret is private from other users
@@ -207,6 +218,9 @@ ignored.
   until it settles. What is still missing is a terminal you type
   into live, and a command that keeps running on the server after this conversation
   ends — that one wants `nohup` or a systemd unit, which `exec` can set up.
+  Elevation (`as`/`su`) is a foreground thing — a backgrounded job has no channel
+  to receive the password — but a NOPASSWD server still works in the background
+  when the command itself starts with `sudo`.
 - After the plugin package is replaced, the running Host keeps its previous module
   until it restarts: before that, the agent has no `ssh` tool and new ceilings
   are not in effect. The settings page follows the browser bundle and updates on its

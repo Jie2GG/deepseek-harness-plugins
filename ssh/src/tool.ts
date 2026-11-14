@@ -164,6 +164,10 @@ export interface RemoteCallArgs {
   input?: string | undefined
   /** For `exec`: start it as a background job instead of waiting. */
   background?: boolean | undefined
+  /** For `exec`: run as another account through sudo; `root` is the plain elevation. */
+  as?: string | undefined
+  /** For `exec`: switch to root through su, answered with the stored root password. */
+  su?: boolean | undefined
   /** For `upload`/`download`: the path on this machine, relative to the session workspace. */
   localPath?: string | undefined
 }
@@ -210,6 +214,8 @@ export function readArgs(exec: Readonly<PendingCall>): RemoteCallArgs {
     tty: typeof raw.tty === 'boolean' ? raw.tty : undefined,
     input: typeof raw.input === 'string' ? raw.input : undefined,
     background: typeof raw.background === 'boolean' ? raw.background : undefined,
+    as: text(raw.as),
+    su: typeof raw.su === 'boolean' ? raw.su : undefined,
   }
 }
 
@@ -300,8 +306,23 @@ export function decideAccess(target: TargetSnapshot | undefined, args: RemoteCal
       },
     }
   }
-  const command = (args.command ?? '').trim()
-  const program = leadingProgram(command)
+  const command0 = (args.command ?? '').trim()
+  // Elevation is its own question: sudo/su can run anything as another
+  // account, so a bare allowlist hit on the inner command never skips asking.
+  // The secrets this path spends are the stored ones, and the prompt says so.
+  const elevatedTo = args.as !== undefined && args.as !== '' ? args.as : args.su === true ? 'root' : undefined
+  if (elevatedTo !== undefined) {
+    const via = args.su === true ? 'su, with the stored root password' : 'sudo, with the stored login password'
+    return {
+      verdict: 'ask',
+      reason: `Run elevated as ${elevatedTo} on ${authority}: ${command0.slice(0, 300)}`,
+      display: {
+        en: `Run a command on ${authority} as the ${elevatedTo} account through ${via}: ${command0.slice(0, 400)}. The plugin answers the prompt itself; no password appears in the conversation.`,
+        zh: `将在 ${authority} 上以 ${elevatedTo} 身份执行命令（${args.su === true ? 'su：用已存的 root 密码应答' : 'sudo：用已存的登录密码应答'}）：${command0.slice(0, 400)}。提示由插件自己应答，对话里不会出现密码。`,
+      },
+    }
+  }
+  const program = leadingProgram(command0)
   if (program !== undefined && target.allowedCommands.includes(program)) {
     return { verdict: 'allow', reason: '' }
   }
@@ -310,10 +331,10 @@ export function decideAccess(target: TargetSnapshot | undefined, args: RemoteCal
     : `"${program}" is not in this target's allowlist`
   return {
     verdict: 'ask',
-    reason: `Run on ${authority}: ${command.slice(0, 300)}`,
+    reason: `Run on ${authority}: ${command0.slice(0, 300)}`,
     display: {
-      en: `Run a command on ${authority} — ${command.slice(0, 400)} — because ${why}.`,
-      zh: `将在 ${authority} 上执行命令：${command.slice(0, 400)}（原因：${program === undefined ? '这条命令有串接、重定向或替换，不是单个程序' : `「${program}」不在该目标的白名单里`}）。`,
+      en: `Run a command on ${authority} — ${command0.slice(0, 400)} — because ${why}.`,
+      zh: `将在 ${authority} 上执行命令：${command0.slice(0, 400)}（原因：${program === undefined ? '这条命令有串接、重定向或替换，不是单个程序' : `「${program}」不在该目标的白名单里`}）。`,
     },
   }
 }
@@ -386,6 +407,7 @@ const TARGET_SHAPE = {
   allowedCommands: { type: 'array', items: { type: 'string' } },
   hasPassword: { type: 'boolean' },
   hasPassphrase: { type: 'boolean' },
+  hasRoot: { type: 'boolean' },
   lastProbe: { type: 'string' },
 } as const
 
@@ -428,7 +450,7 @@ export function describeRemote(targets: TargetBrief[]): string {
     : `Choose the server this conversation means and pass it as \`target\`. Available aliases: ${targets
       .map(target => `\`${target.label}\` (${target.user === undefined || target.user === '' ? '' : `${target.user}@`}${target.host})`)
       .join(', ')}.`
-  return `Runs commands and moves files on a stored SSH server, with the credentials the plugin holds. ${list} A call addresses one server: leave \`target\` out to reuse the one this conversation last used. Nothing is interpreted by a local shell; the command string is executed by the login shell on the server. \`get_connection\`, \`read\`, and \`download\` are reads; \`read\` answers with a directory listing when the path is a directory and with the file's text when it is a file; \`exec\`, \`write\`, \`edit\`, and \`upload\` may be refused by the user, and an \`exec\` runs unasked only when its one bare leading program is named by that target's command allowlist — a fresh target names no programs there, so every command on it is asked about first. Add \`background: true\` to leave a long command running, then poll it with the harness's \`job_output\` and \`job_kill\` tools.`
+  return `Runs commands and moves files on a stored SSH server, with the credentials the plugin holds. ${list} A call addresses one server: leave \`target\` out to reuse the one this conversation last used. Nothing is interpreted by a local shell; the command string is executed by the login shell on the server. \`get_connection\`, \`read\`, and \`download\` are reads; \`read\` answers with a directory listing when the path is a directory and with the file's text when it is a file; \`exec\`, \`write\`, \`edit\`, and \`upload\` may be refused by the user, and an \`exec\` runs unasked only when its one bare leading program is named by that target's command allowlist — a fresh target names no programs there, so every command on it is asked about first. Pass \`as: "root"\` (or another account) to elevate through sudo, or \`su: true\` to reach root with the stored root password: either way the plugin injects the secret into the command's own stdin, so no password ever appears in the conversation. Add \`background: true\` to leave a long command running, then poll it with the harness's \`job_output\` and \`job_kill\` tools.`
 }
 
 /**
@@ -510,6 +532,8 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
       all: { type: 'boolean', description: 'For `edit`: replace every occurrence instead of refusing when the text matches more than once.' },
       replaceFirst: { type: 'boolean', description: 'For `edit`: replace only the first occurrence when the text matches more than once.' },
       backup: { type: 'boolean', description: 'For `edit`: defaults to true, leaving a `<path>.dsh-bak` copy; pass false to skip it.' },
+      as: { type: 'string', description: 'For `exec`: run the command as another account through sudo (`root` for the plain elevation). The plugin forces a terminal and answers sudo with the target\u2019s stored login password; the password never appears in the conversation.' },
+      su: { type: 'boolean', description: 'For `exec`: switch to root through su, answered with the target\u2019s stored root password (a third secret slot, set in the target form). Use when sudo is unavailable and root\u2019s password differs from the login password. Cannot be combined with `as`, and not available for backgrounded commands.' },
     },
     output: {
       schema: {
@@ -532,7 +556,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           {
             type: 'object',
             additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'exec', required: true }, command: { type: 'string' }, jobId: { type: 'string' }, exitCode: { oneOf: [{ type: 'integer' }, { type: 'null' }] }, stdout: { type: 'string' }, stderr: { type: 'string' }, truncated: { type: 'boolean' }, durationMs: { type: 'integer' } },
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'exec', required: true }, command: { type: 'string' }, jobId: { type: 'string' }, exitCode: { oneOf: [{ type: 'integer' }, { type: 'null' }] }, stdout: { type: 'string' }, stderr: { type: 'string' }, truncated: { type: 'boolean' }, elevated: { type: 'string' }, durationMs: { type: 'integer' } },
           },
           {
             type: 'object',
@@ -610,6 +634,8 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           if (call.maxBytes !== undefined) params.maxOutputBytes = call.maxBytes
           if (call.tty === true) params.tty = true
           if (call.input !== undefined) params.input = call.input
+          if (call.as !== undefined) params.as = call.as
+          if (call.su === true) params.su = true
           if (call.background === true) {
             // Handed to the job registry: the call answers with an id, and the
             // conversation reads and stops it with the harness's own job tools.
@@ -777,6 +803,7 @@ function listedResult(
       ...(row.allowedCommands === undefined ? {} : { allowedCommands: [...row.allowedCommands] }),
       hasPassword: row.secrets?.password === true,
       hasPassphrase: row.secrets?.passphrase === true,
+      hasRoot: row.secrets?.root === true,
       ...(row.lastProbe === undefined ? {} : { lastProbe: `${row.lastProbe.status} at ${row.lastProbe.at}` }),
     })),
     ...(selected === undefined ? {} : {
@@ -810,9 +837,16 @@ function runResult(result: Awaited<ReturnType<Ops['runCommand']>>): Record<strin
     ...(run.stdout === undefined ? {} : { stdout: run.stdout }),
     ...(run.stderr === undefined ? {} : { stderr: run.stderr }),
     ...(run.truncated === undefined ? {} : { truncated: run.truncated }),
+    ...(run.elevated === undefined ? {} : { elevated: run.elevated }),
     ...(run.durationMs === undefined ? {} : { durationMs: run.durationMs }),
     ...(failed ? { message: runHint(run.status, run.stderr) } : {}),
-    ...(failed && run.status === 'auth-failed' ? { hint: 'Check the stored password, or switch the target to a key its agent already holds.' } : {}),
+    ...(failed && run.status === 'auth-failed'
+      ? {
+          hint: run.elevated !== undefined
+            ? 'The elevation prompt could not be answered: the stored password this call spent (login for sudo, root for su) is wrong or missing.'
+            : 'Check the stored password, or switch the target to a key its agent already holds.',
+        }
+      : {}),
   }
 }
 
@@ -874,6 +908,7 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
           Array.isArray(row.allowedCommands) && row.allowedCommands.length > 0 ? `allowlist=${row.allowedCommands.join(',')}` : 'allowlist=none(ask every command)',
           row.hasPassword === true ? 'password stored' : '',
           row.hasPassphrase === true ? 'passphrase stored' : '',
+          row.hasRoot === true ? 'root password stored' : '',
           typeof row.lastProbe === 'string' ? `last probe: ${row.lastProbe}` : '',
         ].filter(Boolean)
         lines.push(`- ${bits.join(' · ')}`)
@@ -892,6 +927,7 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
       if (stdout !== '') lines.push(stdout.replace(/\n$/u, ''))
       if (stderr !== '') lines.push(`[stderr] ${stderr.replace(/\n$/u, '')}`)
       const bits = [`status=${String(value.status)}`]
+      if (typeof value.elevated === 'string') bits.push(`elevated=${String(value.elevated)}`)
       // A command left running has no exit code yet, and saying `exit=null` reads
       // like a result rather than like a promise about the future.
       if (typeof value.jobId !== 'string') bits.push(`exit=${String(value.exitCode ?? 'null')}`)

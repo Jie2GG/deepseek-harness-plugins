@@ -112,7 +112,7 @@ Body `{ method, params? }`, result `{ ok: true, result }` or
 | `save` | `{ connection, secrets? }` (no `id` = create) | `{ connection, connections }` |
 | `remove` | `{ id }` | `{ removed, orphanSecrets, connections }` |
 | `probe` | `{ id }` or `{ draft, secrets? }` | `{ connection?, probe?, connections }` |
-| `run` | `{ command, target?, sessionId?, timeoutMs?, maxOutputBytes?, tty?, input? }` | `{ run, connection?, connections }` |
+| `run` | `{ command, target?, sessionId?, timeoutMs?, maxOutputBytes?, tty?, input?, as?, su? }` | `{ run, connection?, connections }` |
 | `resolve` | `{ target?, sessionId? }` | `{ action: 'resolve', ok, target, resolved, stored, differs, text? }` |
 | `upload` / `download` | `{ path, localPath, localDir?, target?, sessionId?, recursive?, overwrite?, maxBytes?, timeoutMs? }` | the transfer result |
 | `setSessionTarget` / `clearSessionTarget` | `{ sessionId, targetId? }` | `{ sessionTarget }` |
@@ -124,7 +124,7 @@ owner peer of the served page is admitted and every other principal is refused.
 
 A connection row is `{ id, label, host, user?, port?, identityFile?, proxyJump?,
 extraArgs?, note?, createdAt, updatedAt, lastProbe?, auth }` plus
-`secrets: { password, passphrase }`. `auth` is `key` or `password` on write;
+`secrets: { password, passphrase, root }`. `auth` is `key` or `password` on write;
 `key+password` is still read (it was offered in 0.4.0 only) and probes as it
 always did. `secrets` is presence only — no response ever carries a stored value,
 and a `secrets` patch writes a string, forgets a `null`, and leaves an absent key
@@ -184,15 +184,17 @@ as `bad-input` rather than quietly dropped.
 
 ### Credentials
 
-Passwords and key passphrases do not live in the storage domain. `secrets.ts`
-keeps them as `grant` records in the credential store — `credentialKey('ssh',
-'<target-id>-password')` and `…-passphrase`, so `$DSH_HOME/.credentials.yaml`
-under `records:` — written with `modifyRecord`, removed with `deleteRecord`
-(deleting a target forgets both slots), and read back only when a probe needs a
-value. The seam's rules that matter here: each key segment must match
-`^[a-z][a-z0-9-]*$` (which is why target ids are `ssh-<10 hex>`), a mutate
-callback returns a promise, an empty value is absent rather than blank, and the
-store file must carry no permission bits outside its owner.
+Passwords, key passphrases, and the root account's own password do not live in
+the storage domain. `secrets.ts` keeps them as `grant` records in the credential
+store — `credentialKey('ssh', '<target-id>-password')`, `…-passphrase`, and
+since 0.0.20 `…-root` (the secret `su` elevation answers with), so
+`$DSH_HOME/.credentials.yaml` under `records:` — written with `modifyRecord`,
+removed with `deleteRecord` (deleting a target forgets all three slots), and
+read back only when a probe or an elevated call needs a value. The seam's rules
+that matter here: each key segment must match `^[a-z][a-z0-9-]*$` (which is why
+target ids are `ssh-<10 hex>`), a mutate callback returns a promise, an empty
+value is absent rather than blank, and the store file must carry no permission
+bits outside its owner.
 
 `askpass.ts` materializes the helper that lets `ssh` ask for one of those secrets
 with no terminal: `mkdtemp($TMPDIR/dsh-ssh-askpass-)` at mode `0700`, one
@@ -215,6 +217,7 @@ bundle is the live proof of that).
 | `command` / `path` / `content` | the remote command line, an absolute remote path, and the exact text to write |
 | `background` | for `exec`: leave the command running and return its job id; poll with `job_output`, stop with `job_kill` |
 | `tty` / `input` | for `exec`: run under `ssh -tt` (for a command that inspects its own output), and text fed to its stdin |
+| `as` / `su` | for `exec`: elevation — `as: "<account>"` prefixes sudo (forcing `tty` and injecting the stored login password as the answer; `sudo -n` when no password is stored), `su: true` runs the command inside `su root -c` answered with the stored root password; an explicit `input` overrides either injection, and both never appear in results or transcripts |
 | `localPath` / `recursive` | for `upload` and `download`: the workspace-side path, and whether a directory moves |
 | `oldText` / `newText` | for `edit`: the exact text to find (copied from a read) and its replacement; an empty `newText` deletes |
 | `all` / `replaceFirst` / `backup` | for `edit`: replace every occurrence / only the first / skip the `<path>.dsh-bak` copy |
@@ -228,10 +231,10 @@ Two notes on that field table, both pinned by `tests/tool.test.mjs`:
   conversation's choice (`rememberSessionTarget` writes the `sessions` row only
   for a call that succeeded and named a server on purpose), so the next call can
   leave `target` out.
-- The `parameters` schema now declares all twenty fields the body reads; until
+- The `parameters` schema now declares all twenty-two fields the body reads; until
   0.0.16 the seven the `edit` and prompt-answering calls use (`oldText`, `newText`,
   `all`, `replaceFirst`, `backup`, `tty`, `input`) arrived undeclared and survived
-  only the defensive reader.
+  only the defensive reader, and 0.0.20 added `as`/`su` alongside them.
 
 Policy is decided in `tools/pre-execute`, not inside the tool, which is what the
 tool-authoring docs prescribe for deployment policy:
@@ -239,6 +242,7 @@ tool-authoring docs prescribe for deployment policy:
 | Call | Verdict |
 | --- | --- |
 | `get_connection`, `read` (a listing or a file's text), `download` | allow |
+| `exec` carrying `as` or `su` | **ask, always** — sudo is a master key, and an allowlist hit on the inner program never consented to another account; the prompt names the account and which stored secret it will spend |
 | `exec`, its one bare leading program is on a **non-empty** `allowedCommands` | allow — the same verdict applies to a backgrounded command |
 | `exec`, any other command: an unlisted program, an **empty allowlist** (what a fresh target has, so every command is asked), or a pipeline / redirection / substitution (no single leading program) | **ask** |
 | any `ask`, in a conversation whose approval policy is `never` | **allow** — the core rejects unanswered asks by policy, so asking there is a self-inflicted refusal |
@@ -367,7 +371,7 @@ still open:
    remote call keeps rendering in the harness's generic tool row — see the note
    under **Verified contracts**.
 
-## Limits of 0.0.19
+## Limits of 0.0.20
 
 - The settings page is inventory, probes, resolve, and ceilings only: running
   commands, editing files, and moving bytes reach the server through the
@@ -390,7 +394,10 @@ still open:
   stopping the job, ending the conversation, or restarting the Host ends the
   remote command, and `job_kill` interrupts the local client — whether the
   server-side process dies with the session is the server's choice. There is no
-  terminal to type into live.
+  terminal to type into live. Elevation (`as`/`su`) answers prompts through that
+  same stdin, so it is a foreground-only feature: a backgrounded command with
+  `as`/`su` is refused with a hint, and still works if the server runs NOPASSWD
+  and the command says `sudo` itself.
 - `edit` refuses a file larger than the read ceiling rather than replacing text it
   never saw, and `write` / `edit` / `upload` change the server in place: nothing
   there is versioned beyond the optional `<path>.dsh-bak` copy an `edit` takes.

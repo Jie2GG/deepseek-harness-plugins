@@ -99,6 +99,7 @@ window.__ModuleLoader__.load({
         keyFileLabel: 'Private key file',
         passphraseLabel: 'Key passphrase',
         passwordLabel: 'Login password',
+        rootLabel: 'Root password (for su)',
         advanced: 'Advanced options',
         advancedHint: 'Jump host, extra ssh arguments, and a note.',
         fProxy: 'Jump host',
@@ -113,6 +114,7 @@ window.__ModuleLoader__.load({
         hideSecret: 'Hide',
         secretSet: 'password stored',
         passphraseSet: 'passphrase stored',
+        rootSet: 'root password stored',
         test: 'Test',
         testDraft: 'Test before saving',
         edit: 'Edit',
@@ -215,6 +217,7 @@ window.__ModuleLoader__.load({
         keyFileLabel: '私钥文件',
         passphraseLabel: '私钥口令',
         passwordLabel: '登录密码',
+        rootLabel: 'root 密码（su 提权用）',
         advanced: '高级选项',
         advancedHint: '跳板主机、额外 ssh 参数、备注。',
         fProxy: '跳板主机',
@@ -229,6 +232,7 @@ window.__ModuleLoader__.load({
         hideSecret: '隐藏',
         secretSet: '已存密码',
         passphraseSet: '已存口令',
+        rootSet: '已存 root 密码',
         test: '测试',
         testDraft: '保存前先测试',
         edit: '编辑',
@@ -541,15 +545,19 @@ window.__ModuleLoader__.load({
           identityFile: '',
           passphrase: '',
           password: '',
+          root: '',
           clearPassphrase: false,
           clearPassword: false,
+          clearRoot: false,
           showPassphrase: false,
           showPassword: false,
+          showRoot: false,
           proxyJump: '',
           extraArgsText: '',
           note: '',
           hadPassphrase: false,
           hadPassword: false,
+          hadRoot: false,
         }
       }
       return {
@@ -560,15 +568,19 @@ window.__ModuleLoader__.load({
         identityFile: record.identityFile ?? '',
         passphrase: '',
         password: '',
+        root: '',
         clearPassphrase: false,
         clearPassword: false,
+        clearRoot: false,
         showPassphrase: false,
         showPassword: false,
+        showRoot: false,
         proxyJump: record.proxyJump ?? '',
         extraArgsText: (record.extraArgs ?? []).join('\n'),
         note: record.note ?? '',
         hadPassphrase: record.secrets?.passphrase === true,
         hadPassword: record.secrets?.password === true,
+        hadRoot: record.secrets?.root === true,
       }
     }
 
@@ -615,6 +627,8 @@ window.__ModuleLoader__.load({
       else if ((draft.passphrase ?? '') !== '') patch.passphrase = draft.passphrase
       if (draft.clearPassword) patch.password = null
       else if ((draft.password ?? '') !== '') patch.password = draft.password
+      if (draft.clearRoot) patch.root = null
+      else if ((draft.root ?? '') !== '') patch.root = draft.root
       return Object.keys(patch).length === 0 ? undefined : patch
     }
 
@@ -1192,6 +1206,7 @@ window.__ModuleLoader__.load({
         const chips: any[] = record.auth === undefined ? [] : [h('span', { class: 'dshssh-chip', key: 'auth' }, t(AUTH_LABEL[record.auth] ?? 'authKey'))]
         if (record.secrets?.passphrase === true) chips.push(h('span', { class: 'dshssh-chip', 'data-tone': 'secret', key: 'passphrase' }, t('passphraseSet')))
         if (record.secrets?.password === true) chips.push(h('span', { class: 'dshssh-chip', 'data-tone': 'secret', key: 'password' }, t('secretSet')))
+        if (record.secrets?.root === true) chips.push(h('span', { class: 'dshssh-chip', 'data-tone': 'secret', key: 'root' }, t('rootSet')))
         if (record.proxyJump !== undefined) chips.push(h('span', { class: 'dshssh-chip', key: 'jump' }, `via ${record.proxyJump}`))
         return h('div', { class: 'dshssh-row', key: record.id },
           h('div', { class: 'dshssh-row-main' },
@@ -1401,6 +1416,18 @@ window.__ModuleLoader__.load({
             onChange: patch('password'),
             onToggleClear: (checked: boolean) => { setDraft((current: any) => ({ ...current, clearPassword: checked })) },
             onToggleShow: () => { setDraft((current: any) => ({ ...current, showPassword: !(current.showPassword === true) })) },
+          }) : null,
+          showAuth ? h(secretField, {
+            label: `${t('rootLabel')} (${t('fOptional')})`,
+            value: draft.root ?? '',
+            had: draft.hadRoot === true,
+            cleared: draft.clearRoot === true,
+            shown: draft.showRoot === true,
+            disabled,
+            errorText: fieldError === 'root' ? t('hintBadInput') : undefined,
+            onChange: patch('root'),
+            onToggleClear: (checked: boolean) => { setDraft((current: any) => ({ ...current, clearRoot: checked })) },
+            onToggleShow: () => { setDraft((current: any) => ({ ...current, showRoot: !(current.showRoot === true) })) },
           }) : null,
           h(TextField, {
             label: `${t('labelField')} (${t('fOptional')})`,

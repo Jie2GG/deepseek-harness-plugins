@@ -110,7 +110,7 @@ export function record (over = {}) {
   }
 }
 
-export function fakeSecrets (status = { password: false, passphrase: false }, values = {}) {
+export function fakeSecrets (status = { password: false, passphrase: false, root: false }, values = {}) {
   return {
     applied: [],
     async status () { return status },

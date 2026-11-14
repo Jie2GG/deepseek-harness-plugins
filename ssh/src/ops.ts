@@ -17,7 +17,7 @@ import { transfer } from './transfer.ts'
 import { applyEdit } from './edit.ts'
 import { startRemoteJob } from './jobs.ts'
 import type { JobRegistry } from './jobs.ts'
-import { shellQuote } from './transport.ts'
+import { shellQuote, leadingProgram } from './transport.ts'
 import type { RemoteAuth, RemoteTarget, SshTransport } from './transport.ts'
 import type { TargetStore } from './store.ts'
 import type { TargetSecrets } from './secrets.ts'
@@ -337,7 +337,7 @@ export function createOps(deps: OpsDeps): Ops {
   /** One stored record as the page sees it. */
   async function viewOf(state: TargetStore, record: ConnectionRecord): Promise<ConnectionView> {
     const holder = secrets()
-    const slots = holder === undefined ? { password: false, passphrase: false } : await holder.status(record.id)
+    const slots = holder === undefined ? { password: false, passphrase: false, root: false } : await holder.status(record.id)
     return { ...record, secrets: slots }
   }
 
@@ -783,12 +783,53 @@ export function createOps(deps: OpsDeps): Ops {
         ...(record.maxOutputBytes === undefined ? {} : { maxOutputBytes: record.maxOutputBytes }),
       }
       const auth = await authFor(record.id, record.auth)
-      const run = await runner.run(targetOf(record), settings, auth, input.command, {
+      // Elevation assembly. Both mechanisms need an answer at a prompt, and the
+      // plugin holds secrets the model never sees: `as` reaches an account
+      // through sudo answered with the stored login password, `su` reaches root
+      // through its own stored root password. Either forces a pseudo-terminal
+      // so the prompt actually reaches the injected stdin, and neither ever
+      // echoes the secret back — the result reports stdinBytes, like any other
+      // stdin use.
+      let command = input.command
+      let tty = input.tty
+      let stdin = input.input
+      let elevated: string | undefined
+      const holder = secrets()
+      if (input.as !== undefined) {
+        elevated = input.as
+        const stored = holder === undefined ? undefined : await holder.read(record.id, 'password')
+        const willAnswer = stdin !== undefined || stored !== undefined
+        // A caller who wrote their own sudo line keeps it verbatim; the prefix
+        // only arrives when the command is an ordinary one. Without a password
+        // to inject, sudo runs with -n so a NOPASSWD host answers immediately
+        // and a prompting one fails fast instead of waiting out the deadline.
+        if (leadingProgram(command) !== 'sudo') {
+          const head = willAnswer ? 'sudo' : 'sudo -n'
+          command = input.as === 'root' ? `${head} ${command}` : `${head} -u ${shellQuote(input.as)} ${command}`
+        }
+        tty = true
+        if (stdin === undefined && stored !== undefined) stdin = `${stored}\n`
+      } else if (input.su === true) {
+        elevated = 'su:root'
+        if (holder === undefined) throw new SshError('secret-error', 'su needs the credential store for the root password, and this Host does not expose one.')
+        const rootPassword = stdin === undefined ? await holder.read(record.id, 'root') : undefined
+        if (stdin === undefined && rootPassword === undefined) {
+          throw new SshError('bad-input', `"${record.label}" has no stored root password, so a su prompt could not be answered.`, {
+            field: 'su',
+            hint: 'Save the root password in the target form, or use as: "root" — sudo answers with the login password instead.',
+          })
+        }
+        if (leadingProgram(command) !== 'su') command = `su root -c ${shellQuote(command)}`
+        tty = true
+        if (stdin === undefined && rootPassword !== undefined) stdin = `${rootPassword}\n`
+      }
+      const run = await runner.run(targetOf(record), settings, auth, command, {
         ...(input.timeoutMs === undefined && record.remoteTimeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs ?? record.remoteTimeoutMs }),
         ...(record.maxOutputBytes === undefined ? {} : { maxOutputBytes: record.maxOutputBytes }),
-        ...(input.tty === undefined ? {} : { tty: input.tty }),
-        ...(input.input === undefined ? {} : { stdin: input.input }),
+        ...(tty === undefined ? {} : { tty }),
+        ...(stdin === undefined ? {} : { stdin }),
       })
+      if (elevated !== undefined) run.elevated = elevated
       const connection = await viewOf(state, record)
       return { run, connection, connections: await viewsOf(state) }
     },
@@ -991,6 +1032,15 @@ export function createOps(deps: OpsDeps): Ops {
       const record = pickTarget(state, params)
       if (record.agentAccess === 'off') {
         throw new SshError('bad-input', `"${record.label}" is set to agent access off, so no remote command may run on it.`, { field: 'target', hint: 'Turn agent access on for this target in the settings page.' })
+      }
+      // A backgrounded job streams output but has no stdin channel, so the
+      // plugin cannot answer a sudo or su prompt for it — say so up front
+      // instead of leaving the job waiting on a prompt until its deadline.
+      if (input.as !== undefined || input.su === true) {
+        throw new SshError('bad-input', 'A backgrounded command has no stdin channel, so the plugin cannot inject an elevation password for it.', {
+          field: 'background',
+          hint: 'Run it in the foreground with as/su, or write the sudo into the command and rely on a NOPASSWD policy.',
+        })
       }
       if (jobs === undefined) {
         throw new SshError('bad-input', 'This profile has no job registry, so a remote command cannot be left running in the background.', {

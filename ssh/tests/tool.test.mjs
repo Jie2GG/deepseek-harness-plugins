@@ -41,6 +41,8 @@ test('describeRemote matches decideAccess on the empty-allowlist rule', () => {
   // The corrected sentence: listed bare program runs unasked; empty list asks.
   assert.match(text, /runs unasked only when its one bare leading program is named by that target's command allowlist/)
   assert.match(text, /a fresh target names no programs there, so every command on it is asked about first/)
+  assert.match(text, /Pass `as: "root"` \(or another account\) to elevate through sudo/)
+  assert.match(text, /no password ever appears in the conversation/)
   assert.doesNotMatch(text, /runs freely unless/)
   assert.match(text, /`Proxy` \(deploy@10\.0\.0\.9\)/)
   const verdict = decideAccess(snapshot(), { action: 'exec', command: 'uptime' })
@@ -63,11 +65,12 @@ test('the rendered inventory line tells the model an empty allowlist asks', () =
     action: 'get_connection',
     ok: true,
     count: 1,
-    targets: [{ id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9', auth: 'key', agentAccess: 'on', allowedCommands: ['git', 'uptime'], hasPassword: true, hasPassphrase: false }],
+    targets: [{ id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9', auth: 'key', agentAccess: 'on', allowedCommands: ['git', 'uptime'], hasPassword: true, hasPassphrase: false, hasRoot: true }],
     message: ''
   })
   assert.match(listed[0].text, /allowlist=git,uptime/)
   assert.match(listed[0].text, /password stored/)
+  assert.match(listed[0].text, /root password stored/)
 })
 
 // ── ② every field the body consumes is now declared in parameters ──────────
@@ -78,10 +81,10 @@ test('parameters declare all twenty fields the body reads', () => {
   const declared = Object.keys(definition.parameters.properties)
   for (const field of ['action', 'target', 'command', 'path', 'content', 'overwrite', 'append', 'mkdir',
     'localPath', 'recursive', 'timeoutMs', 'background', 'maxBytes', 'tty', 'input',
-    'oldText', 'newText', 'all', 'replaceFirst', 'backup']) {
+    'oldText', 'newText', 'all', 'replaceFirst', 'backup', 'as', 'su']) {
     assert.ok(declared.includes(field), `parameters schema is missing "${field}"`)
   }
-  assert.equal(declared.length, 20)
+  assert.equal(declared.length, 22)
   // The action enum and the required action field keep the shape honest.
   assert.deepEqual([...definition.parameters.properties.action.enum], [...REMOTE_TOOL_ACTIONS])
   assert.ok(definition.parameters.required.includes('action'))
@@ -120,6 +123,24 @@ test('reads are allowed, writes are asked, the off switch denies', () => {
   assert.match(ask.reason, /Run on 10\.0\.0\.9: reboot/)
 })
 
+test('elevation always asks, names the account, and says which secret it spends', () => {
+  // Even when the inner command is fully allowlisted: sudo is a master key, and
+  // a hit on systemctl does not consent to running it as another account.
+  const sudo = decideAccess(snapshot({ allowedCommands: ['systemctl'] }), { action: 'exec', command: 'systemctl restart nginx', as: 'root' })
+  assert.equal(sudo.verdict, 'ask')
+  assert.match(sudo.reason, /Run elevated as root on deploy@10\.0\.0\.9/)
+  assert.match(sudo.display.en, /sudo, with the stored login password/)
+  assert.match(sudo.display.zh, /sudo：用已存的登录密码应答/)
+  const su = decideAccess(snapshot({ allowedCommands: ['id'] }), { action: 'exec', command: 'id', su: true })
+  assert.equal(su.verdict, 'ask')
+  assert.match(su.display.en, /su, with the stored root password/)
+  // A foreign account shows up in the human prompt too.
+  const pg = decideAccess(snapshot(), { action: 'exec', command: 'psql', as: 'postgres' })
+  assert.match(pg.reason, /elevated as postgres/)
+  // No elevation flags keeps the plain matrix: allowlist hits run free.
+  assert.equal(decideAccess(snapshot({ allowedCommands: ['systemctl'] }), { action: 'exec', command: 'systemctl status' }).verdict, 'allow')
+})
+
 test('findTarget mirrors ops.pickTarget: reference, then session, then lone row', () => {
   const two = [snapshot(), snapshot({ id: 'ssh-b2c3d4e5f6', label: 'Build', host: '10.0.0.8', user: undefined })]
   assert.equal(findTarget(two, { target: 'ssh-a1b2c3d4e5' })?.id, 'ssh-a1b2c3d4e5')
@@ -141,13 +162,15 @@ test('readArgs survives a malformed call without throwing or inventing values', 
     name: 'ssh_client',
     arguments: {
       action: 'read', path: '/tmp/x', timeoutMs: '5000', maxBytes: NaN, background: 'yes',
-      recursive: true, mkdir: false, newText: '', input: 42, all: 'true'
+      recursive: true, mkdir: false, newText: '', input: 42, all: 'true', as: 'postgres', su: 'yes'
     }
   })
   assert.equal(typed.action, 'read')
   assert.equal(typed.timeoutMs, undefined) // a string is not a number
   assert.equal(typed.maxBytes, undefined) // NaN is not finite
   assert.equal(typed.background, undefined) // 'yes' is not a boolean
+  assert.equal(typed.su, undefined) // 'yes' is not a boolean here either
+  assert.equal(typed.as, 'postgres')
   assert.equal(typed.recursive, true)
   assert.equal(typed.mkdir, false)
   assert.equal(typed.newText, '') // empty replacement text survives (it deletes)
@@ -291,6 +314,22 @@ test('exec: backgrounding hands over the job identity and omits a premature exit
   const rendered = definition.output.render({ action: 'exec', command: 'make world' }, payload)[0].text
   assert.match(rendered, /Left running in the background as job ssh-j1/)
   assert.doesNotMatch(rendered, /exit=/) // a running command has no exit code to show
+})
+
+test('elevated exec echoes the account and swaps the credential hint', async () => {
+  const ops = fakeOps()
+  ops.runCommand = async () => ({
+    run: { status: 'auth-failed', at: 'x', exitCode: 1, stdout: '', stderr: 'sudo: 1 incorrect password attempt', durationMs: 40, elevated: 'root' },
+    connection: { id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9' },
+  })
+  const { definition, exec } = toolHarness(ops)
+  const payload = await definition.execute({ action: 'exec', command: 'apt update', as: 'root' }, exec)
+  assert.equal(payload.ok, false)
+  assert.equal(payload.elevated, 'root')
+  assert.match(payload.hint, /elevation prompt/)
+  assertPayloadValid(definition.output.schema, payload)
+  const rendered = definition.output.render({ action: 'exec', command: 'apt update' }, payload)[0].text
+  assert.match(rendered, /elevated=root/)
 })
 
 test('exec without a command, and the file actions without a path, refuse at the boundary', async () => {
