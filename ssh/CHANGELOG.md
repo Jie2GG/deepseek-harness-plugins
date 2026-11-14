@@ -4,6 +4,36 @@ All notable changes to `@jie2gg/dsh-plugin-ssh` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project uses [semantic versioning](https://semver.org/).
 
+## 0.16.0
+
+### Added
+
+- **A long remote command can be left running.** `exec` takes `background: true`: the
+  command starts, the call answers at once with a job id (`ssh-…`), and the
+  conversation reads and stops it with the harness's own **`job_output`** and
+  **`job_kill`** tools — partial output arrives incrementally from the provider's own
+  stream cursors, a completion notice is delivered when it settles, and a progress line
+  is available while it runs. Nothing new to learn: it is the same job surface a
+  backgrounded shell command uses, so `job_list` shows it too.
+- A backgrounded command keeps the **same permission rules** as a foreground one: the
+  allowlist and the ask-if-unlisted behaviour are unchanged, and naming a target still
+  records it for the conversation.
+- The started result says plainly what to do next and no longer claims an exit code the
+  command has not produced yet.
+
+### Notes
+
+- What this does **not** buy: the connection lives in this process, so stopping the job,
+  the conversation ending, or a Host restart ends the remote command — nothing is
+  double-forked on the server, and there is no shell to type into. A command that needs
+  to survive on its own still wants `nohup … &` or a systemd unit, which `exec` can
+  write for you.
+- A running job occupies one of the plugin's four concurrent remote operations, and the
+  deployment caps active jobs per conversation (ten by default). Both are reported as
+  refusals rather than queueing silently forever.
+- Backgrounding is refused in a profile with no job registry, with a hint to drop the
+  flag; the registry is read through `ctx.get`, so the plugin still activates without it.
+
 ## 0.15.0
 
 ### Added

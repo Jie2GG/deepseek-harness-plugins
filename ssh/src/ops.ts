@@ -10,11 +10,13 @@
  * @module @jie2gg/dsh-plugin-ssh/ops
  */
 
-import { connectionInputSchema, draftSecretSchema, remotePathSchema, transferInputSchema, sessionTargetInputSchema, MAX_CONCURRENT_PROBES, MAX_CONNECTIONS, MAX_MAX_OUTPUT_BYTES, MAX_MAX_TRANSFER_BYTES, MAX_PROBE_TIMEOUT_MS, MAX_REMOTE_TIMEOUT_MS, MIN_MAX_OUTPUT_BYTES, MIN_MAX_TRANSFER_BYTES, MIN_PROBE_TIMEOUT_MS, MIN_REMOTE_TIMEOUT_MS, probeDraftSchema, remoteRunSchema, secretPatchSchema, settingsInputSchema } from './storage.ts'
+import { connectionInputSchema, draftSecretSchema, remotePathSchema, transferInputSchema, sessionTargetInputSchema, BACKGROUND_DEADLINE_MS, MAX_CONCURRENT_PROBES, MAX_CONNECTIONS, MAX_MAX_OUTPUT_BYTES, MAX_MAX_TRANSFER_BYTES, MAX_PROBE_TIMEOUT_MS, MAX_REMOTE_TIMEOUT_MS, MIN_MAX_OUTPUT_BYTES, MIN_MAX_TRANSFER_BYTES, MIN_PROBE_TIMEOUT_MS, MIN_REMOTE_TIMEOUT_MS, probeDraftSchema, remoteRunSchema, secretPatchSchema, settingsInputSchema } from './storage.ts'
 import { SshError } from './types.ts'
 import type { AuthMode, ConnectionRecord, ConnectionView, ProbeOutcome, ResolvedConfig, RemoteRunResult, RemoteTransferResult, SshSettings } from './types.ts'
 import { transfer } from './transfer.ts'
 import { applyEdit } from './edit.ts'
+import { startRemoteJob } from './jobs.ts'
+import type { JobRegistry } from './jobs.ts'
 import { shellQuote } from './transport.ts'
 import type { RemoteAuth, RemoteTarget, SshTransport } from './transport.ts'
 import type { TargetStore } from './store.ts'
@@ -25,6 +27,26 @@ const PROBE_ALL_LIMIT = 12
 
 /** Plain JSON parameters as the route decoded them. */
 export type Params = Record<string, unknown>
+
+/** What starting a backgrounded remote command reports. */
+export interface BackgroundRunResult {
+  /** Always `exec`, because this is one way to run a command. */
+  action: 'exec'
+  /** Whether the job started. */
+  ok: boolean
+  /** `started` while it is running in the background. */
+  status: 'started'
+  /** The target the command runs on. */
+  target: { id: string; label: string; host: string }
+  /** The command line that was handed over. */
+  command: string
+  /** The registry-issued id the reader polls with. */
+  jobId: string
+  /** What to do next. */
+  hint?: string | undefined
+  /** The refreshed inventory, for the page. */
+  connections: ConnectionView[]
+}
 
 /** What one `ssh -G` resolution reports. */
 export interface ResolveResult {
@@ -139,6 +161,8 @@ export interface Ops {
   runCommand(params: Params): Promise<{ run: RemoteRunResult; connection?: ConnectionView | undefined; connections: ConnectionView[] }>
   /** Ask the local OpenSSH client what this target really resolves to. */
   resolveRemote(params: Params): Promise<ResolveResult>
+  /** Start one remote command as a background job and return its id. */
+  execBackground(params: Params): Promise<BackgroundRunResult>
   /** Push one local file or directory to the server. */
   upload(params: Params): Promise<RemoteTransferResult>
   /** Pull one remote file into the conversation's workspace. */
@@ -177,6 +201,8 @@ export interface OpsDeps {
   onInventoryChanged?: (() => void) | undefined
   /** Optional per-call overrides the tool layer passes down. */
   options?: FileCallOptions
+  /** The harness job registry, when the profile mounts one. */
+  jobs?: JobRegistry | undefined
 }
 
 /**
@@ -306,6 +332,7 @@ export function createOps(deps: OpsDeps): Ops {
   const options = deps.options ?? {}
   const localExists = deps.localExists
   const inventoryChanged = deps.onInventoryChanged
+  const jobs = deps.jobs
 
   /** One stored record as the page sees it. */
   async function viewOf(state: TargetStore, record: ConnectionRecord): Promise<ConnectionView> {
@@ -943,6 +970,77 @@ export function createOps(deps: OpsDeps): Ops {
         differs: resolvedDiffers(resolved, stored),
         ...(collected.stdout.trim() === '' ? {} : { text: collected.stdout.trim().split('\n').slice(0, 220).join('\n') }),
         durationMs: collected.durationMs,
+      }
+    },
+
+    async execBackground(params: Params): Promise<BackgroundRunResult> {
+      const state = await store()
+      const globalSettings = state.settings()
+      let input: ReturnType<typeof remoteRunSchema.parse>
+      try {
+        input = remoteRunSchema.parse(params.command !== undefined ? params : { command: params })
+      } catch (error: unknown) {
+        throw new SshError('bad-input', messageOf(error), { field: fieldOf(error) ?? 'command', hint: 'Fix the reported value and try again.' })
+      }
+      const record = pickTarget(state, params)
+      if (record.agentAccess === 'off') {
+        throw new SshError('bad-input', `"${record.label}" is set to agent access off, so no remote command may run on it.`, { field: 'target', hint: 'Turn agent access on for this target in the settings page.' })
+      }
+      if (jobs === undefined) {
+        throw new SshError('bad-input', 'This profile has no job registry, so a remote command cannot be left running in the background.', {
+          field: 'background',
+          hint: 'Drop background and the same command runs and waits as usual.',
+        })
+      }
+      const settings: SshSettings = {
+        ...globalSettings,
+        ...(record.maxOutputBytes === undefined ? {} : { maxOutputBytes: record.maxOutputBytes }),
+      }
+      const auth = await authFor(record.id, record.auth)
+      const owner = typeof input.sessionId === 'string' ? input.sessionId : undefined
+      const toolCall = typeof params.callId === 'string' && typeof params.rootCallId === 'string'
+        ? { callId: params.callId, rootCallId: params.rootCallId }
+        : undefined
+      // A backgrounded command is not bounded by the foreground deadline: the whole
+      // point is to outlive one reply. It still ends when the reader stops it, when
+      // the conversation that owns it goes away, or when the Host process exits.
+      const deadline = input.timeoutMs ?? Math.max(BACKGROUND_DEADLINE_MS, settings.remoteTimeoutMs)
+      const label = `${record.label}: ${input.command}`
+      const jobId = startRemoteJob(jobs, {
+        label,
+        ...(owner === undefined ? {} : { owner }),
+        ...(toolCall === undefined ? {} : { toolCall }),
+        start: async () => {
+          const live = await runner.startRun(targetOf(record), settings, auth, input.command, {
+            timeoutMs: deadline,
+            ...(input.tty === undefined ? {} : { tty: input.tty }),
+          })
+          if (live === undefined) {
+            return { message: `Could not resolve the ssh executable "${settings.command}".` }
+          }
+          return {
+            sources: live.sources.map(source => ({
+              channel: source.channel,
+              read: (fromByte: number) => {
+                const read = source.read(fromByte)
+                return { text: read.text, nextOffset: read.nextOffset, lossy: read.lossy, ...(read.spillPath === undefined ? {} : { spillPath: read.spillPath }) }
+              },
+            })),
+            kill: live.kill,
+            finished: live.finished,
+          }
+        },
+      })
+      const target = { id: record.id, label: record.label, host: record.host }
+      return {
+        action: 'exec',
+        ok: true,
+        status: 'started',
+        target,
+        command: input.command,
+        jobId,
+        hint: 'Read it with the `job_output` tool and stop it with `job_kill`; it also dies with this conversation.',
+        connections: await viewsOf(state),
       }
     },
 

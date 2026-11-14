@@ -52,6 +52,9 @@ export const DEFAULT_PROBE_TIMEOUT_MS = 10_000
 export const MIN_PROBE_TIMEOUT_MS = 1_000
 export const MAX_PROBE_TIMEOUT_MS = 120_000
 
+/** How long one backgrounded remote command may run before it is called timed out. */
+export const BACKGROUND_DEADLINE_MS = 1_800_000
+
 /** Remote command deadline bounds, in whole milliseconds. */
 export const DEFAULT_REMOTE_TIMEOUT_MS = 30_000
 export const MIN_REMOTE_TIMEOUT_MS = 1_000

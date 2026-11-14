@@ -78,6 +78,7 @@ What runs without interrupting you:
 | list a directory, read a file, download, or ask which server this is (`get_connection`) | runs immediately |
 | a command whose program is on that target's **command allowlist**, or any command where the target lists no allowlist | runs immediately |
 | an edit of a remote file (exact text, refused when it matches more than once) | asks you first |
+| a command left running in the background (`background: true`) | the same verdict as the same command run in the foreground |
 | any other command, and any write or upload | asks you first, in your language, showing the server and the exact command or path |
 | anything against a target with **agent access** turned off | refused |
 
@@ -189,9 +190,11 @@ ignored.
   upgraded by this plugin.
 - A remote call is waited for: there is no terminal to type into live and no
   background job to poll. A command that needs a terminal can be given one
-  (`tty: true`), and one that needs an answer can be handed it (`input: "…"`), but the
-  call still runs to completion or its deadline — a session you converse with, and a
-  job you leave and come back to, are what is missing.
+  (`tty: true`) and handed its answer (`input: "…"`). A command that will outlive one
+  reply can be left running with `background: true`, which returns a job id to poll with
+  `job_output` and stop with `job_kill`. What is still missing is a terminal you type
+  into live, and a command that keeps running on the server after this conversation
+  ends — that one wants `nohup` or a systemd unit, which `exec` can set up.
 - After the plugin package is replaced, the running Host keeps its previous module
   until it restarts: before that, the agent has no `ssh` tool and new ceilings
   are not in effect. The settings page follows the browser bundle and updates on its

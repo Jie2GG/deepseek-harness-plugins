@@ -176,6 +176,67 @@ export function tail(stdout: string, stderr: string): string | undefined {
   return text.length <= DETAIL_LIMIT ? text : text.slice(-DETAIL_LIMIT)
 }
 
+/**
+ * The part of the provider's child handle this transport uses, stated locally.
+ *
+ * Written by hand rather than imported: a plugin resolves its own copy of the
+ * subprocess package, and a nominal type from one copy does not satisfy the other,
+ * which is how an unrelated call site would start failing to compile.
+ */
+interface ChildHandle {
+  /** Resolves when the child is gone, with the exit classification. */
+  done: Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>
+  /** Streams the provider retains, readable from any offset. */
+  collected: {
+    stdout?: { readFrom(offset: number): { text: string; nextOffset: number; lossy: boolean; spillPath?: string | undefined } } | undefined
+    stderr?: { readFrom(offset: number): { text: string; nextOffset: number; lossy: boolean; spillPath?: string | undefined } } | undefined
+  }
+  /** Starts the managed interrupt of the whole process range. */
+  terminate(): void
+  /** Waits out that range, bounded by the caller's signal. */
+  waitForExit(signal?: AbortSignal): Promise<boolean>
+}
+
+/** The live controls of one backgrounded remote command. */
+export interface RemoteJob {
+  /** Pull sources shaped for the job registry's pump. */
+  sources: readonly RemoteJobSource[]
+  /** Interrupt the child through the managed range. */
+  kill(): void
+  /** The settled result, once the child has drained. */
+  finished: Promise<Collected>
+}
+
+/** One incrementally readable stream of a backgrounded command. */
+export interface RemoteJobSource {
+  /** Which channel this reads. */
+  channel: 'stdout' | 'stderr'
+  /**
+   * Read from a byte offset.
+   * @param fromByte - the offset a previous read reported, or 0.
+   * @returns the delta, the next offset, whether bytes were lost, and the spill file.
+   */
+  read(fromByte: number): { text: string; nextOffset: number; lossy: boolean; spillPath?: string | undefined }
+}
+
+/**
+ * Wrap the provider's own cursor readers as job output sources.
+ * @param handle - the spawned child.
+ * @returns the two sources the registry can pump.
+ */
+function streamSources(handle: ChildHandle): RemoteJobSource[] {
+  const source = (channel: 'stdout' | 'stderr'): RemoteJobSource => ({
+    channel,
+    read: (fromByte: number) => {
+      const reader = handle.collected[channel]
+      if (reader === undefined) return { text: '', nextOffset: fromByte, lossy: false }
+      const read = reader.readFrom(fromByte)
+      return { text: read.text, nextOffset: read.nextOffset, lossy: read.lossy, ...(read.spillPath === undefined ? {} : { spillPath: read.spillPath }) }
+    },
+  })
+  return [source('stdout'), source('stderr')]
+}
+
 /** What one bounded child produced. */
 export interface Collected {
   outcome: 'exit' | 'timeout' | 'error' | 'cancelled'
@@ -327,37 +388,66 @@ export class SshTransport {
    * @param external - an optional caller signal (a tool call's own cancellation).
    * @returns the outcome class, exit facts, drained streams, and duration.
    */
-  async #collect(
+  /**
+   * Start one child through the provider and wire the cancellation edges.
+   * @param program - the resolved executable.
+   * @param argvTail - the arguments after the executable.
+   * @param settings - the output ceiling the provider retains to.
+   * @param env - extra environment entries, when a secret has to be answered.
+   * @param controller - the lane controller this child is bound to.
+   * @param external - the caller's own signal, which outranks the deadline.
+   * @param stdin - text fed to the child, or nothing when stdin stays closed.
+   * @returns the live handle and the detacher for the caller's signal.
+   */
+  #spawn(
     program: string,
     argvTail: readonly string[],
     settings: SshSettings,
     env: NodeJS.ProcessEnv | undefined,
-    deadlineMs: number,
     controller: AbortController,
-    external?: AbortSignal,
-    stdin?: string,
-  ): Promise<Collected> {
-    const startedAt = Date.now()
-    const maxBytes = settings.maxOutputBytes
+    external: AbortSignal | undefined,
+    stdin: string | undefined,
+  ): { handle: ChildHandle; detach: () => void } {
     const handle = this.#ctx.subprocess.spawn({
       argv: [program, ...argvTail],
       cwd: process.env.HOME ?? process.cwd(),
       stdio: {
         stdin: stdin === undefined ? 'ignore' : { data: stdin },
-        stdout: { maxBytes },
-        stderr: { maxBytes },
+        stdout: { maxBytes: settings.maxOutputBytes },
+        stderr: { maxBytes: settings.maxOutputBytes },
       },
       graceMs: 2_000,
       ...(env === undefined ? {} : { env }),
       signal: controller.signal,
     })
-
     const onExternalAbort = (): void => { controller.abort() }
     if (external !== undefined) {
       if (external.aborted) controller.abort()
       else external.addEventListener('abort', onExternalAbort, { once: true })
     }
+    return { handle, detach: () => { external?.removeEventListener('abort', onExternalAbort) } }
+  }
 
+  /**
+   * Wait for one child to settle, then drain it if the wait was interrupted.
+   *
+   * Shared by a foreground collect and a background job so neither can learn a
+   * different lesson about the provider: reading the streams before the managed
+   * range has drained leaves a timeout or a cancellation with no reason at all.
+   * @param handle - the spawned child.
+   * @param controller - the lane controller, aborted to end the wait.
+   * @param deadlineMs - how long to wait before terminating it.
+   * @param external - the caller's signal, which reads as cancelled rather than timed out.
+   * @param startedAt - the millisecond the wait began.
+   * @returns the settled classification and the drained streams.
+   */
+  async #settleAndDrain(
+    handle: ChildHandle,
+    controller: AbortController,
+    deadlineMs: number,
+    external: AbortSignal | undefined,
+    startedAt: number,
+  ): Promise<Collected> {
     type Settled =
       | { kind: 'exit'; exitCode: number | null; signal: NodeJS.Signals | null }
       | { kind: 'timeout' }
@@ -379,7 +469,6 @@ export class SshTransport {
       })
     } finally {
       if (timer !== undefined) clearTimeout(timer)
-      if (external !== undefined) external.removeEventListener('abort', onExternalAbort)
     }
 
     if (settled.kind !== 'exit') {
@@ -406,6 +495,25 @@ export class SshTransport {
       stderr,
       durationMs: Date.now() - startedAt,
       truncated: stdoutRead?.lossy === true || stderrRead?.lossy === true,
+    }
+  }
+
+  async #collect(
+    program: string,
+    argvTail: readonly string[],
+    settings: SshSettings,
+    env: NodeJS.ProcessEnv | undefined,
+    deadlineMs: number,
+    controller: AbortController,
+    external?: AbortSignal,
+    stdin?: string,
+  ): Promise<Collected> {
+    const startedAt = Date.now()
+    const { handle, detach } = this.#spawn(program, argvTail, settings, env, controller, external, stdin)
+    try {
+      return await this.#settleAndDrain(handle, controller, deadlineMs, external, startedAt)
+    } finally {
+      detach()
     }
   }
 
@@ -536,6 +644,76 @@ export class SshTransport {
     } finally {
       this.#controllers.delete(controller)
       this.#inFlight -= 1
+    }
+  }
+
+  /**
+   * Start one remote command and hand back its live handles instead of waiting.
+   *
+   * This is what a background job needs: the output can be pumped incrementally
+   * from the provider's own cursors, and cancellation reaches the child through the
+   * same managed range a foreground call uses. The lane stays occupied while the
+   * command runs, which is the point — the plugin's ceiling on concurrent remote
+   * operations counts a long job like any other child.
+   * @param target - where to run it.
+   * @param settings - the executable, the retention ceiling, and the defaults.
+   * @param auth - the credentials for this target.
+   * @param command - the command line, executed by the remote login shell.
+   * @param options - the deadline, the caller's signal, and whether to ask for a tty.
+   * @returns the sources, a killer, and the settled result, or `undefined` when the
+   *   executable cannot be resolved.
+   */
+  async startRun(
+    target: RemoteTarget,
+    settings: SshSettings,
+    auth: RemoteAuth,
+    command: string,
+    options: {
+      readonly timeoutMs?: number | undefined
+      readonly signal?: AbortSignal | undefined
+      readonly tty?: boolean | undefined
+    } = {},
+  ): Promise<RemoteJob | undefined> {
+    const deadline = Math.max(MIN_REMOTE_TIMEOUT_MS, options.timeoutMs ?? settings.remoteTimeoutMs)
+    const controller = this.#takeLane('background command')
+    const program = await this.resolveExecutable(settings.command, controller.signal)
+    if (program === undefined) {
+      this.#controllers.delete(controller)
+      this.#inFlight -= 1
+      return undefined
+    }
+    // The same option set a foreground call builds, so a backgrounded command
+    // authenticates and trusts the host exactly like the probe for that target does.
+    const { flags, env } = this.sshOptions(target, settings, auth, deadline)
+    const ttyFlags = options.tty === true ? ['-tt'] : []
+    const startedAt = Date.now()
+    const { handle, detach } = this.#spawn(program, [...flags, ...ttyFlags, this.authority(target), command], settings, env, controller, options.signal, undefined)
+    const finished = this.#settleAndDrain(handle, controller, deadline, options.signal, startedAt)
+      .then((result: Collected) => { detach(); return result })
+      .catch((error: unknown) => {
+        detach()
+        return {
+          outcome: 'error' as const,
+          error: error instanceof Error ? error.message : String(error),
+          exitCode: null,
+          signal: null,
+          stdout: '',
+          stderr: '',
+          durationMs: Date.now() - startedAt,
+          truncated: false,
+        } satisfies Collected
+      })
+      .finally(() => {
+        this.#controllers.delete(controller)
+        this.#inFlight -= 1
+      })
+    return {
+      sources: streamSources(handle),
+      kill: (): void => {
+        controller.abort()
+        handle.terminate()
+      },
+      finished,
     }
   }
 

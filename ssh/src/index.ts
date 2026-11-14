@@ -17,6 +17,7 @@ import type {} from '@deepseek-ai/dsh-fs'
 import type {} from '@deepseek-ai/dsh-working-directory'
 import { sshTargetsDomain } from './storage.ts'
 import { resolveLocalInside } from './local-path.ts'
+import type { JobRegistry } from './jobs.ts'
 import { effectiveApprovalPolicy } from './approval.ts'
 import { TargetStore } from './store.ts'
 import { TargetSecrets } from './secrets.ts'
@@ -87,6 +88,10 @@ export function apply(ctx: Context): void {
     secrets: () => secrets,
     askpass: () => ({ ready: askpass.ready, ...(askpass.path === undefined ? {} : { path: askpass.path }), ...(askpass.failure === undefined ? {} : { failure: askpass.failure }) }),
     localExists: path => existsLocally(path),
+    // Read, not injected: a profile without the job registry still gets the plugin,
+    // it simply refuses to background a command there. The cast absorbs the two
+    // nominal id types each copy of the jobs package brands its own way.
+    jobs: ctx.get('jobs') === undefined ? undefined : (ctx.get('jobs') as unknown as JobRegistry),
     // The model chooses between the saved aliases, and the tool's description is
     // frozen at definition time, so an inventory change means re-registering.
     onInventoryChanged: () => { rerenderRemoteTool() },

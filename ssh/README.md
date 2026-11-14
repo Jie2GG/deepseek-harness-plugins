@@ -183,10 +183,11 @@ bundle is the live proof of that).
 
 | Field | Shape |
 | --- | --- |
-| `action` | `get_connection` \| `exec` \| `read` \| `write` \| `edit` \| `upload` \| `download` — `read` answers a directory listing, a file's text, or a refusal, depending on what the path is |
+| `action` | `get_connection` \| `exec` \| `read` \| `write` \| `edit` \| `upload` \| `download` — `exec` also takes `background: true` — `read` answers a directory listing, a file's text, or a refusal, depending on what the path is |
 | `localPath`, `recursive` | the local side of a transfer; relative paths resolve inside the conversation workspace |
 | `target` | id, display name (any case), `host`, or `user@host`; omitted means this conversation's chosen target, then a lone saved target |
 | `command` / `path` / `content` | the remote command line, an absolute remote path, and the exact text to write |
+| `background` | for `exec`: leave the command running and return its job id; poll with `job_output`, stop with `job_kill` |
 | `tty` / `input` | for `exec`: run under `ssh -tt` (for a command that inspects its own output), and text fed to its stdin |
 | `localPath` / `recursive` | for `upload` and `download`: the workspace-side path, and whether a directory moves |
 | `oldText` / `newText` | for `edit`: the exact text to find (copied from a read) and its replacement; an empty `newText` deletes |
@@ -201,7 +202,7 @@ tool-authoring docs prescribe for deployment policy:
 | Call | Verdict |
 | --- | --- |
 | `get_connection`, `read` (a listing or a file's text), `download` | allow |
-| `exec`, program in the target's `allowedCommands`, or no allowlist at all | allow |
+| `exec`, program in the target's `allowedCommands`, or no allowlist at all | allow | (the same verdict applies to a backgrounded command)
 | `exec`, program not on a non-empty allowlist | **ask** |
 | `exec`, a pipeline / redirection / substitution (no single leading program) | **ask** |
 | any `ask`, in a conversation whose approval policy is `never` | **allow** — the core rejects unanswered asks by policy, so asking there is a self-inflicted refusal |

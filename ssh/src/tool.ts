@@ -162,6 +162,8 @@ export interface RemoteCallArgs {
   tty?: boolean | undefined
   /** For `exec`: text fed to the command's stdin. */
   input?: string | undefined
+  /** For `exec`: start it as a background job instead of waiting. */
+  background?: boolean | undefined
   /** For `upload`/`download`: the path on this machine, relative to the session workspace. */
   localPath?: string | undefined
 }
@@ -207,6 +209,7 @@ export function readArgs(exec: Readonly<PendingCall>): RemoteCallArgs {
     backup: typeof raw.backup === 'boolean' ? raw.backup : undefined,
     tty: typeof raw.tty === 'boolean' ? raw.tty : undefined,
     input: typeof raw.input === 'string' ? raw.input : undefined,
+    background: typeof raw.background === 'boolean' ? raw.background : undefined,
   }
 }
 
@@ -425,7 +428,7 @@ export function describeRemote(targets: TargetBrief[]): string {
     : `Choose the server this conversation means and pass it as \`target\`. Available aliases: ${targets
       .map(target => `\`${target.label}\` (${target.user === undefined || target.user === '' ? '' : `${target.user}@`}${target.host})`)
       .join(', ')}.`
-  return `Runs commands and moves files on a stored SSH server, with the credentials the plugin holds. ${list} A call addresses one server: leave \`target\` out to reuse the one this conversation last used. Nothing is interpreted by a local shell; the command string is executed by the login shell on the server. \`get_connection\`, \`read\`, and \`download\` are reads; \`read\` answers with a directory listing when the path is a directory and with the file's text when it is a file; \`exec\`, \`write\`, \`edit\`, and \`upload\` may be refused by the user, and \`exec\` runs freely unless that target lists a command allowlist, in which case only the listed programs and simple single-program calls run freely.`
+  return `Runs commands and moves files on a stored SSH server, with the credentials the plugin holds. ${list} A call addresses one server: leave \`target\` out to reuse the one this conversation last used. Nothing is interpreted by a local shell; the command string is executed by the login shell on the server. \`get_connection\`, \`read\`, and \`download\` are reads; \`read\` answers with a directory listing when the path is a directory and with the file's text when it is a file; \`exec\`, \`write\`, \`edit\`, and \`upload\` may be refused by the user, and \`exec\` runs freely unless that target lists a command allowlist, in which case only the listed programs and simple single-program calls run freely. Add \`background: true\` to leave a long command running, then poll it with the harness's \`job_output\` and \`job_kill\` tools.`
 }
 
 /**
@@ -489,7 +492,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
         description: 'What to do: `get_connection` lists what is saved and resolves which server this call would address, without connecting; `exec` runs one shell command on it; `read` returns a directory listing or the text of a file, depending on what the path is; `write` sends text to a remote path; `edit` replaces exact text inside a remote file (it refuses an ambiguous match instead of guessing); `upload` and `download` move files.',
       },
       target: { type: 'string', description: targetParamHint(deps.targetsOf?.() ?? []) },
-      command: { type: 'string', description: 'For `run`: the command line to execute on the server, as one string. Quote anything that must survive the remote shell.' },
+      command: { type: 'string', description: 'For `exec`: the command line to execute on the server, as one string. Quote anything that must survive the remote shell.' },
       path: { type: 'string', description: 'For `ls`, `read`, `write`: an absolute remote path, or one starting with `~/`. Shell metacharacters are refused.' },
       content: { type: 'string', description: 'For `write`: the exact text to put in the remote file; it is sent on stdin, never as an argument.' },
       overwrite: { type: 'boolean', description: 'For `write`: replace an existing remote file instead of refusing.' },
@@ -497,8 +500,9 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
       mkdir: { type: 'boolean', description: 'For `write`: create the parent directory first. Defaults to true.' },
       localPath: { type: 'string', description: 'For `upload` and `download`: the path on this machine. Relative paths are resolved inside the conversation workspace, and a path outside it is refused.' },
       recursive: { type: 'boolean', description: 'For `upload` and `download`: move a directory rather than one file.' },
-      timeoutMs: { type: 'integer', description: 'For `run`: override the command deadline for this call, in milliseconds.' },
-      maxBytes: { type: 'integer', description: 'For `run` and `read`: the largest amount of output to bring back.' },
+      timeoutMs: { type: 'integer', description: 'For `exec`: override the command deadline for this call, in milliseconds.' },
+      background: { type: 'boolean', description: 'For `exec`: start the command as a background job and return its id at once instead of waiting for it. Poll it with the `job_output` tool and stop it with `job_kill`; the command also ends when this conversation ends.' },
+      maxBytes: { type: 'integer', description: 'For `exec` and `read`: the largest amount of output to bring back.' },
     },
     output: {
       schema: {
@@ -521,7 +525,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           {
             type: 'object',
             additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'exec', required: true }, exitCode: { oneOf: [{ type: 'integer' }, { type: 'null' }] }, stdout: { type: 'string' }, stderr: { type: 'string' }, truncated: { type: 'boolean' }, durationMs: { type: 'integer' } },
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'exec', required: true }, command: { type: 'string' }, jobId: { type: 'string' }, exitCode: { oneOf: [{ type: 'integer' }, { type: 'null' }] }, stdout: { type: 'string' }, stderr: { type: 'string' }, truncated: { type: 'boolean' }, durationMs: { type: 'integer' } },
           },
           {
             type: 'object',
@@ -562,6 +566,10 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
       if (call.target !== undefined) params.target = call.target
       const sessionId = deps.sessionOf?.(exec)
       if (sessionId !== undefined) params.sessionId = sessionId
+      // The registry keeps these so the job's lifecycle record names the call that
+      // started it, the same way a backgrounded shell command does.
+      const execCallId = typeof exec.callId === 'string' ? exec.callId : undefined
+      const execRootCallId = typeof exec.rootCallId === 'string' ? exec.rootCallId : undefined
       switch (call.action) {
         case 'get_connection': {
           const listed = await operations.list()
@@ -595,6 +603,26 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           if (call.maxBytes !== undefined) params.maxOutputBytes = call.maxBytes
           if (call.tty === true) params.tty = true
           if (call.input !== undefined) params.input = call.input
+          if (call.background === true) {
+            // Handed to the job registry: the call answers with an id, and the
+            // conversation reads and stops it with the harness's own job tools.
+            if (sessionId !== undefined) params.sessionId = sessionId
+            if (execCallId !== undefined) params.callId = execCallId
+            if (execRootCallId !== undefined) params.rootCallId = execRootCallId
+            const job = await operations.execBackground(params)
+            await rememberSessionTarget(operations, sessionId, call, job)
+            // Built field by field: the refreshed inventory is for the settings
+            // page, and this action's schema declares no room for it.
+            return {
+              action: 'exec',
+              ok: job.ok,
+              status: job.status,
+              target: job.target,
+              command: job.command,
+              jobId: job.jobId,
+              ...(job.hint === undefined ? {} : { hint: job.hint }),
+            } as never
+          }
           const result = await operations.runCommand(params)
           // Remembered from the mapped payload: that is where the target this call
           // actually used is spelled out.
@@ -849,11 +877,17 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
     case 'exec': {
       const command = typeof args.command === 'string' ? args.command : ''
       lines.push(`${where}$ ${command}`)
+      if (typeof value.jobId === 'string') {
+        lines.push(`Left running in the background as job ${String(value.jobId)}. Read it with \`job_output\` and stop it with \`job_kill\`.`)
+      }
       const stdout = typeof value.stdout === 'string' ? value.stdout : ''
       const stderr = typeof value.stderr === 'string' ? value.stderr : ''
       if (stdout !== '') lines.push(stdout.replace(/\n$/u, ''))
       if (stderr !== '') lines.push(`[stderr] ${stderr.replace(/\n$/u, '')}`)
-      const bits = [`status=${String(value.status)}`, `exit=${String(value.exitCode ?? 'null')}`]
+      const bits = [`status=${String(value.status)}`]
+      // A command left running has no exit code yet, and saying `exit=null` reads
+      // like a result rather than like a promise about the future.
+      if (typeof value.jobId !== 'string') bits.push(`exit=${String(value.exitCode ?? 'null')}`)
       if (typeof value.durationMs === 'number') bits.push(`${String(value.durationMs)} ms`)
       if (value.truncated === true) bits.push('output truncated')
       lines.push(bits.join(' · '))
