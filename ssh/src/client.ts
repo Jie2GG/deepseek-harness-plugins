@@ -1576,9 +1576,14 @@ window.__ModuleLoader__.load({
         h('h3', { class: 'dshssh-card-title' }, t('boundsTitle')),
         h('dl', { class: 'dshssh-bounds' },
           h('div', { class: 'dshssh-bound', key: 'targets' }, h('dt', {}, t('boundsTargets')), h('dd', {}, String(limits.maxConnections))),
-          h('div', { class: 'dshssh-bound', key: 'lanes' }, h('dt', {}, t('boundsOps')), h('dd', {}, String(limits.concurrentOps))),
-          h('div', { class: 'dshssh-bound', key: 'masters' }, h('dt', {}, t('boundsMasters')), h('dd', {}, String(limits.maxLiveMasters))),
-          h('div', { class: 'dshssh-bound', key: 'persist' }, h('dt', {}, t('boundsPersist')), h('dd', {}, idleFor(limits.controlPersistSeconds))),
+          // A Host that predates the pool sends no operation count and no sharing
+          // rows: printing this release's numbers for that process would put a
+          // surprise on the very card whose job is to prevent one.
+          h('div', { class: 'dshssh-bound', key: 'lanes' }, h('dt', {}, t('boundsOps')), h('dd', {}, pooling ? String(limits.concurrentOps) : '—')),
+          ...(pooling ? [
+            h('div', { class: 'dshssh-bound', key: 'masters' }, h('dt', {}, t('boundsMasters')), h('dd', {}, String(limits.maxLiveMasters))),
+            h('div', { class: 'dshssh-bound', key: 'persist' }, h('dt', {}, t('boundsPersist')), h('dd', {}, idleFor(limits.controlPersistSeconds))),
+          ] : []),
           h('div', { class: 'dshssh-bound', key: 'round' }, h('dt', {}, t('boundsPerRound')), h('dd', {}, String(limits.probeAllLimit))),
           h('div', { class: 'dshssh-bound', key: 'timeout' }, h('dt', {}, t('boundsTimeout')), h('dd', {}, measure(limits.probeTimeoutMs, 'ms'))),
           h('div', { class: 'dshssh-bound', key: 'remote' }, h('dt', {}, t('boundsRemoteTimeout')), h('dd', {}, `${measure(limits.remoteTimeoutMinMs, 'ms')} – ${measure(limits.remoteTimeoutMaxMs, 'ms')}`)),

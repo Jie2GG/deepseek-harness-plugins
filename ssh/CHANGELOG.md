@@ -126,9 +126,12 @@ is a remapping, not a new round. The first change under the new scheme is
 - The bounds card states the sharing facts beside the existing ones: operations at
   once, servers that may each hold one, and how long an idle shared connection
   stays open (five minutes, `CONTROL_PERSIST_SECONDS`). The limits the page reads
-  renamed with them (`concurrentProbes` → `concurrentOps`), and a page that loads
-  against a Host predating the pool merges over its own defaults instead of
-  printing blanks — the same in-place-swap tolerance the auth modes already had.
+  renamed with them (`concurrentProbes` → `concurrentOps`), and a page loaded
+  against a Host that predates the pool keeps its own defaults for the keys the old
+  `list` payload never sent while hiding the sharing rows it cannot confirm —
+  printing this release's numbers for a process that is not running them is exactly
+  the surprise the card exists to prevent. The same in-place-swap tolerance the
+  auth modes already had.
 - The settings page learns whether the loaded Host has a pool from the `list`
   payload, and only offers the switch and sends the field when it does.
 
@@ -147,6 +150,10 @@ is a remapping, not a new round. The first change under the new scheme is
 - Secrets are still needed on every call, pooled or not: when a master turns out to
   be gone, the child that heals it has to authenticate, and it authenticates with
   the credential that call was given.
+- The storage bump was read against the file actually on disk, not a fixture: a
+  version 4 unit carrying two `password` targets parses under the version 5
+  schemas, both defaulting to `pool: on`, and its global slot still reads the same
+  three ceilings. Nothing has to be migrated by hand on restart.
 - The offline suites grew a tenth file (`pool.test.mjs`: what a socket is named by,
   who is evicted, what gets closed on unload, and the case where every master is
   busy), and the transport suite now pins the sharing flags and the split between a
