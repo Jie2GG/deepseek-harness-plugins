@@ -144,3 +144,30 @@ test('a probe that ended by signal is still classed by what the client printed',
   assert.equal(classifyProbe(255, 'Connection closed by 10.0.0.9 port 22'), 'unreachable')
   assert.equal(classifyProbe(0, ''), 'reachable')
 })
+
+test('a background call refused before its child started hands back the slot and the lease', async () => {
+  const claims = []
+  const pool = {
+    ready: true,
+    failure: undefined,
+    liveMasters: 0,
+    claim () {
+      const ticket = {
+        flags: [], note: undefined, pooled: true, released: 0,
+        release () { this.released += 1 }, markLive () {}, drop () {}
+      }
+      claims.push(ticket)
+      return ticket
+    }
+  }
+  const ctx = { subprocess: { resolveExecutable: async () => '/usr/bin/ssh', spawn: () => { throw new Error('the child must not start') } } }
+  const transport = new SshTransport(ctx, undefined, pool)
+  // A password with no askpass helper is refused by the option builder, after the
+  // slot was taken and the lease claimed — and both have to come back.
+  await assert.rejects(
+    () => transport.startRun({ host: '10.0.0.9' }, CEILINGS, { mode: 'password', password: 'p' }, 'sleep 100'),
+    /askpass/
+  )
+  assert.equal(transport.inFlight, 0)
+  assert.equal(claims[0].released, 1)
+})

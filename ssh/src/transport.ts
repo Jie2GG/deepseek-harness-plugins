@@ -961,45 +961,58 @@ export class SshTransport {
     }
     // The same option set a foreground call builds, so a backgrounded command
     // authenticates and trusts the host exactly like the probe for that target does.
-    const { flags, env } = this.sshOptions(target, settings, auth, deadline, { poolFlags: ticket?.flags })
-    const ttyFlags = options.tty === true ? ['-tt'] : []
-    const startedAt = Date.now()
-    const { handle, detach } = this.#spawn(program, [...flags, ...ttyFlags, this.authority(target), command], settings, env, controller, options.signal, undefined)
-    // A backgrounded command holds its lease for its whole life, the same way it
-    // holds an operation slot: the channel over the master is open until it ends.
-    const finished = this.#settleAndDrain(handle, controller, deadline, options.signal, startedAt)
-      .then((result: Collected) => {
-        detach()
-        this.noteShared(ticket, result.outcome === 'exit' && !this.sessionBroken(`${result.stderr}\n${result.stdout}`))
-        return result
-      })
-      .catch((error: unknown) => {
-        detach()
-        this.noteShared(ticket, false)
-        return {
-          outcome: 'error' as const,
-          error: error instanceof Error ? error.message : String(error),
-          exitCode: null,
-          signal: null,
-          stdout: '',
-          stderr: '',
-          durationMs: Date.now() - startedAt,
-          truncated: false,
-        } satisfies Collected
-      })
-      .finally(() => {
-        this.unshare(ticket)
-        this.#controllers.delete(controller)
-        this.#inFlight -= 1
-      })
-    return {
-      sources: streamSources(handle),
-      kill: (): void => {
-        controller.abort()
-        handle.terminate()
-      },
-      finished,
+    // Everything between here and the settle chain is guarded, because the option
+    // builder can refuse (a secret with no askpass helper to answer with) and a
+    // command that never started would otherwise leave an operation slot and a
+    // master marked in use for as long as the process lives.
+    let job: RemoteJob
+    try {
+      const { flags, env } = this.sshOptions(target, settings, auth, deadline, { poolFlags: ticket?.flags })
+      const ttyFlags = options.tty === true ? ['-tt'] : []
+      const startedAt = Date.now()
+      const { handle, detach } = this.#spawn(program, [...flags, ...ttyFlags, this.authority(target), command], settings, env, controller, options.signal, undefined)
+      // A backgrounded command holds its lease for its whole life, the same way it
+      // holds an operation slot: the channel over the master is open until it ends.
+      const finished = this.#settleAndDrain(handle, controller, deadline, options.signal, startedAt)
+        .then((result: Collected) => {
+          detach()
+          this.noteShared(ticket, result.outcome === 'exit' && !this.sessionBroken(`${result.stderr}\n${result.stdout}`))
+          return result
+        })
+        .catch((error: unknown) => {
+          detach()
+          this.noteShared(ticket, false)
+          return {
+            outcome: 'error' as const,
+            error: error instanceof Error ? error.message : String(error),
+            exitCode: null,
+            signal: null,
+            stdout: '',
+            stderr: '',
+            durationMs: Date.now() - startedAt,
+            truncated: false,
+          } satisfies Collected
+        })
+        .finally(() => {
+          this.unshare(ticket)
+          this.#controllers.delete(controller)
+          this.#inFlight -= 1
+        })
+      job = {
+        sources: streamSources(handle),
+        kill: (): void => {
+          controller.abort()
+          handle.terminate()
+        },
+        finished,
+      }
+    } catch (error: unknown) {
+      this.unshare(ticket)
+      this.#controllers.delete(controller)
+      this.#inFlight -= 1
+      throw error
     }
+    return job
   }
 
   /**

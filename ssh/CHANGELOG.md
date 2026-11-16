@@ -44,6 +44,13 @@ is a remapping, not a new round. The first change under the new scheme is
 
 ### Fixed
 
+- **A background call refused before its child started no longer leaks an
+  operation slot.** Building a call's options can refuse — a stored password with
+  no askpass helper on this Host — and it happened after the slot had been taken
+  and the lease claimed, so both stayed counted for as long as the process lived.
+  When four slots were the whole budget one bad call was a quarter of the plugin;
+  at sixteen it is a smaller hole, which is exactly why it got fixed rather than
+  lived with.
 - **The timeout hint told a reader to raise a setting that no longer exists.** The
   probe timeout stopped being a field in 0.0.18 and the hint kept pointing at it in
   both languages. It now says what is true: thirty seconds is fixed, a slow host is
@@ -64,10 +71,10 @@ is a remapping, not a new round. The first change under the new scheme is
 - With a warm master the test answers "reachable" without touching the credential,
   and that is the new question. The credential is part of the control socket's name,
   so changing it gets a fresh dial and a real authentication.
-- `tsc` clean, `oxlint` 0 warnings and 0 errors, and 106 tests across ten suites are
-  green, including the argv split a probe now chooses and the two deadline
-  constants no longer being one. Version 0.0.22 → 0.0.23 under the three-segment
-  rule.
+- `tsc` clean, `oxlint` 0 warnings and 0 errors, and 107 tests across ten suites are
+  green, including the argv split a probe now chooses, the two deadlines no longer
+  being one, and the refused background call handing both its slot and its lease
+  back. Version 0.0.22 → 0.0.23 under the three-segment rule.
 
 ## 0.0.22
 
