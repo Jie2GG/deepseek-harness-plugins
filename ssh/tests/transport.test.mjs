@@ -3,7 +3,7 @@
 // a call is handed about sharing.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { shellQuote, leadingProgram, classifyProbe, classifyRun, tail, HOST_KEY_SETTING, SshTransport } from '../lib/transport.js'
+import { shellQuote, leadingProgram, classifyProbe, classifyRun, tail, HOST_KEY_SETTING, SshTransport, probeArgvTail } from '../lib/transport.js'
 
 test('shellQuote makes any path one word for the remote shell', () => {
   assert.equal(shellQuote('/tmp/a b'), "'/tmp/a b'")
@@ -125,4 +125,22 @@ test('a lease is settled by whether the call reached a session at all', () => {
   bare.noteShared(unshared, true)
   bare.noteShared(undefined, true) // a call with no pool assembled is a normal day
   assert.deepEqual(seen, ['live', 'drop'])
+})
+
+test('a probe on a leased connection stops at login, and one dialing alone still runs a command', () => {
+  const leased = probeArgvTail(['-o', 'BatchMode=yes'], 'deploy@10.0.0.9', true)
+  // `-N` belongs with the options: the destination is what ends the option list.
+  assert.deepEqual(leased.slice(-2), ['-N', 'deploy@10.0.0.9'])
+  assert.ok(!leased.includes('true'))
+  const alone = probeArgvTail(['-o', 'BatchMode=yes'], 'deploy@10.0.0.9', false)
+  assert.deepEqual(alone.slice(-2), ['deploy@10.0.0.9', 'true'])
+  assert.ok(!alone.includes('-N')) // no master to leave behind, so -N would idle to the deadline
+})
+
+test('a probe that ended by signal is still classed by what the client printed', () => {
+  // `-N` on a leased call exits 0 on its own; the failure shapes are the ones the
+  // live measurement produced, not inventions.
+  assert.equal(classifyProbe(255, 'jiegg@10.100.1.1: Permission denied (publickey,password).'), 'auth-failed')
+  assert.equal(classifyProbe(255, 'Connection closed by 10.0.0.9 port 22'), 'unreachable')
+  assert.equal(classifyProbe(0, ''), 'reachable')
 })

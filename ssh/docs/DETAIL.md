@@ -18,7 +18,7 @@ General settings. Across its top sit two tabs:
 - **SSH targets** — the list: add, edit, delete, and test.
 - **Client settings** — the output ceiling, the command timeout, and the
   transfer ceiling, next to the bounds the plugin fixes in code (which include
-  how it finds `ssh` and `scp` by itself and the fixed 10-second probe deadline).
+  how it finds `ssh` and `scp` by itself and the fixed 30-second probe deadline).
 
 Both tabs read and write one page state, so a probe you started on the first tab
 keeps running while you edit values on the second.
@@ -45,12 +45,19 @@ keeps running while you edit values on the second.
   only no longer be selected or written anew.
 - **Connectivity test.** `Test` runs one probe per target; `Test all` covers the
   first 12 in one round. A probe connects with the same options and secrets the
-  target will use and runs only `true` on the far side: a key target keeps
-  `BatchMode=yes` and never waits, while a secret-backed target answers its prompt
-  through the plugin's own askpass helper and is allowed exactly one prompt.
-  Results are classified as reachable, authentication failed, unreachable, host
-  key not trusted, timed out, or `ssh` not found, and the last result is kept
-  with its timestamp and the captured output tail.
+  target will use and asks the question the button is really answering: can this
+  credential get an authenticated session open. A target riding a shared
+  connection stops at login — `-N`, measured at two tenths of a second for a first
+  connection and a tenth for a warm one — while a target dialing its own still
+  runs `true` on the far side, because with no master to leave behind `-N` would
+  sit idle until its deadline. A key target keeps `BatchMode=yes` and never waits,
+  while a secret-backed target answers its prompt through the plugin's own askpass
+  helper and is allowed exactly one prompt. A probe waits a fixed thirty seconds,
+  of which the connect phase takes a third (capped at ten seconds), so a host
+  nobody answers still fails fast. Results are classified as reachable,
+  authentication failed, unreachable, host key not trusted, timed out, or `ssh`
+  not found, and the last result is kept with its timestamp and the captured
+  output tail.
 - **Connections are shared.** On one server, the connection the first command
   opened stays in the plugin's hands, and the calls that follow ride on it — no
   fresh handshake, no fresh login per command, and one `sshd` working for you at
@@ -63,8 +70,10 @@ keeps running while you edit values on the second.
   command timeout every agent-issued remote call obeys, and the file-transfer
   ceiling a copy may not exceed. Which program dials and how long a connectivity
   test waits are no longer settings at all: `ssh` and `scp` are found by
-  themselves (`PATH` first, then the usual install locations), and a probe waits
-  a fixed ten seconds. That tab also states the bounds the plugin fixes
+  themselves (`PATH` first, then the usual install locations), and a probe waits a
+  fixed thirty seconds — the download's size pre-check keeps its own ten, because
+  one file's metadata should not be given a connectivity test's patience. That tab
+  also states the bounds the plugin fixes
   in code, so a value outside a range is not a surprise — three of those lines
   are about sharing: how many remote operations run at once, how many servers
   may each hold one, and how long an idle shared connection stays open.
@@ -158,9 +167,10 @@ back to the browser:
 
 Two honest limits: the store is readable by your own OS user, and agent tool
 processes run as that same user, so a stored secret is private from other users
-rather than hidden from the agent. And the page's own test still runs nothing but
-`true` on the server: every wider use of those credentials — commands, edits,
-transfers — goes through the chat tool, under the approval rules above.
+rather than hidden from the agent. And the page's own test stops at login (only a
+target with sharing switched off runs one `true` on the server): every wider use
+of those credentials — commands, edits, transfers — goes through the chat tool,
+under the approval rules above.
 
 ## When your terminal connects but the page does not
 
@@ -228,9 +238,14 @@ ignored.
 - The settings page and its two tabs are the only **interface**; the conversation
   reaches the same capability through the `ssh_client` tool, whose call renders in the
   harness's own tool row like any other tool's.
-- A page probe authenticates and then runs only `true` on the server; real commands
-  come from the agent's `exec` action, and nothing on the server is installed or
-  upgraded by this plugin.
+- A page probe authenticates and stops there: it runs no command of yours, so it
+  cannot say whether the remote shell itself is broken (only a target with sharing
+  switched off gets one `true`), and while a shared connection is warm the answer
+  is "reachable" without touching the credential — the question is now "does this
+  credential have an authenticated session". Change the credential and the control
+  socket is named differently, so the next probe re-authenticates for real. Real
+  commands come from the agent's `exec` action, and nothing on the server is
+  installed or upgraded by this plugin.
 - A foreground remote call is waited for: there is no terminal to type into live.
   A command that needs a terminal can be given one
   (`tty: true`) and handed its answer (`input: "…"`). A command that will outlive one

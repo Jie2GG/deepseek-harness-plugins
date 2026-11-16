@@ -17,6 +17,58 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.23
+
+### Changed
+
+- **A connectivity test passes at login, not at the end of a command.** The page's
+  test asks one question — can this credential get an authenticated session open —
+  and now stops there. A call carrying a shared connection dials with `-N`:
+  OpenSSH hands the authenticated master to the background, the foreground client
+  has nothing left to do, and it exits on its own — measured against a live server
+  at two tenths of a second for a first connection and a tenth over a warm one. A
+  call that is dialing alone keeps running `true`, because `-N` with no master to
+  leave behind sits on an idle session until its deadline: the page would wait
+  thirty seconds to say yes. So the mechanism follows the lease rather than the
+  target's settings, and a target with sharing switched off still answers the
+  slightly wider question it always answered.
+- **The probe deadline is thirty seconds, still fixed in code**
+  (`PROBE_TIMEOUT_MS`: 10 s → 30 s). The connect phase keeps taking a third of it,
+  capped at ten seconds, so a host nobody answers is still refused quickly, and the
+  longer tail buys a slow link, a jump host, and a real authentication round
+  instead of a false "unreachable".
+- **The download's size pre-check has its own ten seconds** (`STAT_TIMEOUT_MS`).
+  It used to ride on the probe deadline, so retuning one test would have quietly
+  tripled the patience of a different one: one file's metadata should not be given
+  a connectivity test's budget.
+
+### Fixed
+
+- **The timeout hint told a reader to raise a setting that no longer exists.** The
+  probe timeout stopped being a field in 0.0.18 and the hint kept pointing at it in
+  both languages. It now says what is true: thirty seconds is fixed, a slow host is
+  not a dead one, and the timeout you can set belongs to a real command.
+
+### Notes
+
+- One side effect of the new shape is worth knowing: a rejected credential is now
+  named honestly. The live measurement of the same wrong password printed
+  `Permission denied (publickey,password).` under `-N` and
+  `Connection closed by … port 22` under `true` — which the tables classify as
+  `auth-failed` and `unreachable` respectively, so the older shape could blame the
+  network for a secret problem.
+- The `Authenticated to … using "password".` marker this release could have waited
+  for does exist in OpenSSH 8.4+ — but only at `LogLevel=VERBOSE`, where it drowns
+  in the key-exchange transcript it would then have to be trimmed out of. Reading
+  the child's own exit is cheaper and does not put debug noise in front of a reader.
+- With a warm master the test answers "reachable" without touching the credential,
+  and that is the new question. The credential is part of the control socket's name,
+  so changing it gets a fresh dial and a real authentication.
+- `tsc` clean, `oxlint` 0 warnings and 0 errors, and 106 tests across ten suites are
+  green, including the argv split a probe now chooses and the two deadline
+  constants no longer being one. Version 0.0.22 → 0.0.23 under the three-segment
+  rule.
+
 ## 0.0.22
 
 ### Added

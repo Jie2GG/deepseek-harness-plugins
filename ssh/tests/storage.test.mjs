@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import {
   DOMAIN_NAME, DOMAIN_VERSION, COMPATIBLE_VERSIONS, MAX_CONNECTIONS, MAX_CONCURRENT_OPS,
   MAX_LIVE_MASTERS, CONTROL_PERSIST_SECONDS, poolChoiceSchema,
-  MAX_ALLOWED_COMMANDS, BACKGROUND_DEADLINE_MS, DEFAULT_SETTINGS, PROBE_TIMEOUT_MS,
+  MAX_ALLOWED_COMMANDS, BACKGROUND_DEADLINE_MS, DEFAULT_SETTINGS, PROBE_TIMEOUT_MS, STAT_TIMEOUT_MS,
   SSH_EXECUTABLE, SSH_FALLBACK_PATHS,
   connectionRecordSchema, connectionInputSchema, settingsRecordSchema, remotePathSchema,
   remoteRunSchema, transferInputSchema, secretPatchSchema, probeDraftSchema,
@@ -109,8 +109,12 @@ test('a pre-0.0.18 global slot still opens: the retired fields are accepted, ign
   // still a storage-error rather than a silently ignored one.
   assert.throws(() => settingsRecordSchema.parse({ command: 'x'.repeat(257) }))
   assert.throws(() => settingsRecordSchema.parse({ probeTimeoutMs: 999 }))
-  // The values the plugin now uses are code, not config.
-  assert.equal(PROBE_TIMEOUT_MS, 10_000)
+  // The values the plugin now uses are code, not config — and 0.0.23 moved the
+  // probe to thirty seconds while the download's size pre-check kept ten, so a
+  // stalled server stalls a copy, not the whole page.
+  assert.equal(PROBE_TIMEOUT_MS, 30_000)
+  assert.equal(STAT_TIMEOUT_MS, 10_000)
+  assert.notEqual(PROBE_TIMEOUT_MS, STAT_TIMEOUT_MS)
   assert.equal(SSH_EXECUTABLE, 'ssh')
   assert.ok(SSH_FALLBACK_PATHS.includes('/usr/bin/ssh'))
 })

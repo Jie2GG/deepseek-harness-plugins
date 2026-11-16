@@ -79,11 +79,29 @@ export const SCP_EXECUTABLE = 'scp'
 export const SCP_FALLBACK_PATHS: readonly string[] = ['/usr/bin/scp', '/usr/local/bin/scp', '/bin/scp', '/opt/homebrew/bin/scp']
 
 /**
- * The deadline one connectivity probe — and the download size pre-check —
- * waits to. Fixed in code since 0.0.18; 10 seconds was the default the page
- * used to offer, and it fit every recorded deployment without being raised.
+ * The deadline one connectivity probe waits to.
+ *
+ * Thirty seconds, fixed in code: the page's test is not a request a reader wants
+ * to tune, and every deployment that ever had a knob for it left it alone. The
+ * budget splits itself — the connect phase takes a third of it (capped at 10 s),
+ * so a host nobody answers still fails fast, and what the rest covers is a slow
+ * link, a jump host, and a key exchange with an authentication round.
+ *
+ * What the probe dials for depends on whether the call carries a shared
+ * connection: `ssh -N` ends on its own the instant authentication finishes when a
+ * master is being left behind in the background, and sits idle until its deadline
+ * when nothing will be. `STAT_TIMEOUT_MS` is the separate, shorter budget for the
+ * one remote `stat` a download asks first, which used to ride on this constant.
  */
-export const PROBE_TIMEOUT_MS = 10_000
+export const PROBE_TIMEOUT_MS = 30_000
+
+/**
+ * The deadline for the size and type pre-check one download asks before it
+ * copies. The answer is a local file's metadata, so it is not given the probe's
+ * thirty seconds: a stalled server should not stall a copy that was about to
+ * start.
+ */
+export const STAT_TIMEOUT_MS = 10_000
 
 /** How long one backgrounded remote command may run before it is called timed out. */
 export const BACKGROUND_DEADLINE_MS = 1_800_000

@@ -200,6 +200,34 @@ export function classifyProbe(exitCode: number | null, detail: string): ProbeSta
 }
 
 /**
+ * The argv tail one probe runs with.
+ *
+ * Two shapes, because what ends the child depends on what the call leaves behind:
+ *
+ * - a call carrying a shared connection asks for `-N`: OpenSSH hands the
+ *   authenticated master to the background (`ControlPersist`) and the foreground
+ *   client, with no remote command and nothing to forward, exits on its own — a
+ *   live measurement put that at two tenths of a second for a first connection and
+ *   a tenth for a warm one, and a rejected credential still answers
+ *   `Permission denied (…)` rather than hanging;
+ * - a call with no control socket asks for `true` instead, because `-N` with no
+ *   master to leave behind simply sits on an idle session until its deadline, and
+ *   a page that waits thirty seconds to say “yes” is a worse page than one that
+ *   runs one word on the far side.
+ *
+ * So a probe now stops at the question it is actually being asked — can this
+ * credential get an authenticated session open — and a target whose sharing is
+ * switched off keeps answering the slightly wider question it always answered.
+ * @param flags - the option flags, already built.
+ * @param authority - the `[user@]host` to address.
+ * @param pooled - whether this call is carrying a control socket.
+ * @returns the argv tail for the child.
+ */
+export function probeArgvTail(flags: readonly string[], authority: string, pooled: boolean): string[] {
+  return pooled ? [...flags, '-N', authority] : [...flags, authority, 'true']
+}
+
+/**
  * Turn one finished probe child into the outcome the page stores.
  *
  * The child's own ending comes first: a probe that ran out of its deadline or was
@@ -816,7 +844,8 @@ export class SshTransport {
   }
 
   /**
-   * Probe one target: connect, authenticate, and run `true` and nothing else.
+   * Probe one target: connect and authenticate — `-N` on a shared connection, and
+   * `true` on a call that is dialing its own.
    * @param target - the identity fields to connect with.
    * @param settings - the executable, deadline, and capture ceiling to honour.
    * @param auth - the mode and any secret this probe should answer with.
@@ -838,7 +867,8 @@ export class SshTransport {
           detail: 'No ssh program was found: PATH and the usual install locations were tried.',
         }
       }
-      const collected = await this.#collect(program, [...flags, this.authority(target), 'true'], settings, env, deadline, controller)
+      const pooled = ticket?.pooled === true
+      const collected = await this.#collect(program, probeArgvTail(flags, this.authority(target), pooled), settings, env, deadline, controller)
       const detail = tail(collected.stdout, collected.stderr)
       const outcome = classifyCollectedProbe(collected, detail)
       // A probe that reached `reachable` proved the session; one that never left

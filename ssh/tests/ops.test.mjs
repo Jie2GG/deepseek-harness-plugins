@@ -35,7 +35,7 @@ test('list carries the views, the limits, the pool state, and the askpass health
   assert.deepEqual(out.connections[0].secrets, { password: true, passphrase: false })
   assert.equal(out.limits.maxConnections, 64)
   assert.equal(out.limits.transferMaxBytes, 536_870_912)
-  assert.equal(out.limits.probeTimeoutMs, 10_000) // one fixed fact, not a range any more
+  assert.equal(out.limits.probeTimeoutMs, 30_000) // one fixed fact, not a range any more
   // The bounds card reads these names, so a rename is a page change too.
   assert.equal(out.limits.concurrentOps, 16)
   assert.equal(out.limits.maxLiveMasters, 8)

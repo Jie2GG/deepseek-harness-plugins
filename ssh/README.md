@@ -168,8 +168,9 @@ Bounds live in `src/storage.ts`: 64 targets, 16 concurrent remote operations
 shared by probes and commands, 8 servers that may each hold one shared
 connection (`MAX_LIVE_MASTERS`) before the idle longest-quiet one is retired, a
 five-minute idle timeout on a master (`CONTROL_PERSIST_SECONDS`), 12 per
-`probeAll` round, a fixed 10 s probe
-deadline (`PROBE_TIMEOUT_MS`, also the download size pre-check's), 1 s–300 s
+`probeAll` round, a fixed 30 s probe
+deadline (`PROBE_TIMEOUT_MS`, with the download size pre-check on its own
+separate `STAT_TIMEOUT_MS` of 10 s), 1 s–300 s
 command timeout, 1 KiB–4 MiB output ceiling, 1 KiB–512 MiB transfer ceiling, and
 at most 32 allowlisted program names of 64 characters each. A backgrounded
 command runs to its own 30-minute deadline (`BACKGROUND_DEADLINE_MS`, whichever
@@ -183,7 +184,7 @@ Record format is `version: 4` with `compatibleVersions: [1, 2, 3]`.
 The shared settings slot carries the three ceilings the page still edits.
 Since 0.0.18 the ssh/scp programs are found at run time — bare name on `PATH`
 first, then the usual install locations, first hit cached until unload, misses
-re-tried — and one probe waits a fixed 10 seconds, so neither is stored or
+re-tried — and one probe waits a fixed 30 seconds, so neither is stored or
 edited any more. A `configUpdate` that still sends a retired field is refused
 as `bad-input` rather than quietly dropped.
 
@@ -250,6 +251,10 @@ it decides, and why:
   carries it as `pool`, which is why the domain is version 5.
 - **`ssh -G` leases nothing.** The resolve view answers where an alias points;
   naming a control socket in it would describe a connection the call never makes.
+- **A page probe warms the pool.** The settings test dials under the same lease an
+  agent call takes, so pressing `Test` leaves behind the very connection the next
+  command rides — which is also why the probe asks for `-N` on a leased call: it is
+  the fastest way to answer "can this credential log in", and the cheapest.
 - **Lifetime.** The socket directory is a `mkdtemp` 0700 tree under the system temp
   directory, made at activation and removed at unload, exactly like the askpass
   helper. A master is a process OpenSSH left in the background, not a child this
@@ -374,6 +379,20 @@ next round does not have to re-derive them:
   heals a dead master by dialing directly, for free, inside the call that needed
   it. A control socket named by a literal path (no `%h`/`%C` tokens) works for
   `-O` too, which is what makes an eviction targetable.
+- **`ssh -N` ends by itself when a master is being left behind** — measured on the
+  same live server while 0.0.23 was written, which is what the probe is built on:
+  with `-o ControlMaster=auto -o ControlPath=… -o ControlPersist=300`, an `-N` call
+  authenticates and exits 0 in **0.2 s** for a first connection and **0.1 s** over
+  a warm master, leaving `Master running (pid=…)` behind. Without those options the
+  same `-N` call **hangs** (an idle session with nothing to do, killed only at its
+  deadline) — hence the probe asks for `-N` only on a leased connection and runs
+  `true` on its own. A rejected credential is still named honestly under `-N`
+  (`Permission denied (publickey,password).`), while the same wrong password run
+  with `true` printed `Connection closed by … port 22` and would have been
+  classified `unreachable`: the older shape could blame the network for a secret
+  problem. The `Authenticated to … using "password".` line exists in this client but
+  is only printed at `LogLevel=VERBOSE`, where it drowns in the key-exchange
+  transcript, so the probe reads the exit status instead of chasing it.
 - `fs/write-intent` is a single-slot **decision** waterfall: a listener may
   answer `createIfAbsent` or `replaceIfVersion` and never consults your write, so
   the plugin must act on the answer — a create-only guard against an existing file
@@ -443,7 +462,7 @@ still open:
    remote call keeps rendering in the harness's generic tool row — see the note
    under **Verified contracts**.
 
-## Limits of 0.0.20
+## Limits of 0.0.23
 
 - The settings page is inventory, probes, resolve, and ceilings only: running
   commands, editing files, and moving bytes reach the server through the
