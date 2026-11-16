@@ -62,8 +62,6 @@ window.__ModuleLoader__.load({
         settingsMaxTransfer: 'Transfer ceiling (bytes)',
         settingsSave: 'Save settings',
         settingsSaved: 'Saved.',
-        runAsTitle: 'Probe identity',
-        runAsHint: 'A probe runs as the account the Harness Host process uses, so it reads and records keys in that account\'s ~/.ssh — often not the account your own terminal uses. An unknown host key is recorded on first contact, and a changed key still fails.',
         boundsTitle: 'Fixed bounds',
         boundsTargets: 'Targets per profile',
         boundsConcurrency: 'Probes at once',
@@ -180,8 +178,6 @@ window.__ModuleLoader__.load({
         settingsMaxTransfer: '传输上限（字节）',
         settingsSave: '保存参数',
         settingsSaved: '已保存。',
-        runAsTitle: '探测运行身份',
-        runAsHint: '探测以 Harness Host 进程所属的账号运行，因此读取与写入的是那个账号的 ~/.ssh，往往不是你终端所用的账号。首次遇到的主机密钥会被自动记录；主机密钥发生变化时仍会失败。',
         boundsTitle: '固定边界',
         boundsTargets: '每个 profile 可存的目标数',
         boundsConcurrency: '同时进行的探测数',
@@ -852,8 +848,6 @@ window.__ModuleLoader__.load({
       const [settings, setSettings] = React.useState(null as { maxOutputBytes: number; remoteTimeoutMs: number; maxTransferBytes: number } | null)
       const [limits, setLimits] = React.useState({ maxConnections: 64, concurrentProbes: 4, probeAllLimit: 12, probeTimeoutMs: 10000, remoteTimeoutMinMs: 1000, remoteTimeoutMaxMs: 300000, outputMinBytes: 1024, outputMaxBytes: 4194304, transferMinBytes: 1024, transferMaxBytes: 536870912 })
       const [askpass, setAskpass] = React.useState('ready')
-      // Whose ~/.ssh the probes read: reported by the Host, never inferred here.
-      const [runsAs, setRunsAs] = React.useState(null as { uid: number | null; user: string; home: string } | null)
       // Whether the loaded Host half knows about authentication modes at all:
       // an in-place package swap needs a Host restart, and the page keeps working
       // without the secret controls until then.
@@ -895,7 +889,6 @@ window.__ModuleLoader__.load({
           })
           if (result.limits !== undefined) setLimits(result.limits)
           setAskpass(result.askpass ?? 'ready')
-          if (result.runsAs !== undefined) setRunsAs(result.runsAs)
           setModern(result.askpass !== undefined)
           setProbing(result.probing ?? 0)
           setFailure(null)
@@ -1115,17 +1108,6 @@ window.__ModuleLoader__.load({
         } catch {
           if (alive.current) setNotice({ tone: 'warn', text: t('copyFailed') })
         }
-      }
-
-      /**
-       * Name the identity a probe runs as, exactly as the Host reported it.
-       * @returns the one-line description, or `undefined` while it is unknown.
-       */
-      function runsAsLabel(): string | undefined {
-        if (runsAs === null) return undefined
-        const account = runsAs.user === '' ? '—' : runsAs.user
-        const uid = runsAs.uid === null || runsAs.uid === undefined ? '—' : String(runsAs.uid)
-        return `${account} (uid ${uid}) · ${runsAs.home === '' ? '—' : runsAs.home}`
       }
 
       /**
@@ -1538,13 +1520,6 @@ window.__ModuleLoader__.load({
         settings === null ? h('span', { class: 'dshssh-muted' }, loading ? t('listProbing') : t('listLoadFailed')) : null,
       )
 
-      /** Whose ssh configuration a probe really uses. */
-      const identityCard = h('section', { class: 'dshssh-card' },
-        h('h3', { class: 'dshssh-card-title' }, t('runAsTitle')),
-        runsAsLabel() === undefined ? null : h('p', { class: 'dshssh-row-meta' }, runsAsLabel() ?? ''),
-        h('p', { class: 'dshssh-muted' }, t('runAsHint')),
-      )
-
       /** What the plugin fixes in code, so a value is never a surprise. */
       const boundsCard = h('section', { class: 'dshssh-card' },
         h('h3', { class: 'dshssh-card-title' }, t('boundsTitle')),
@@ -1613,7 +1588,7 @@ window.__ModuleLoader__.load({
         'aria-labelledby': `${TAB_BASE}-${tab}`,
         tabIndex: 0,
         class: 'dshssh-panel',
-      }, tab === 'list' ? listCard : h('div', { class: 'dshssh-panel' }, settingsCard, identityCard, boundsCard))
+      }, tab === 'list' ? listCard : h('div', { class: 'dshssh-panel' }, settingsCard, boundsCard))
 
       return h('div', { class: 'dshssh-root' },
         h('style', {}, CSS),

@@ -155,9 +155,9 @@ transfers — goes through the chat tool, under the approval rules above.
 ## When your terminal connects but the page does not
 
 A probe is not your terminal session. It runs as the account the Harness Host
-process uses, and the Client settings tab names that account under **Probe
-identity**. That account has its own `~/.ssh/config`, its own private keys, its
-own `ssh-agent`, and its own `known_hosts`, so:
+process uses — the account that launched Harness, which need not be the one you
+type `ssh` in — and that account has its own `~/.ssh/config`, its own private
+keys, its own `ssh-agent`, and its own `known_hosts`, so:
 
 - an alias that works in your terminal may resolve to something else, or nothing,
   for the Host account;

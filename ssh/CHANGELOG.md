@@ -17,6 +17,38 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.21
+
+### Removed
+
+- **The Probe identity card is gone, and the `runsAs` field feeding it.** The
+  Client settings tab now runs from the three ceiling fields straight to the
+  bounds card. The card printed `account (uid N) · home`, read live off the Host
+  process (`process.getuid()`, `$USER`/`$LOGNAME`, `$HOME`); nothing in the
+  plugin acted on any of it, and the named account was the half that decided
+  nothing. What a probe actually inherits is that account's whole ssh world —
+  `~/.ssh/config`, keys, agent socket, `known_hosts`, and the child's `cwd` —
+  so the useful reading was always the path plus what lives there, which the
+  card never checked. Its `user` was an environment variable rather than the
+  account behind the uid, so launched under a stale environment it printed a
+  confidently wrong name. `list` no longer reports `runsAs`; the page's state,
+  its two dictionary keys in each language, and the test that pinned the
+  payload's shape left with it.
+
+### Notes
+
+- Behaviour is untouched: a probe still runs as the Host account, still records
+  an unknown host key on first contact, and still fails on a changed one. The
+  detail pages say so directly instead of pointing at a card, and the
+  `unknown-host` hint still names the Host account's `known_hosts`.
+- Four facts would settle what the card only gestured at: the resolved `ssh`
+  path, whether that account's agent holds any identity, whether the named key
+  file is readable by it, and whether the host is already in that account's
+  `known_hosts`. None is collected today; the shape a revival would take is
+  written down in `README.md`.
+- No stored record or setting changes: the retired value was never persisted, so
+  the storage domain stays at version 4 and old files open as they did.
+
 ## 0.0.20
 
 ### Added

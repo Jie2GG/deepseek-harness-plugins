@@ -140,8 +140,6 @@ export interface ListResult {
   askpass: 'ready' | 'unavailable'
   /** Why the helper is unavailable, when it is. */
   askpassFailure?: string
-  /** Whose `~/.ssh` the probes read and write: the Host process's own identity. */
-  runsAs: { uid: number | null; user: string; home: string }
   probing: number
 }
 
@@ -664,11 +662,6 @@ export function createOps(deps: OpsDeps): Ops {
         },
         askpass: helper.ready ? 'ready' : 'unavailable',
         ...(helper.ready || helper.failure === undefined ? {} : { askpassFailure: helper.failure.slice(0, 512) }),
-        runsAs: {
-          uid: typeof process.getuid === 'function' ? process.getuid() : null,
-          user: process.env.USER ?? process.env.LOGNAME ?? '',
-          home: process.env.HOME ?? '',
-        },
         probing: runner.inFlight,
       }
     },

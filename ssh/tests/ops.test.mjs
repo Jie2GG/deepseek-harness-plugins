@@ -28,7 +28,7 @@ function build ({ records = [record()], store, secrets, askpassReady = true, loc
 const iso = new Date().toISOString()
 
 // ── inventory reads ─────────────────────────────────────────────────────────
-test('list carries the views, the limits, the askpass health, and the run identity', async () => {
+test('list carries the views, the limits, and the askpass health', async () => {
   const { ops } = build({ store: fakeStore({ records: [record()], session: { sessionId: 'session-77', targetId: 'ssh-a1b2c3d4e5', setAt: iso } }) })
   const out = await ops.list({ sessionId: 'session-77' })
   assert.equal(out.connections.length, 1)
@@ -39,7 +39,6 @@ test('list carries the views, the limits, the askpass health, and the run identi
   assert.equal(out.askpass, 'ready')
   assert.equal(out.sessionTarget, 'ssh-a1b2c3d4e5')
   assert.equal(out.probing, 0)
-  assert.deepEqual(Object.keys(out.runsAs).sort(), ['home', 'uid', 'user'])
   const broken = build({ askpassReady: false })
   assert.equal((await broken.ops.list()).askpass, 'unavailable')
 })

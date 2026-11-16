@@ -350,10 +350,15 @@ next round does not have to re-derive them:
   child and drained them, so a probe that hits its deadline waits up to 400 ms
   for `waitForExit` before reading them; without that drain a timeout carries no
   reason at all.
-- `list` reports `runsAs` (`uid`, `user`, `home`) from the Host process, because
-  a probe reads that account's `~/.ssh`, not the terminal user's. On this
-  deployment the Host runs as uid 1024 with no `passwd` entry while the shell
-  account is uid 1000 — exactly the confusion the identity card answers.
+- A probe reads that account's `~/.ssh`, not the terminal user's. `list` used to
+  report `runsAs` (`uid`, `user`, `home`) so a settings card could name the
+  account; the card was cut in 0.0.21 — the name settled nothing the probe
+  result had not settled already, and its `user` was `process.env.USER`, a name
+  inherited from whoever launched the process rather than what its uid proves.
+  The facts that would actually settle it are the four the card never carried:
+  the resolved `ssh` path, whether that account's agent holds any identity,
+  whether the named key file is readable by it, and whether the host is already
+  in that account's `known_hosts`.
 
 ## Remaining surface
 
@@ -379,8 +384,8 @@ still open:
   picker, and no job list.
 - A probe reads the **Host account's** ssh world — its `~/.ssh/config`, keys,
   agent, and `known_hosts` — not the terminal user's, so a working alias in a
-  shell can still resolve differently here. The Client settings tab names the
-  account, and the first probe records an unknown host key rather than asking.
+  shell can still resolve differently here. The first probe records an unknown
+  host key rather than asking.
 - Nothing about these fixes is live until the running Host loads the new module:
   an in-place package swap keeps the previous one until the process restarts.
 - A page probe still authenticates and runs only `true`; real commands come from
