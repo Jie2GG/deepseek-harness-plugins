@@ -10,7 +10,8 @@
  *
  * Format history: 1 = targets only; 2 = added `auth`; 3 = added the agent-access
  * fields and the `sessions` table; 4 = the global slot shrank to the three
- * ceilings (the executable is detected now, and the probe deadline is fixed).
+ * ceilings (the executable is detected now, and the probe deadline is fixed);
+ * 5 = added the per-target `pool` switch for connection sharing.
  * Older records keep opening because every added field is optional, and every
  * retired field is accepted and ignored, so no stored file is refused.
  *
@@ -27,20 +28,37 @@ export const DOMAIN_NAME = 'ssh_targets'
 /**
  * Current record format version. 2 added `auth`, 3 added the agent fields and
  * the `sessions` table, 4 shrank the global slot to the three ceilings the page
- * still edits — the executable is detected and the probe deadline is fixed.
- * The current schemas accept every earlier shape, so no stored file is
- * rewritten or refused on upgrade.
+ * still edits — the executable is detected and the probe deadline is fixed — and
+ * 5 added the per-target `pool` switch. The current schemas accept every earlier
+ * shape, and a stored record with no `pool` shares by default, so no stored file
+ * is rewritten or refused on upgrade.
  */
-export const DOMAIN_VERSION = 4
+export const DOMAIN_VERSION = 5
 
 /** Older stored records the current schemas still accept. */
-export const COMPATIBLE_VERSIONS = [1, 2, 3]
+export const COMPATIBLE_VERSIONS = [1, 2, 3, 4]
 
 /** Ceiling on how many targets the page may keep. */
 export const MAX_CONNECTIONS = 64
 
-/** Ceiling on how many probes run at once. */
-export const MAX_CONCURRENT_PROBES = 4
+/**
+ * Ceiling on how many remote operations run at once, counting the page's probes
+ * and every agent call alike. With connections shared per target this is no
+ * longer a count of TCP sessions — it is how many local `ssh` children the Host
+ * may hold, which is what actually costs this machine.
+ */
+export const MAX_CONCURRENT_OPS = 16
+
+/** Ceiling on how many servers may hold an open shared master at once. */
+export const MAX_LIVE_MASTERS = 8
+
+/**
+ * How long a master stays up after its last call hung up, in seconds. Long
+ * enough that a conversation's next few commands ride along on the connection
+ * that already authenticated; short enough that a master abandoned by a killed
+ * Host stops counting against the server on its own.
+ */
+export const CONTROL_PERSIST_SECONDS = 300
 
 /** Ceiling on how many command names one target may allowlist. */
 export const MAX_ALLOWED_COMMANDS = 32
@@ -121,6 +139,13 @@ export const authModeSchema = z.enum(['password', 'key', 'key+password'])
 /** The modes a page may send: key, or password. */
 export const authChoiceSchema = z.enum(['key', 'password'])
 
+/**
+ * Whether one target may share its connection with later calls. `on` is the
+ * default and the stored default: sharing is invisible except in speed, and a
+ * target switches off only when its server misbehaves around a multiplexed one.
+ */
+export const poolChoiceSchema = z.enum(['on', 'off'])
+
 /** One classified probe result kept beside a target. */
 export const probeOutcomeSchema = z.object({
   at: instantSchema,
@@ -147,6 +172,8 @@ export const connectionRecordSchema = z.object({
   auth: authModeSchema.default('key'),
   /** Whether the agent may reach this target at all; `off` hides it from tools. */
   agentAccess: z.enum(['on', 'off']).default('on'),
+  /** Whether later calls to this target ride on this call's connection. */
+  pool: poolChoiceSchema.default('on'),
   /**
    * Program names the agent may run without asking. Empty means every remote
    * command needs an approval, which is what 0.6.0 ships as the safe default.
@@ -200,6 +227,7 @@ export const connectionInputSchema = z.object({
   note: z.string().trim().min(1).max(512).optional(),
   auth: authChoiceSchema.optional(),
   agentAccess: z.enum(['on', 'off']).optional(),
+  pool: poolChoiceSchema.optional(),
   allowedCommands: z.array(programSchema).max(MAX_ALLOWED_COMMANDS).optional(),
   remoteTimeoutMs: z.number().int().min(MIN_REMOTE_TIMEOUT_MS).max(MAX_REMOTE_TIMEOUT_MS).nullable().optional(),
   maxOutputBytes: z.number().int().min(MIN_MAX_OUTPUT_BYTES).max(MAX_MAX_OUTPUT_BYTES).nullable().optional(),
@@ -222,6 +250,7 @@ export const probeDraftSchema = z.object({
   proxyJump: hostSchema.optional(),
   extraArgs: z.array(flagSchema).max(16).optional(),
   auth: authChoiceSchema.optional(),
+  pool: poolChoiceSchema.optional(),
 }).strict()
 
 /** Secrets typed into an unsaved form: used for one probe, never stored. */

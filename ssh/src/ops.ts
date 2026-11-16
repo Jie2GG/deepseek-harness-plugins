@@ -10,7 +10,7 @@
  * @module @jie2gg/dsh-plugin-ssh/ops
  */
 
-import { connectionInputSchema, draftSecretSchema, remotePathSchema, transferInputSchema, sessionTargetInputSchema, BACKGROUND_DEADLINE_MS, MAX_CONCURRENT_PROBES, MAX_CONNECTIONS, MAX_MAX_OUTPUT_BYTES, MAX_MAX_TRANSFER_BYTES, MAX_REMOTE_TIMEOUT_MS, MIN_MAX_OUTPUT_BYTES, MIN_MAX_TRANSFER_BYTES, MIN_REMOTE_TIMEOUT_MS, PROBE_TIMEOUT_MS, probeDraftSchema, remoteRunSchema, secretPatchSchema, settingsInputSchema } from './storage.ts'
+import { connectionInputSchema, draftSecretSchema, remotePathSchema, transferInputSchema, sessionTargetInputSchema, BACKGROUND_DEADLINE_MS, CONTROL_PERSIST_SECONDS, MAX_CONCURRENT_OPS, MAX_CONNECTIONS, MAX_LIVE_MASTERS, MAX_MAX_OUTPUT_BYTES, MAX_MAX_TRANSFER_BYTES, MAX_REMOTE_TIMEOUT_MS, MIN_MAX_OUTPUT_BYTES, MIN_MAX_TRANSFER_BYTES, MIN_REMOTE_TIMEOUT_MS, PROBE_TIMEOUT_MS, probeDraftSchema, remoteRunSchema, secretPatchSchema, settingsInputSchema } from './storage.ts'
 import { SshError } from './types.ts'
 import type { AuthMode, ConnectionRecord, ConnectionView, ProbeOutcome, ResolvedConfig, RemoteRunResult, RemoteTransferResult, SshSettings } from './types.ts'
 import { transfer } from './transfer.ts'
@@ -125,7 +125,9 @@ export interface ListResult {
   settings: SshSettings
   limits: {
     maxConnections: number
-    concurrentProbes: number
+    concurrentOps: number
+    maxLiveMasters: number
+    controlPersistSeconds: number
     probeAllLimit: number
     /** The fixed probe deadline, shown on the bounds card as a fact, not a range. */
     probeTimeoutMs: number
@@ -136,6 +138,8 @@ export interface ListResult {
     transferMinBytes: number
     transferMaxBytes: number
   }
+  /** Whether calls on this Host can share a connection, and how many masters do. */
+  pool: { ready: boolean; liveMasters: number; failure?: string }
   /** Whether this Host can answer a password or passphrase prompt at all. */
   askpass: 'ready' | 'unavailable'
   /** Why the helper is unavailable, when it is. */
@@ -211,6 +215,10 @@ export interface OpsDeps {
 function targetOf(source: RemoteTarget): RemoteTarget {
   return {
     host: source.host,
+    // The id is what the pool keys a shared connection by: an edited target gets a
+    // new socket name instead of inheriting the master its predecessor left open.
+    ...(source.id === undefined ? {} : { id: source.id }),
+    ...(source.pool === undefined ? {} : { pool: source.pool }),
     ...(source.user === undefined ? {} : { user: source.user }),
     ...(source.port === undefined ? {} : { port: source.port }),
     ...(source.identityFile === undefined ? {} : { identityFile: source.identityFile }),
@@ -650,7 +658,9 @@ export function createOps(deps: OpsDeps): Ops {
         settings,
         limits: {
           maxConnections: MAX_CONNECTIONS,
-          concurrentProbes: MAX_CONCURRENT_PROBES,
+          concurrentOps: MAX_CONCURRENT_OPS,
+          maxLiveMasters: MAX_LIVE_MASTERS,
+          controlPersistSeconds: CONTROL_PERSIST_SECONDS,
           probeAllLimit: PROBE_ALL_LIMIT,
           probeTimeoutMs: PROBE_TIMEOUT_MS,
           outputMinBytes: MIN_MAX_OUTPUT_BYTES,
@@ -662,6 +672,11 @@ export function createOps(deps: OpsDeps): Ops {
         },
         askpass: helper.ready ? 'ready' : 'unavailable',
         ...(helper.ready || helper.failure === undefined ? {} : { askpassFailure: helper.failure.slice(0, 512) }),
+        pool: {
+          ready: runner.mux.ready,
+          liveMasters: runner.liveMasters,
+          ...(runner.mux.failure === undefined ? {} : { failure: runner.mux.failure.slice(0, 512) }),
+        },
         probing: runner.inFlight,
       }
     },
@@ -738,7 +753,7 @@ export function createOps(deps: OpsDeps): Ops {
       const chosen = all.slice(0, PROBE_ALL_LIMIT)
       const failures: { id: string; message: string }[] = []
       let cursor = 0
-      const lanes = Math.min(MAX_CONCURRENT_PROBES, Math.max(1, chosen.length))
+      const lanes = Math.min(MAX_CONCURRENT_OPS, Math.max(1, chosen.length))
       await Promise.all(
         Array.from({ length: lanes }, async () => {
           while (cursor < chosen.length) {

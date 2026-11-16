@@ -141,29 +141,43 @@ export async function transfer(
   // scp takes -P for the port and -q to keep the transcript quiet; the ssh-side
   // defaults (accept-new, BatchMode, the askpass environment) come from the same
   // builder so a transfer authenticates exactly like the probe for that target.
-  const { flags, env } = transport.sshOptions(target, settings, auth, request.timeoutMs, { portFlag: '-P' })
-  const argvTail = ['-q', ...flags, ...(request.recursive === true ? ['-r'] : []), src, dst]
-  const collected = await transport.execute(program, argvTail, settings, env, request.timeoutMs, 'file transfer', request.signal)
-  if (collected.outcome === 'timeout') {
-    return { status: 'failed', durationMs: collected.durationMs, message: 'The transfer ran out of its deadline.', overwrote: false }
-  }
-  if (collected.outcome !== 'exit' || (collected.exitCode ?? 0) !== 0) {
+  // The lease is held across the whole copy: a transfer is one long channel over
+  // the master rather than a second connection, and the pool counts it as in use
+  // until the bytes have moved.
+  const ticket = transport.share(target, auth)
+  try {
+    const { flags, env } = transport.sshOptions(target, settings, auth, request.timeoutMs, {
+      portFlag: '-P',
+      poolFlags: ticket?.flags,
+    })
+    const argvTail = ['-q', ...flags, ...(request.recursive === true ? ['-r'] : []), src, dst]
+    const collected = await transport.execute(program, argvTail, settings, env, request.timeoutMs, 'file transfer', request.signal)
     const text = `${collected.stderr}\n${collected.stdout}`
-    if (/no such file|not found|no such directory|permission denied.*stat/iu.test(text) && request.direction === 'upload') {
-      return { status: 'missing', durationMs: collected.durationMs, message: `The local file ${request.localPath} could not be read, or the remote directory does not exist.`, overwrote: false }
+    // A copy that ended — even one that ended over a missing file — proved the
+    // connection. One that timed out, or said the session itself gave out, did not.
+    transport.noteShared(ticket, collected.outcome === 'exit' && !transport.sessionBroken(text))
+    if (collected.outcome === 'timeout') {
+      return { status: 'failed', durationMs: collected.durationMs, message: 'The transfer ran out of its deadline.', overwrote: false }
+    }
+    if (collected.outcome !== 'exit' || (collected.exitCode ?? 0) !== 0) {
+      if (/no such file|not found|no such directory|permission denied.*stat/iu.test(text) && request.direction === 'upload') {
+        return { status: 'missing', durationMs: collected.durationMs, message: `The local file ${request.localPath} could not be read, or the remote directory does not exist.`, overwrote: false }
+      }
+      return {
+        status: 'failed',
+        durationMs: collected.durationMs,
+        message: text.trim() === '' ? `scp exited with ${String(collected.exitCode ?? 'signal')}.` : text.trim().slice(0, 512),
+        overwrote: false,
+      }
     }
     return {
-      status: 'failed',
-      durationMs: collected.durationMs,
-      message: text.trim() === '' ? `scp exited with ${String(collected.exitCode ?? 'signal')}.` : text.trim().slice(0, 512),
-      overwrote: false,
+      status: 'moved',
+      durationMs: Date.now() - startedAt,
+      overwrote: request.overwrite === true,
+      ...(knownBytes === undefined ? {} : { bytes: knownBytes }),
+      ...(request.recursive === true ? { kind: 'directory' } : {}),
     }
-  }
-  return {
-    status: 'moved',
-    durationMs: Date.now() - startedAt,
-    overwrote: request.overwrite === true,
-    ...(knownBytes === undefined ? {} : { bytes: knownBytes }),
-    ...(request.recursive === true ? { kind: 'directory' } : {}),
+  } finally {
+    transport.unshare(ticket)
   }
 }

@@ -17,6 +17,83 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.22
+
+### Added
+
+- **Connections are shared per target.** Four remote operations at a time used to
+  mean four fresh handshakes and four logins, and four of anything at once locked
+  the settings page out of its own Test button. The transport now leases one
+  multiplexed OpenSSH connection per target: the call that arrives first dials and
+  becomes the master, and the calls that follow ride the same authenticated
+  session — no second handshake, no second authentication, and one `sshd` at the
+  far end instead of one per call. A master that dies is healed by the next call,
+  not by a probe: `ControlMaster=auto` falls back to a direct connection inside
+  the child that needed it, so nothing spends a process asking whether the socket
+  is alive. (`src/pool.ts`.)
+- **A control socket is named by what decides the connection**: the target's id,
+  its authority, port, jump host, identity file, extra flags, auth mode, and a
+  hash of the secret the call holds. Editing a target therefore cannot inherit the
+  master its predecessor left open, and a draft probed with a second typed
+  password cannot ride along on a master that authenticated with the first and
+  report the wrong secret as good. No secret appears in a file name.
+- **A per-target switch.** `pool` (`on` by default) turns sharing off for one
+  server, and the reason it exists is the far side: `sshd`'s `MaxSessions` is a
+  server setting this plugin does not control, and some hosts are configured
+  lower. The page edits it under **Advanced options**; the model reads it as a
+  `pool off` chip in the target list. The storage domain is **version 5**, and
+  reads 1 through 4: a record with no `pool` means `on`, so no stored file is
+  refused or rewritten on upgrade.
+- **Two ceilings, for two different costs.** `MAX_CONCURRENT_OPS` counts local
+  `ssh` children (what this machine pays for) and `MAX_LIVE_MASTERS` counts
+  servers holding a shared connection (what the fleet of servers pays for). A
+  ninth server retires the idle master that has been quiet longest with
+  `ssh -O exit`; when every master is busy the newcomer dials alone and says so in
+  its result rather than opening an unplanned session. Teardown children take no
+  operation slot.
+- **`ControlPath=none` is the default for any call that leased nothing.** The Host
+  account's own `~/.ssh/config` may name a control socket, and a plugin child that
+  inherited one would be sharing a master nobody here is counting, on credentials
+  nobody chose. `ControlMaster=no` on its own would not prevent that — it still
+  joins a listening master. The target's own extra arguments still land last, so a
+  reader who writes `-o ControlPath=…` there keeps winning.
+
+### Changed
+
+- **The concurrency limit counts operations, not probes: 4 → 16.** With
+  connections shared, the number that mattered stopped being "how many sessions
+  may exist" and became "how many local children may exist". The refusal is the
+  same shape and still arrives as its own answer instead of a queue.
+- The bounds card states the sharing facts beside the existing ones: operations at
+  once, servers that may each hold one, and how long an idle shared connection
+  stays open (five minutes, `CONTROL_PERSIST_SECONDS`). The limits the page reads
+  renamed with them (`concurrentProbes` → `concurrentOps`), and a page that loads
+  against a Host predating the pool merges over its own defaults instead of
+  printing blanks — the same in-place-swap tolerance the auth modes already had.
+- The settings page learns whether the loaded Host has a pool from the `list`
+  payload, and only offers the switch and sends the field when it does.
+
+### Notes
+
+- OpenSSH's sharing behaviour was reproduced against a live server rather than
+  read out of the manual, and the facts are recorded in `README.md`: a master
+  stays up after its first client exits, `-O exit` removes the socket file, and a
+  call on a dead path re-authenticates and exits 0. That last fact is what the
+  no-probe-on-the-hot-path design rests on.
+- A master is a process OpenSSH left in the background, not a child the Host still
+  watches. Unloading the plugin closes the masters it knows about and removes the
+  private socket directory; a Host killed outright leaves each master on its
+  server until the five idle minutes run out. The pool belongs to the Host
+  process, so two conversations aimed at one server share one connection.
+- Secrets are still needed on every call, pooled or not: when a master turns out to
+  be gone, the child that heals it has to authenticate, and it authenticates with
+  the credential that call was given.
+- The offline suites grew a tenth file (`pool.test.mjs`: what a socket is named by,
+  who is evicted, what gets closed on unload, and the case where every master is
+  busy), and the transport suite now pins the sharing flags and the split between a
+  multiplexing complaint and a server refusing the call. 104 tests, all green;
+  `tsc` clean and `oxlint` reports 0 warnings and 0 errors.
+
 ## 0.0.21
 
 ### Removed

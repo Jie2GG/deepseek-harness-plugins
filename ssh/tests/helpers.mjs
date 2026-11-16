@@ -20,14 +20,48 @@ export function assertPayloadValid (schema, payload) {
 
 /** A recorded fake transport for ops: canned results, in call order or by command. */
 export function fakeRunner () {
-  const state = { calls: [], runQueue: [], probeOutcome: null, resolveOut: null, startRunOut: null, executeOut: null, optionsSeen: [] }
+  const state = { calls: [], runQueue: [], probeOutcome: null, resolveOut: null, startRunOut: null, executeOut: null, optionsSeen: [], shares: [] }
   const runner = {
     inFlight: 0,
+    // What the pool looks like from ops.ts: ready, and holding nothing.
+    liveMasters: 0,
+    mux: { ready: true, failure: undefined, liveMasters: 0 },
+    /** A lease that shares nothing but records that a call asked. */
+    share (target, auth) {
+      const ticket = {
+        flags: [],
+        note: undefined,
+        pooled: false,
+        released: 0,
+        marked: 0,
+        dropped: 0,
+        release () { this.released += 1 },
+        markLive () { this.marked += 1 },
+        drop () { this.dropped += 1 }
+      }
+      state.shares.push({ target, auth, ticket })
+      return ticket
+    },
+    unshare (ticket) { ticket?.release() },
+    noteShared (ticket, worked) {
+      if (ticket === undefined) return
+      if (worked) ticket.markLive()
+      else ticket.drop()
+    },
+    sessionBroken () { return false },
     dispose () {},
     async run (target, settings, auth, command, options = {}) {
+      // The real transport leases around a call; so does the stand-in, so a test
+      // can see what a call would have handed the pool.
+      const ticket = runner.share(target, auth)
       state.calls.push({ kind: 'run', command, options, target, auth, maxOutputBytes: options.maxOutputBytes })
-      const canned = typeof state.nextRun === 'function' ? state.nextRun(command, options) : state.runQueue.shift()
-      return canned ?? { status: 'succeeded', at: new Date().toISOString(), exitCode: 0, stdout: '', stderr: '', durationMs: 1 }
+      try {
+        const canned = typeof state.nextRun === 'function' ? state.nextRun(command, options) : state.runQueue.shift()
+        return canned ?? { status: 'succeeded', at: new Date().toISOString(), exitCode: 0, stdout: '', stderr: '', durationMs: 1 }
+      } finally {
+        runner.noteShared(ticket, true)
+        runner.unshare(ticket)
+      }
     },
     async probe (target, settings, auth) {
       state.calls.push({ kind: 'probe', target, auth })
@@ -103,6 +137,7 @@ export function record (over = {}) {
     port: 22022,
     auth: 'key',
     agentAccess: 'on',
+    pool: 'on',
     allowedCommands: [],
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',

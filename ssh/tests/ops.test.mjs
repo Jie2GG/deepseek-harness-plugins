@@ -28,7 +28,7 @@ function build ({ records = [record()], store, secrets, askpassReady = true, loc
 const iso = new Date().toISOString()
 
 // ── inventory reads ─────────────────────────────────────────────────────────
-test('list carries the views, the limits, and the askpass health', async () => {
+test('list carries the views, the limits, the pool state, and the askpass health', async () => {
   const { ops } = build({ store: fakeStore({ records: [record()], session: { sessionId: 'session-77', targetId: 'ssh-a1b2c3d4e5', setAt: iso } }) })
   const out = await ops.list({ sessionId: 'session-77' })
   assert.equal(out.connections.length, 1)
@@ -36,11 +36,27 @@ test('list carries the views, the limits, and the askpass health', async () => {
   assert.equal(out.limits.maxConnections, 64)
   assert.equal(out.limits.transferMaxBytes, 536_870_912)
   assert.equal(out.limits.probeTimeoutMs, 10_000) // one fixed fact, not a range any more
+  // The bounds card reads these names, so a rename is a page change too.
+  assert.equal(out.limits.concurrentOps, 16)
+  assert.equal(out.limits.maxLiveMasters, 8)
+  assert.equal(out.limits.controlPersistSeconds, 300)
+  assert.deepEqual(out.pool, { ready: true, liveMasters: 0 })
   assert.equal(out.askpass, 'ready')
   assert.equal(out.sessionTarget, 'ssh-a1b2c3d4e5')
   assert.equal(out.probing, 0)
   const broken = build({ askpassReady: false })
   assert.equal((await broken.ops.list()).askpass, 'unavailable')
+})
+
+test('every remote call carries the target id and its sharing choice to the transport', async () => {
+  const { ops, state } = build({ records: [record({ pool: 'off' })] })
+  await ops.runCommand({ command: 'uptime' })
+  const shared = state.shares[0]
+  // The pool keys a master by the id: an edited target must not inherit the
+  // connection its predecessor left open, and `pool: off` is a per-target wish.
+  assert.equal(shared.target.id, 'ssh-a1b2c3d4e5')
+  assert.equal(shared.target.pool, 'off')
+  assert.equal(shared.ticket.released, 1) // a lease always comes back
 })
 
 test('an unreadable askpass reports why, and stored records keep their probe', async () => {
@@ -451,7 +467,12 @@ test('a sized-down download moves through scp with host:path both ends and the -
   assert.equal(exec.argvTail.at(-1), '/ws/x')
   assert.ok(exec.argvTail.includes('-q'))
   assert.ok(exec.argvTail.includes('-P'))
-  assert.deepEqual(state.optionsSeen[0].extra, { portFlag: '-P' }) // scp names the port -P
+  // scp names the port -P, and a transfer builds its own child, so it has to say
+  // which connection the copy is riding on rather than let the transport guess.
+  assert.deepEqual(state.optionsSeen[0].extra, { portFlag: '-P', poolFlags: [] })
+  const lease = state.shares.find(entry => entry.target.host === '10.0.0.9')
+  assert.ok(lease, 'the copy leased a connection')
+  assert.equal(lease.ticket.released, 1) // and handed it back once the bytes moved
   const up = build()
   up.state.executeOut = { outcome: 'exit', exitCode: 0, stdout: '', stderr: '', durationMs: 2, truncated: false }
   const upOut = await up.ops.upload({ path: '/srv/x', localPath: '/ws/x', recursive: true })

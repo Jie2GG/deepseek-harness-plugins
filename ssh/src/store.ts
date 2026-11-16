@@ -47,6 +47,7 @@ function identityOf(input: ConnectionInput): Omit<ConnectionRecord, 'id' | 'crea
     host: trimmed(input.host) ?? '',
     auth: input.auth ?? 'key',
     agentAccess: input.agentAccess ?? 'on',
+    pool: input.pool ?? 'on',
     allowedCommands: [...(input.allowedCommands ?? [])].slice(0, MAX_ALLOWED_COMMANDS),
     ...(input.remoteTimeoutMs === undefined || input.remoteTimeoutMs === null ? {} : { remoteTimeoutMs: input.remoteTimeoutMs }),
     ...(input.maxOutputBytes === undefined || input.maxOutputBytes === null ? {} : { maxOutputBytes: input.maxOutputBytes }),

@@ -51,13 +51,23 @@ keeps running while you edit values on the second.
   Results are classified as reachable, authentication failed, unreachable, host
   key not trusted, timed out, or `ssh` not found, and the last result is kept
   with its timestamp and the captured output tail.
+- **Connections are shared.** On one server, the connection the first command
+  opened stays in the plugin's hands, and the calls that follow ride on it — no
+  fresh handshake, no fresh login per command, and one `sshd` working for you at
+  the far end instead of one per call. Eight servers may hold a connection at a
+  time, and each one drops after five idle minutes. Some servers behave
+  differently once several commands share a connection, and for those the
+  collapsed **Advanced options** of that target carries a **Share this server's
+  connection** switch.
 - **Client settings**, on the second tab: the captured output ceiling, the
   command timeout every agent-issued remote call obeys, and the file-transfer
   ceiling a copy may not exceed. Which program dials and how long a connectivity
   test waits are no longer settings at all: `ssh` and `scp` are found by
   themselves (`PATH` first, then the usual install locations), and a probe waits
   a fixed ten seconds. That tab also states the bounds the plugin fixes
-  in code, so a value outside a range is not a surprise.
+  in code, so a value outside a range is not a surprise — three of those lines
+  are about sharing: how many remote operations run at once, how many servers
+  may each hold one, and how long an idle shared connection stays open.
 
 ## Using it from the chat
 
@@ -179,6 +189,11 @@ an unanswerable question.
   **changed** is still refused, never overwritten.
 - The `ssh` binary: nothing is installed or upgraded; a missing executable is
   reported as its own result.
+- The control sockets sharing lives on: they are not in `~/.ssh` and never in
+  `$DSH_HOME`. They sit in a private temporary directory the plugin opens at
+  activation (owner-only permissions), and the directory and everything in it go
+  away when the plugin unloads, so a socket is neither something to back up nor
+  something that outlives the process.
 
 ## Planned behaviour
 
@@ -199,6 +214,13 @@ ignored.
 
 ## Limits of this release
 
+- A shared connection is an `ssh` process that OpenSSH left in the background, not
+  a child this plugin still watches. Unloading the plugin closes the masters it
+  knows about; a Host that is killed outright leaves them alone on the server
+  until their five idle minutes run out. And the pool belongs to the Host process,
+  not to one conversation: two conversations pointing at the same server ride the
+  same connection, which is the point, and also why a server you reach through a
+  jump host stays warm for the other one.
 - A downloaded file is listed among the conversation's changes, the same way an edited
   workspace file is, because the plugin asks the file pipeline for permission before the
   copy starts. Two honest caveats: only the first change to a path within a turn keeps a
@@ -214,7 +236,7 @@ ignored.
   (`tty: true`) and handed its answer (`input: "…"`). A command that will outlive one
   reply can be left running with `background: true`, which returns a job id to poll with
   `job_output` and stop with `job_kill`; it runs to a deadline of its own (thirty
-  minutes or more) and holds one of the plugin's four concurrent remote operations
+  minutes or more) and holds one of the plugin's sixteen concurrent remote operations
   until it settles. What is still missing is a terminal you type
   into live, and a command that keeps running on the server after this conversation
   ends — that one wants `nohup` or a systemd unit, which `exec` can set up.

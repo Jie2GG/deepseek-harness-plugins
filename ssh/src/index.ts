@@ -4,8 +4,10 @@
  * The plugin owns three pieces of state: a storage domain for the target list
  * and its settings, credential records for the passwords and passphrases, and a
  * private askpass helper that lets a spawned `ssh` answer a prompt without a
- * terminal. Its only surface is the settings page, which reaches all three over
- * one browser route.
+ * terminal. Alongside them it holds one transient thing it never persists: the
+ * control sockets of the per-target connection pool, which live in a private
+ * temporary directory for the length of one activation. Its only surface is the
+ * settings page, which reaches all of it over one browser route.
  *
  * @module @jie2gg/dsh-plugin-ssh
  */
@@ -22,6 +24,7 @@ import { effectiveApprovalPolicy } from './approval.ts'
 import { TargetStore } from './store.ts'
 import { TargetSecrets } from './secrets.ts'
 import { AskPassHelper } from './askpass.ts'
+import { MuxPool } from './pool.ts'
 import { SshTransport } from './transport.ts'
 import { createOps } from './ops.ts'
 import { registerRemoteTool } from './tool.ts'
@@ -51,7 +54,11 @@ export const inject = ['connection', 'subprocess', 'storageDomain', 'credentials
  */
 export function apply(ctx: Context): void {
   const askpass = new AskPassHelper()
-  const runner = new SshTransport(ctx, askpass)
+  // The pool owns control sockets; the transport owns the children that open and
+  // close them, so the pool is handed back the way to say `-O exit`.
+  const mux = new MuxPool()
+  const runner = new SshTransport(ctx, askpass, mux)
+  mux.attach((socketPath, authority) => runner.exitMaster(socketPath, authority))
   const secrets = new TargetSecrets(ctx.credentials)
 
   let store: TargetStore | undefined
@@ -108,6 +115,7 @@ export function apply(ctx: Context): void {
       ...(row.port === undefined ? {} : { port: row.port }),
       agentAccess: row.agentAccess,
       allowedCommands: row.allowedCommands,
+      pool: row.pool,
     }))
   }
   /** Whether a local path is already taken, asked through the mounted provider. */
@@ -193,10 +201,17 @@ export function apply(ctx: Context): void {
     if (helper === undefined) {
       ctx.logger.warn(`ssh: no askpass helper could be prepared, so a stored password or passphrase cannot be used: ${askpass.failure ?? 'unknown reason'}`)
     }
+    const sockets = await mux.prepare()
+    if (sockets === undefined) {
+      ctx.logger.warn(`ssh: no private directory for control sockets, so calls will not share connections: ${mux.failure ?? 'unknown reason'}`)
+    }
     return async () => {
+      // Close the masters first: the exits are children, and the askpass helper is
+      // the last thing any of them could still need.
+      await mux.dispose()
       await askpass.dispose()
     }
-  }, 'ssh: askpass helper')
+  }, 'ssh: askpass helper and connection pool')
 
   ctx.effect(() => {
     const api = ctx.connection.fetch

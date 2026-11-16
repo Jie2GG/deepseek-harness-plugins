@@ -11,12 +11,18 @@
  * connect phase gets only a third of the deadline, and one child at a time counts
  * against the concurrency ceiling.
  *
+ * Sharing is decided in one place too: a call that wants to ride on an existing
+ * connection leases one from the pool before `sshOptions` runs and hands it back
+ * when the child is gone. A call that leases nothing gets `ControlPath=none`, so
+ * the only way a plugin child can join a control socket is by asking.
+ *
  * @module @jie2gg/dsh-plugin-ssh/transport
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-subprocess'
-import { MAX_CONCURRENT_PROBES, MIN_REMOTE_TIMEOUT_MS, PROBE_TIMEOUT_MS, SCP_EXECUTABLE, SCP_FALLBACK_PATHS, SSH_EXECUTABLE, SSH_FALLBACK_PATHS } from './storage.ts'
+import { MAX_CONCURRENT_OPS, MIN_MAX_TRANSFER_BYTES, MIN_REMOTE_TIMEOUT_MS, PROBE_TIMEOUT_MS, SCP_EXECUTABLE, SCP_FALLBACK_PATHS, SSH_EXECUTABLE, SSH_FALLBACK_PATHS } from './storage.ts'
+import { NO_SHARE_FLAGS, type MuxSource, type PoolTicket } from './pool.ts'
 import { SshError } from './types.ts'
 import type { AuthMode, ProbeOutcome, ProbeStatus, RemoteRunResult, RemoteStatus, SshSettings } from './types.ts'
 
@@ -34,6 +40,13 @@ export interface RemoteTarget {
   proxyJump?: string | undefined
   /** Additional client flags. */
   extraArgs?: readonly string[] | undefined
+  /**
+   * The stored target's id. The pool keys a shared connection by it so an edited
+   * target cannot inherit the master its predecessor left behind; a draft has none.
+   */
+  id?: string | undefined
+  /** Whether this target may share; `off` asks for a fresh connection every call. */
+  pool?: 'on' | 'off' | undefined
 }
 
 /** The credentials one call may answer a prompt with. */
@@ -63,6 +76,21 @@ const HOST_KEY_PATTERNS: readonly RegExp[] = [
   /offending (rsa |ecdsa |ed25519 |ecdsa-sk |ed25519-sk )?key in/iu,
   /host key for .* did not match/iu,
   /fingerprint does not match/iu,
+]
+
+/**
+ * stderr text meaning a shared connection stopped being usable: the server refused
+ * another channel, or the master hung up under the call. Either way the pool should
+ * forget this master and the next call dials its own.
+ */
+const SESSION_SETUP_PATTERNS: readonly RegExp[] = [
+  /session setup failed/iu,
+  /too many sessions/iu,
+  /exceeded maxsessions/iu,
+  /channel open failed/iu,
+  /packet write failed/iu,
+  /mux_handler: read error/iu,
+  /controlsocket.*already exists/iu,
 ]
 
 /** stderr text meaning the transport worked and the credential did not. */
@@ -102,6 +130,22 @@ const DETAIL_LIMIT = 2048
 
 /** How long to wait for the provider to drain the pipes after termination. */
 const DRAIN_MS = 400
+
+/**
+ * How long one `ssh -O exit` teardown child gets before it is given up on.
+ *
+ * Closing a master is a conversation with the local socket, not with the server,
+ * so it answers in milliseconds or the master is already gone. It takes no
+ * operation slot and borrows no page setting, hence its own small budget.
+ */
+const MASTER_EXIT_MS = 2_000
+
+/** The ceilings a teardown child runs under, for the same reason. */
+const CONTROL_SETTINGS: SshSettings = {
+  maxOutputBytes: 8_192,
+  remoteTimeoutMs: MASTER_EXIT_MS,
+  maxTransferBytes: MIN_MAX_TRANSFER_BYTES,
+}
 
 /** An unknown host key is recorded on first contact; a changed one still fails. */
 export const HOST_KEY_SETTING = 'StrictHostKeyChecking=accept-new'
@@ -153,6 +197,66 @@ export function classifyProbe(exitCode: number | null, detail: string): ProbeSta
   if (AUTH_PATTERNS.some(pattern => pattern.test(detail))) return 'auth-failed'
   if (NETWORK_PATTERNS.some(pattern => pattern.test(detail))) return 'unreachable'
   return 'failed'
+}
+
+/**
+ * Turn one finished probe child into the outcome the page stores.
+ *
+ * The child's own ending comes first: a probe that ran out of its deadline or was
+ * cancelled never reaches an exit code worth classifying, and reading one anyway
+ * is how a timeout used to arrive with no reason attached.
+ * @param collected - what the bounded child produced.
+ * @param detail - the captured output tail, already trimmed.
+ * @returns the classified probe outcome.
+ */
+function classifyCollectedProbe(collected: Collected, detail: string | undefined): ProbeOutcome {
+  const at = new Date().toISOString()
+  if (collected.outcome === 'timeout') {
+    return { at, status: 'timeout', durationMs: collected.durationMs, ...(detail === undefined ? {} : { detail }) }
+  }
+  if (collected.outcome === 'cancelled') {
+    return { at, status: 'failed', durationMs: collected.durationMs, detail: 'The probe was cancelled.' }
+  }
+  if (collected.outcome === 'error') {
+    return {
+      at,
+      status: 'failed',
+      durationMs: collected.durationMs,
+      detail: `The ssh client could not start: ${collected.error ?? collected.stdout}${collected.stderr}`.slice(0, DETAIL_LIMIT),
+    }
+  }
+  return {
+    at,
+    status: classifyProbe(collected.exitCode, detail ?? ''),
+    durationMs: collected.durationMs,
+    exitCode: collected.exitCode,
+    ...(detail === undefined ? {} : { detail }),
+  }
+}
+
+/**
+ * Fold the pool's explanation into a result, for the rare call it let run alone.
+ * @param outcome - the classified probe.
+ * @param ticket - the lease, whose note is set only when this call did not share.
+ * @returns the outcome to store, with the note appended to its detail.
+ */
+function withPoolNote(outcome: ProbeOutcome, ticket: PoolTicket | undefined): ProbeOutcome {
+  if (ticket?.note === undefined) return outcome
+  const detail = outcome.detail === undefined ? ticket.note : `${outcome.detail}\n${ticket.note}`
+  return { ...outcome, detail: detail.slice(0, DETAIL_LIMIT) }
+}
+
+/**
+ * Fold the pool's explanation into a finished command, so a reader told the call
+ * ran on its own connection can see why it did.
+ * @param result - the classified run.
+ * @param ticket - the lease, whose note is set only when this call did not share.
+ * @returns the result to hand back.
+ */
+function withRunNote(result: RemoteRunResult, ticket: PoolTicket | undefined): RemoteRunResult {
+  if (ticket?.note === undefined) return result
+  const stderr = result.stderr === undefined ? ticket.note : `${result.stderr}\n${ticket.note}`
+  return { ...result, stderr }
 }
 
 /**
@@ -259,6 +363,7 @@ export interface Collected {
 export class SshTransport {
   readonly #ctx: Context
   readonly #askpass: AskPassSource | undefined
+  readonly #pool: MuxSource | undefined
   #inFlight = 0
   readonly #controllers = new Set<AbortController>()
   // The programs the plugin dials with, found on first use: no page names them
@@ -270,15 +375,115 @@ export class SshTransport {
   /**
    * @param ctx - Host context that carries `subprocess`.
    * @param askpass - the helper that answers a password or passphrase prompt.
+   * @param pool - the per-target connection pool, when this profile has one.
    */
-  constructor(ctx: Context, askpass?: AskPassSource) {
+  constructor(ctx: Context, askpass?: AskPassSource, pool?: MuxSource) {
     this.#ctx = ctx
     this.#askpass = askpass
+    this.#pool = pool
   }
 
   /** How many children this transport has running right now. */
   get inFlight(): number {
     return this.#inFlight
+  }
+
+  /** How many servers are holding an open shared connection right now. */
+  get liveMasters(): number {
+    return this.#pool?.liveMasters ?? 0
+  }
+
+  /** Whether this Host can share connections at all, and why not when it cannot. */
+  get mux(): { ready: boolean; failure?: string | undefined } {
+    if (this.#pool === undefined) return { ready: false, failure: 'no pool was assembled for this profile' }
+    return { ready: this.#pool.ready, ...(this.#pool.failure === undefined ? {} : { failure: this.#pool.failure }) }
+  }
+
+  /**
+   * Lease a shared connection for one call.
+   *
+   * Every caller must hand the ticket back through {@link unshare} in a `finally`:
+   * the pool counts calls in flight, and a leaked lease holds a slot that no
+   * eviction can reclaim. A call that leases nothing still dials correctly,
+   * because {@link sshOptions} defaults to disabling sharing.
+   * @param target - the identity fields, including the stored target's id.
+   * @param auth - the credential this call answers prompts with.
+   * @returns the lease, or `undefined` when no pool is assembled.
+   */
+  share(target: RemoteTarget, auth: RemoteAuth): PoolTicket | undefined {
+    return this.#pool?.claim(target, auth)
+  }
+
+  /**
+   * Hand one lease back.
+   * @param ticket - the lease to release; `undefined` is fine.
+   */
+  unshare(ticket: PoolTicket | undefined): void {
+    ticket?.release()
+  }
+
+  /**
+   * Settle one lease against how its call actually went.
+   *
+   * A call that got a session open proves the master is there. A call the server
+   * refused a channel on, or that lost the connection mid-flight, proves the master
+   * is not worth trusting again and the next call dials its own. Anything between —
+   * a rejected credential, a host key nobody accepted — leaves the ledger alone,
+   * because the release path already drops a master that never proved itself.
+   *
+   * Public because a caller that builds its own child — a transfer, for one — has
+   * to settle the lease it holds the same way this class settles its own.
+   * @param ticket - the lease the call held, pooled or not.
+   * @param worked - whether this call reached an authenticated session.
+   */
+  noteShared(ticket: PoolTicket | undefined, worked: boolean): void {
+    if (ticket === undefined || !ticket.pooled) return
+    if (worked) {
+      ticket.markLive()
+      return
+    }
+    ticket.drop()
+  }
+
+  /**
+   * Whether this output text says the shared connection itself gave out, which is a
+   * different fault from the server refusing the call.
+   *
+   * Public for the same reason {@link noteShared} is: a caller that builds its own
+   * child still has to read the same table.
+   * @param text - the captured output of one finished call.
+   * @returns `true` when a reader is looking at a multiplexing failure.
+   */
+  sessionBroken(text: string): boolean {
+    return SESSION_SETUP_PATTERNS.some(pattern => pattern.test(text))
+  }
+
+  /**
+   * Ask one master to hang up. Best-effort: a master that will not answer is
+   * already gone, and its socket goes with the directory.
+   * @param socketPath - the control socket naming the master.
+   * @param authority - the `[user@]host` OpenSSH matches the socket to.
+   * @returns resolution once the teardown child settled.
+   */
+  async exitMaster(socketPath: string, authority: string): Promise<void> {
+    const program = await this.resolveSsh()
+    if (program === undefined) return
+    const controller = new AbortController()
+    this.#controllers.add(controller)
+    try {
+      await this.#collect(
+        program,
+        ['-o', `ControlPath=${socketPath}`, '-o', 'ControlMaster=no', '-o', 'BatchMode=yes', '-O', 'exit', authority],
+        CONTROL_SETTINGS,
+        undefined,
+        MASTER_EXIT_MS,
+        controller,
+      )
+    } catch {
+      // Nothing a reader could act on is waiting on this call.
+    } finally {
+      this.#controllers.delete(controller)
+    }
   }
 
   /** Abort every child still running, for plugin teardown. */
@@ -351,6 +556,8 @@ export class SshTransport {
    * @param settings - shared ceilings and the probe/command deadline to derive from.
    * @param auth - the mode and any secret this call may answer with.
    * @param deadlineMs - the whole budget for this call, in milliseconds.
+   * @param options - the port flag, and the pool flags this call leased (a call
+   *   that leased none still has to be told not to share).
    * @returns the leading flags (through the host target), the environment, and
    *   whether a secret has to be answered.
    */
@@ -359,7 +566,10 @@ export class SshTransport {
     settings: SshSettings,
     auth: RemoteAuth,
     deadlineMs: number,
-    options: { readonly portFlag?: string | undefined } = {},
+    options: {
+      readonly portFlag?: string | undefined
+      readonly poolFlags?: readonly string[] | undefined
+    } = {},
   ): { flags: string[]; env: NodeJS.ProcessEnv | undefined; needsSecret: boolean } {
     const mode = auth.mode ?? 'key'
     const needsSecret = mode === 'password' || mode === 'key+password' || (mode === 'key' && auth.passphrase !== undefined)
@@ -379,6 +589,13 @@ export class SshTransport {
       '-o', `ConnectTimeout=${String(connectTimeoutSeconds)}`,
       '-o', `ServerAliveInterval=${String(Math.max(1, Math.floor(connectTimeoutSeconds / 2)))}`,
     ]
+    // Sharing is opted into a call at a time, and the default has to be the safe
+    // direction: `ControlPath=none` is what keeps a child from riding on a master
+    // this plugin never leased — the Host account's own `~/.ssh/config` may well
+    // name one, and a plugin that inherited it would be sharing a connection whose
+    // credentials it cannot account for. These land before the target's own extra
+    // arguments, so a reader who writes `-o ControlPath=…` there still wins.
+    flags.push(...(options.poolFlags ?? NO_SHARE_FLAGS))
     if (needsSecret) flags.push('-o', 'NumberOfPasswordPrompts=1')
     if (mode === 'password') {
       flags.push('-o', 'PubkeyAuthentication=no', '-o', 'PreferredAuthentications=password,keyboard-interactive')
@@ -418,8 +635,8 @@ export class SshTransport {
    * @returns the controller to hand to the child, already registered.
    */
   #takeLane(label: string): AbortController {
-    if (this.#inFlight >= MAX_CONCURRENT_PROBES) {
-      throw new SshError('busy', `At most ${String(MAX_CONCURRENT_PROBES)} remote operations may run at once.`, {
+    if (this.#inFlight >= MAX_CONCURRENT_OPS) {
+      throw new SshError('busy', `At most ${String(MAX_CONCURRENT_OPS)} remote operations may run at once.`, {
         hint: `Wait for the running ${label} to finish.`,
       })
     }
@@ -599,7 +816,7 @@ export class SshTransport {
   }
 
   /**
-   * Probe one target: connect and run `true` and nothing else.
+   * Probe one target: connect, authenticate, and run `true` and nothing else.
    * @param target - the identity fields to connect with.
    * @param settings - the executable, deadline, and capture ceiling to honour.
    * @param auth - the mode and any secret this probe should answer with.
@@ -608,9 +825,10 @@ export class SshTransport {
    */
   async probe(target: RemoteTarget, settings: SshSettings, auth?: RemoteAuth): Promise<ProbeOutcome> {
     const controller = this.#takeLane('probe')
+    const ticket = this.share(target, auth ?? {})
     try {
       const deadline = PROBE_TIMEOUT_MS
-      const { flags, env } = this.sshOptions(target, settings, auth ?? {}, deadline)
+      const { flags, env } = this.sshOptions(target, settings, auth ?? {}, deadline, { poolFlags: ticket?.flags })
       const program = await this.resolveSsh(controller.signal)
       if (program === undefined) {
         return {
@@ -622,38 +840,13 @@ export class SshTransport {
       }
       const collected = await this.#collect(program, [...flags, this.authority(target), 'true'], settings, env, deadline, controller)
       const detail = tail(collected.stdout, collected.stderr)
-      if (collected.outcome === 'timeout') {
-        return {
-          at: new Date().toISOString(),
-          status: 'timeout',
-          durationMs: collected.durationMs,
-          ...(detail === undefined ? {} : { detail }),
-        }
-      }
-      if (collected.outcome === 'cancelled') {
-        return {
-          at: new Date().toISOString(),
-          status: 'failed',
-          durationMs: collected.durationMs,
-          detail: 'The probe was cancelled.',
-        }
-      }
-      if (collected.outcome === 'error') {
-        return {
-          at: new Date().toISOString(),
-          status: 'failed',
-          durationMs: collected.durationMs,
-          detail: `The ssh client could not start: ${collected.error ?? collected.stdout}${collected.stderr}`.slice(0, DETAIL_LIMIT),
-        }
-      }
-      return {
-        at: new Date().toISOString(),
-        status: classifyProbe(collected.exitCode, detail ?? ''),
-        durationMs: collected.durationMs,
-        exitCode: collected.exitCode,
-        ...(detail === undefined ? {} : { detail }),
-      }
+      const outcome = classifyCollectedProbe(collected, detail)
+      // A probe that reached `reachable` proved the session; one that never left
+      // the network or the host key proved nothing, and the master goes back.
+      this.noteShared(ticket, outcome.status === 'reachable' && !this.sessionBroken(detail ?? ''))
+      return withPoolNote(outcome, ticket)
     } finally {
+      this.unshare(ticket)
       this.#controllers.delete(controller)
       this.#inFlight -= 1
     }
@@ -728,22 +921,31 @@ export class SshTransport {
   ): Promise<RemoteJob | undefined> {
     const deadline = Math.max(MIN_REMOTE_TIMEOUT_MS, options.timeoutMs ?? settings.remoteTimeoutMs)
     const controller = this.#takeLane('background command')
+    const ticket = this.share(target, auth)
     const program = await this.resolveSsh(controller.signal)
     if (program === undefined) {
+      this.unshare(ticket)
       this.#controllers.delete(controller)
       this.#inFlight -= 1
       return undefined
     }
     // The same option set a foreground call builds, so a backgrounded command
     // authenticates and trusts the host exactly like the probe for that target does.
-    const { flags, env } = this.sshOptions(target, settings, auth, deadline)
+    const { flags, env } = this.sshOptions(target, settings, auth, deadline, { poolFlags: ticket?.flags })
     const ttyFlags = options.tty === true ? ['-tt'] : []
     const startedAt = Date.now()
     const { handle, detach } = this.#spawn(program, [...flags, ...ttyFlags, this.authority(target), command], settings, env, controller, options.signal, undefined)
+    // A backgrounded command holds its lease for its whole life, the same way it
+    // holds an operation slot: the channel over the master is open until it ends.
     const finished = this.#settleAndDrain(handle, controller, deadline, options.signal, startedAt)
-      .then((result: Collected) => { detach(); return result })
+      .then((result: Collected) => {
+        detach()
+        this.noteShared(ticket, result.outcome === 'exit' && !this.sessionBroken(`${result.stderr}\n${result.stdout}`))
+        return result
+      })
       .catch((error: unknown) => {
         detach()
+        this.noteShared(ticket, false)
         return {
           outcome: 'error' as const,
           error: error instanceof Error ? error.message : String(error),
@@ -756,6 +958,7 @@ export class SshTransport {
         } satisfies Collected
       })
       .finally(() => {
+        this.unshare(ticket)
         this.#controllers.delete(controller)
         this.#inFlight -= 1
       })
@@ -807,8 +1010,9 @@ export class SshTransport {
     const deadline = Math.max(MIN_REMOTE_TIMEOUT_MS, options.timeoutMs ?? settings.remoteTimeoutMs)
     const bounded: SshSettings = options.maxOutputBytes === undefined ? settings : { ...settings, maxOutputBytes: options.maxOutputBytes }
     const controller = this.#takeLane('remote command')
+    const ticket = this.share(target, auth)
     try {
-      const { flags, env } = this.sshOptions(target, bounded, auth, deadline)
+      const { flags, env } = this.sshOptions(target, bounded, auth, deadline, { poolFlags: ticket?.flags })
       const program = await this.resolveSsh(controller.signal)
       if (program === undefined) {
         return {
@@ -823,15 +1027,20 @@ export class SshTransport {
       // spawned child never does.
       const ttyFlags = options.tty === true ? ['-tt'] : []
       const collected = await this.#collect(program, [...flags, ...ttyFlags, this.authority(target), command], bounded, env, deadline, controller, options.signal, options.stdin)
+      const text = `${collected.stdout}\n${collected.stderr}`
+      const status: RemoteStatus = collected.outcome === 'cancelled'
+        ? 'cancelled'
+        : collected.outcome === 'timeout'
+          ? 'timeout'
+          : collected.outcome === 'error'
+            ? 'failed'
+            : classifyRun(collected.exitCode, text)
+      // A command that ran, even badly, proved the connection is worth reusing. One
+      // that timed out or came apart mid-stream did not, and the next call dials.
+      this.noteShared(ticket, (status === 'succeeded' || status === 'exit-nonzero') && !this.sessionBroken(text))
       const result: RemoteRunResult = {
         at: new Date().toISOString(),
-        status: collected.outcome === 'cancelled'
-          ? 'cancelled'
-          : collected.outcome === 'timeout'
-            ? 'timeout'
-            : collected.outcome === 'error'
-              ? 'failed'
-              : classifyRun(collected.exitCode, `${collected.stdout}\n${collected.stderr}`),
+        status,
         durationMs: collected.durationMs,
         ...(options.tty === true ? { tty: true } : {}),
         ...(options.stdin === undefined ? {} : { stdinBytes: Buffer.byteLength(options.stdin, 'utf8') }),
@@ -844,8 +1053,9 @@ export class SshTransport {
         }),
         ...(collected.truncated ? { truncated: true } : {}),
       }
-      return result
+      return withRunNote(result, ticket)
     } finally {
+      this.unshare(ticket)
       this.#controllers.delete(controller)
       this.#inFlight -= 1
     }

@@ -64,12 +64,15 @@ window.__ModuleLoader__.load({
         settingsSaved: 'Saved.',
         boundsTitle: 'Fixed bounds',
         boundsTargets: 'Targets per profile',
-        boundsConcurrency: 'Probes at once',
+        boundsOps: 'Remote operations at once',
+        boundsMasters: 'Servers sharing a connection',
+        boundsPersist: 'A shared connection idles out after',
         boundsPerRound: 'Targets per “Test all” round',
         boundsTimeout: 'Probe timeout is fixed at',
         boundsOutput: 'Output ceiling accepts',
         boundsRemoteTimeout: 'Command timeout accepts',
         boundsTransfer: 'Transfer ceiling accepts',
+        poolOff: 'This Host could not prepare a private directory for control sockets, so every call dials its own connection: {reason}',
         listTitle: 'SSH targets',
         listCount: '{count} of {limit} saved',
         listAdd: 'New connection',
@@ -104,6 +107,8 @@ window.__ModuleLoader__.load({
         fArgs: 'Extra ssh arguments',
         fArgsHint: 'One ssh argv entry per line: -4 on its own, an option with its value glued into one token (-oServerAliveCountMax=3), or the option and its value on two lines.',
         fNote: 'Note',
+        fPool: 'Share this server’s connection',
+        fPoolHint: 'Later calls to this server ride on the connection the first one opened, so a conversation stops paying for a fresh handshake and login on every command. Turn it off for a server that behaves differently once several commands share one connection.',
         fOptional: 'optional',
         fRequired: 'Required.',
         secretStored: 'Stored — leave empty to keep it',
@@ -180,12 +185,15 @@ window.__ModuleLoader__.load({
         settingsSaved: '已保存。',
         boundsTitle: '固定边界',
         boundsTargets: '每个 profile 可存的目标数',
-        boundsConcurrency: '同时进行的探测数',
+        boundsOps: '同时在跑的远程操作数',
+        boundsMasters: '共用一条连接的目标数上限',
+        boundsPersist: '共享连接空闲多久后断开',
         boundsPerRound: '「全部测试」单轮覆盖的目标数',
         boundsTimeout: '探测超时固定为',
         boundsOutput: '输出上限可填范围',
         boundsRemoteTimeout: '命令超时可填范围',
         boundsTransfer: '传输上限可填范围',
+        poolOff: '这台 Host 没能准备好放控制套接字的私有目录，所以每次调用都自己拨号：{reason}',
         listTitle: 'SSH 目标清单',
         listCount: '已保存 {count} / {limit}',
         listAdd: '新建连接',
@@ -220,6 +228,8 @@ window.__ModuleLoader__.load({
         fArgs: '额外 ssh 参数',
         fArgsHint: '每行一个 ssh 参数：单独一个 -4；把选项和值写成一个参数（-oServerAliveCountMax=3）；或者选项一行、取值一行。',
         fNote: '备注',
+        fPool: '复用这台服务器的连接',
+        fPoolHint: '之后连这台服务器的调用会搭第一条命令开好的连接，对话里就不用每条命令重新握手、重新登录。有些服务器在多条命令共用一条连接时行为不一样，那种服务器把这里关掉。',
         fOptional: '可选',
         fRequired: '此项必填。',
         secretStored: '已保存 · 留空表示不改',
@@ -551,6 +561,7 @@ window.__ModuleLoader__.load({
           proxyJump: '',
           extraArgsText: '',
           note: '',
+          pool: 'on',
           hadPassphrase: false,
           hadPassword: false,
           hadRoot: false,
@@ -574,6 +585,7 @@ window.__ModuleLoader__.load({
         proxyJump: record.proxyJump ?? '',
         extraArgsText: (record.extraArgs ?? []).join('\n'),
         note: record.note ?? '',
+        pool: record.pool ?? 'on',
         hadPassphrase: record.secrets?.passphrase === true,
         hadPassword: record.secrets?.password === true,
         hadRoot: record.secrets?.root === true,
@@ -584,9 +596,12 @@ window.__ModuleLoader__.load({
      * Turn the edited draft into the payload the Host validates.
      * @param draft - the form state.
      * @param parsed - the parsed address field.
+     * @param withAuth - whether the loaded Host understands authentication modes.
+     * @param withPool - whether the loaded Host understands connection sharing; an
+     *   older one would reject the field outright.
      * @returns a `save` connection payload, with blank fields dropped.
      */
-    function payloadOf(draft: any, parsed: { user: string; host: string; port: string }, withAuth: boolean): ConnectionInput {
+    function payloadOf(draft: any, parsed: { user: string; host: string; port: string }, withAuth: boolean, withPool: boolean): ConnectionInput {
       const optional = (value: string): string | undefined => {
         const trimmed = (value ?? '').trim()
         return trimmed === '' ? undefined : trimmed
@@ -608,6 +623,7 @@ window.__ModuleLoader__.load({
         ...(args === undefined ? {} : { extraArgs: args }),
         ...(note === undefined ? {} : { note }),
         ...(withAuth ? { auth: draft.auth ?? 'key' } : {}),
+        ...(withPool ? { pool: draft.pool === 'off' ? 'off' : 'on' } : {}),
       }
     }
 
@@ -651,6 +667,17 @@ window.__ModuleLoader__.load({
       if (value >= mib && value % mib === 0) return `${String(value / mib)} MiB`
       if (value >= 1024 && value % 1024 === 0) return `${String(value / 1024)} KiB`
       return `${String(value)} B`
+    }
+
+    /**
+     * An idle timeout stated the way a reader would say it out loud.
+     * @param seconds - whole seconds one shared connection stays open.
+     * @returns the human sentence.
+     */
+    function idleFor(seconds: number | undefined): string {
+      if (seconds === undefined || !Number.isFinite(seconds) || seconds <= 0) return '—'
+      if (seconds % 60 === 0) return `${String(seconds / 60)} min`
+      return `${String(seconds)} s`
     }
 
     /** One state dot and its label. */
@@ -846,8 +873,13 @@ window.__ModuleLoader__.load({
       const [tab, setTab] = React.useState('list')
       const [connections, setConnections] = React.useState([] as ConnectionView[])
       const [settings, setSettings] = React.useState(null as { maxOutputBytes: number; remoteTimeoutMs: number; maxTransferBytes: number } | null)
-      const [limits, setLimits] = React.useState({ maxConnections: 64, concurrentProbes: 4, probeAllLimit: 12, probeTimeoutMs: 10000, remoteTimeoutMinMs: 1000, remoteTimeoutMaxMs: 300000, outputMinBytes: 1024, outputMaxBytes: 4194304, transferMinBytes: 1024, transferMaxBytes: 536870912 })
+      const [limits, setLimits] = React.useState({ maxConnections: 64, concurrentOps: 16, maxLiveMasters: 8, controlPersistSeconds: 300, probeAllLimit: 12, probeTimeoutMs: 10000, remoteTimeoutMinMs: 1000, remoteTimeoutMaxMs: 300000, outputMinBytes: 1024, outputMaxBytes: 4194304, transferMinBytes: 1024, transferMaxBytes: 536870912 })
       const [askpass, setAskpass] = React.useState('ready')
+      // Whether the loaded Host knows about connection sharing at all. A package
+      // swapped in place keeps the previous Host module until the restart, and its
+      // schema would refuse a `pool` field the new page is ready to send.
+      const [pooling, setPooling] = React.useState(false)
+      const [pool, setPool] = React.useState(null as { ready: boolean; liveMasters: number; failure?: string } | null)
       // Whether the loaded Host half knows about authentication modes at all:
       // an in-place package swap needs a Host restart, and the page keeps working
       // without the secret controls until then.
@@ -887,8 +919,12 @@ window.__ModuleLoader__.load({
             remoteTimeoutMs: String(result.settings?.remoteTimeoutMs ?? ''),
             maxTransferBytes: String(result.settings?.maxTransferBytes ?? ''),
           })
-          if (result.limits !== undefined) setLimits(result.limits)
+          // Merge, not replace: a Host that predates the pool sends the old
+          // `limits` shape, and the bounds rows would print blanks over it.
+          if (result.limits !== undefined) setLimits((current: typeof limits) => ({ ...current, ...result.limits }))
           setAskpass(result.askpass ?? 'ready')
+          setPooling(result.pool !== undefined)
+          if (result.pool !== undefined) setPool(result.pool)
           setModern(result.askpass !== undefined)
           setProbing(result.probing ?? 0)
           setFailure(null)
@@ -951,7 +987,7 @@ window.__ModuleLoader__.load({
       async function saveDraft(): Promise<void> {
         const parsed = parsedAddress()
         if (draft === null || parsed === undefined) return
-        const payload = payloadOf(draft, parsed, modern)
+        const payload = payloadOf(draft, parsed, modern, pooling)
         const secrets = modern ? secretsOf(draft) : undefined
         await act(draft.id ?? 'new', async () => {
           const result = await rpc('save', {
@@ -974,7 +1010,7 @@ window.__ModuleLoader__.load({
       async function testDraft(): Promise<void> {
         const parsed = parsedAddress()
         if (draft === null || parsed === undefined) return
-        const payload = payloadOf(draft, parsed, modern)
+        const payload = payloadOf(draft, parsed, modern, pooling)
         const secrets = modern ? secretsOf(draft) : undefined
         const draftBody = {
           host: payload.host,
@@ -984,6 +1020,7 @@ window.__ModuleLoader__.load({
           ...(payload.proxyJump === undefined ? {} : { proxyJump: payload.proxyJump }),
           ...(payload.extraArgs === undefined ? {} : { extraArgs: payload.extraArgs }),
           ...(modern ? { auth: payload.auth ?? 'key' } : {}),
+          ...(payload.pool === undefined ? {} : { pool: payload.pool }),
         }
         const secretBody: Record<string, unknown> = {}
         if (typeof secrets?.passphrase === 'string') secretBody.passphrase = secrets.passphrase
@@ -1445,6 +1482,20 @@ window.__ModuleLoader__.load({
               disabled,
               onChange: patch('note'),
             }),
+            // Only a Host that was assembled with a pool may be handed the field:
+            // an older one validates its input strictly and would reject the save.
+            pooling ? h('div', { class: 'dshssh-field' },
+              h('label', { class: 'dshssh-check' },
+                h('input', {
+                  type: 'checkbox',
+                  checked: draft.pool !== 'off',
+                  disabled,
+                  onChange: (event: any) => { setDraft((current: any) => ({ ...current, pool: event.target.checked === true ? 'on' : 'off' })) },
+                }),
+                h('span', {}, t('fPool')),
+              ),
+              h('p', { class: 'dshssh-muted' }, t('fPoolHint')),
+            ) : null,
           ),
           atLimit ? h('span', { class: 'dshssh-error' }, format(t('listCount'), { count: String(connections.length), limit: String(limits.maxConnections) })) : null,
           draftProbe === null ? null : h('div', { class: 'dshssh-field' },
@@ -1525,13 +1576,21 @@ window.__ModuleLoader__.load({
         h('h3', { class: 'dshssh-card-title' }, t('boundsTitle')),
         h('dl', { class: 'dshssh-bounds' },
           h('div', { class: 'dshssh-bound', key: 'targets' }, h('dt', {}, t('boundsTargets')), h('dd', {}, String(limits.maxConnections))),
-          h('div', { class: 'dshssh-bound', key: 'lanes' }, h('dt', {}, t('boundsConcurrency')), h('dd', {}, String(limits.concurrentProbes))),
+          h('div', { class: 'dshssh-bound', key: 'lanes' }, h('dt', {}, t('boundsOps')), h('dd', {}, String(limits.concurrentOps))),
+          h('div', { class: 'dshssh-bound', key: 'masters' }, h('dt', {}, t('boundsMasters')), h('dd', {}, String(limits.maxLiveMasters))),
+          h('div', { class: 'dshssh-bound', key: 'persist' }, h('dt', {}, t('boundsPersist')), h('dd', {}, idleFor(limits.controlPersistSeconds))),
           h('div', { class: 'dshssh-bound', key: 'round' }, h('dt', {}, t('boundsPerRound')), h('dd', {}, String(limits.probeAllLimit))),
           h('div', { class: 'dshssh-bound', key: 'timeout' }, h('dt', {}, t('boundsTimeout')), h('dd', {}, measure(limits.probeTimeoutMs, 'ms'))),
           h('div', { class: 'dshssh-bound', key: 'remote' }, h('dt', {}, t('boundsRemoteTimeout')), h('dd', {}, `${measure(limits.remoteTimeoutMinMs, 'ms')} – ${measure(limits.remoteTimeoutMaxMs, 'ms')}`)),
           h('div', { class: 'dshssh-bound', key: 'output' }, h('dt', {}, t('boundsOutput')), h('dd', {}, `${measure(limits.outputMinBytes, 'bytes')} – ${measure(limits.outputMaxBytes, 'bytes')}`)),
           h('div', { class: 'dshssh-bound', key: 'transfer' }, h('dt', {}, t('boundsTransfer')), h('dd', {}, `${measure(limits.transferMinBytes, 'bytes')} – ${measure(limits.transferMaxBytes, 'bytes')}`)),
         ),
+        // A fact about this machine, not a bound: the pool only exists if the Host
+        // could make a private directory for its sockets, and when it could not,
+        // every number above still holds while sharing simply does not happen.
+        pool !== null && pool.ready === false
+          ? h('p', { class: 'dshssh-muted' }, format(t('poolOff'), { reason: pool.failure ?? '—' }))
+          : null,
       )
 
       const listCard = h('section', { class: 'dshssh-card' },

@@ -69,6 +69,8 @@ export interface TargetSnapshot {
   port?: number
   agentAccess: 'on' | 'off'
   allowedCommands: readonly string[]
+  /** Whether this target's calls may ride one shared connection. */
+  pool: 'on' | 'off'
 }
 
 /** Dependencies the plugin entry wires once, at activation. */
@@ -404,6 +406,7 @@ const TARGET_SHAPE = {
   port: { type: 'integer' },
   auth: { type: 'string', enum: ['key', 'key+password', 'password'] },
   agentAccess: { type: 'string', enum: ['on', 'off'] },
+  pool: { type: 'string', enum: ['on', 'off'] },
   allowedCommands: { type: 'array', items: { type: 'string' } },
   hasPassword: { type: 'boolean' },
   hasPassphrase: { type: 'boolean' },
@@ -450,7 +453,7 @@ export function describeRemote(targets: TargetBrief[]): string {
     : `Choose the server this conversation means and pass it as \`target\`. Available aliases: ${targets
       .map(target => `\`${target.label}\` (${target.user === undefined || target.user === '' ? '' : `${target.user}@`}${target.host})`)
       .join(', ')}.`
-  return `Runs commands and moves files on a stored SSH server, with the credentials the plugin holds. ${list} A call addresses one server: leave \`target\` out to reuse the one this conversation last used. Nothing is interpreted by a local shell; the command string is executed by the login shell on the server. \`get_connection\`, \`read\`, and \`download\` are reads; \`read\` answers with a directory listing when the path is a directory and with the file's text when it is a file; \`exec\`, \`write\`, \`edit\`, and \`upload\` may be refused by the user, and an \`exec\` runs unasked only when its one bare leading program is named by that target's command allowlist — a fresh target names no programs there, so every command on it is asked about first. Pass \`as: "root"\` (or another account) to elevate through sudo, or \`su: true\` to reach root with the stored root password: either way the plugin injects the secret into the command's own stdin, so no password ever appears in the conversation. Add \`background: true\` to leave a long command running, then poll it with the harness's \`job_output\` and \`job_kill\` tools.`
+  return `Runs commands and moves files on a stored SSH server, with the credentials the plugin holds. ${list} A call addresses one server: leave \`target\` out to reuse the one this conversation last used. Nothing is interpreted by a local shell; the command string is executed by the login shell on the server. \`get_connection\`, \`read\`, and \`download\` are reads; \`read\` answers with a directory listing when the path is a directory and with the file's text when it is a file; \`exec\`, \`write\`, \`edit\`, and \`upload\` may be refused by the user, and an \`exec\` runs unasked only when its one bare leading program is named by that target's command allowlist — a fresh target names no programs there, so every command on it is asked about first. Pass \`as: "root"\` (or another account) to elevate through sudo, or \`su: true\` to reach root with the stored root password: either way the plugin injects the secret into the command's own stdin, so no password ever appears in the conversation. Add \`background: true\` to leave a long command running, then poll it with the harness's \`job_output\` and \`job_kill\` tools. Calls to one server share the connection the first of them opened, which is why several can run at once; a target shown as \`pool off\` dials a fresh connection every time.`
 }
 
 /**
@@ -614,6 +617,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
             ...(row.port === undefined ? {} : { port: row.port }),
             agentAccess: row.agentAccess,
             allowedCommands: row.allowedCommands,
+            pool: row.pool,
           }))
           const stored = sessionId === undefined || (call.target ?? '').trim() !== '' ? undefined : deps.sessionTargetOf?.(sessionId)
           const resolved = findTarget(snapshots, call, stored)
@@ -800,6 +804,7 @@ function listedResult(
       ...(row.port === undefined ? {} : { port: row.port }),
       ...(row.auth === undefined ? {} : { auth: row.auth }),
       ...(row.agentAccess === undefined ? {} : { agentAccess: row.agentAccess }),
+      ...(row.pool === undefined ? {} : { pool: row.pool }),
       ...(row.allowedCommands === undefined ? {} : { allowedCommands: [...row.allowedCommands] }),
       hasPassword: row.secrets?.password === true,
       hasPassphrase: row.secrets?.passphrase === true,
@@ -905,6 +910,7 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
           authority,
           `auth=${String(row.auth ?? 'key')}`,
           row.agentAccess === 'off' ? 'agent off' : 'agent on',
+          row.pool === 'off' ? 'pool off' : '',
           Array.isArray(row.allowedCommands) && row.allowedCommands.length > 0 ? `allowlist=${row.allowedCommands.join(',')}` : 'allowlist=none(ask every command)',
           row.hasPassword === true ? 'password stored' : '',
           row.hasPassphrase === true ? 'passphrase stored' : '',

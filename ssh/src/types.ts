@@ -118,6 +118,8 @@ export interface ConnectionInput {
   auth?: AuthMode | undefined
   /** Whether the agent may reach this target at all. */
   agentAccess?: 'on' | 'off' | undefined
+  /** Whether later calls to this target ride on the first call's connection. */
+  pool?: 'on' | 'off' | undefined
   /** Program names runnable without an approval; empty asks for every command. */
   allowedCommands?: readonly string[] | undefined
   /** Per-target command deadline; `null` clears the override. */
@@ -158,6 +160,8 @@ export interface ConnectionRecord extends ConnectionInput {
   readonly auth: AuthMode
   /** Whether the agent may reach this target at all. */
   readonly agentAccess: 'on' | 'off'
+  /** Whether later calls ride on this target's first connection. */
+  readonly pool: 'on' | 'off'
   /** Program names runnable without an approval. */
   readonly allowedCommands: readonly string[]
   /** Per-target command deadline; absence follows the shared setting. */

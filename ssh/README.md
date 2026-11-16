@@ -27,7 +27,8 @@ ssh/
 │   ├── tool.test.mjs         # gate, resolution, arguments, wording, every payload vs the schema
 │   ├── ops.test.mjs          # every operation at its transport seam, marker protocol included
 │   ├── storage.test.mjs      # the zod bounds and the strict records
-│   ├── transport.test.mjs    # quoting, program extraction, the fingerprint tables
+│   ├── transport.test.mjs    # quoting, program extraction, the fingerprint tables, the sharing flags
+│   ├── pool.test.mjs         # the master ledger: what a socket is named by, who is evicted, what gets closed
 │   ├── jobs.test.mjs         # the background-job lifecycle and its outcome classes
 │   ├── edit.test.mjs         # the exact-match rules, refusal by counted occurrence
 │   ├── local-path.test.mjs   # the workspace boundary a transfer obeys
@@ -37,7 +38,8 @@ ssh/
     ├── types.ts              # route path, method list, failure codes (client type-only)
     ├── storage.ts            # the `ssh_targets` domain: zod schemas, bounds, limits
     ├── store.ts              # typed reads/writes over the opened domain
-    ├── transport.ts          # SshTransport: one option set, one child, run + probe
+    ├── transport.ts          # SshTransport: one option set, one child, run + probe, one lease
+    ├── pool.ts               # MuxPool: the per-target shared connections and their ledger
     ├── secrets.ts            # password and passphrase records in the credential store
     ├── askpass.ts            # the private helper that answers an ssh prompt
     ├── tool.ts               # the agent-facing `ssh_client` tool and its policy gate
@@ -157,13 +159,16 @@ The file's shape, asserted by an integration run against the published json
 backend:
 
 ```json
-{ "unit": { "name": "ssh_targets", "version": 4 },
+{ "unit": { "name": "ssh_targets", "version": 5 },
   "global": { "maxOutputBytes": 65536, "remoteTimeoutMs": 30000, "maxTransferBytes": 33554432 },
-  "tables": { "connections": { "ssh-0123456789": { "id": "…", "label": "…", "host": "…", "auth": "password", "agentAccess": "on", "allowedCommands": ["git"], "extraArgs": ["-4"], "createdAt": "…", "updatedAt": "…", "lastProbe": { "status": "auth-failed" } } }, "sessions": { "session-77": { "sessionId": "session-77", "targetId": "ssh-0123456789", "setAt": "…" } } }
+  "tables": { "connections": { "ssh-0123456789": { "id": "…", "label": "…", "host": "…", "auth": "password", "agentAccess": "on", "pool": "on", "allowedCommands": ["git"], "extraArgs": ["-4"], "createdAt": "…", "updatedAt": "…", "lastProbe": { "status": "auth-failed" } } }, "sessions": { "session-77": { "sessionId": "session-77", "targetId": "ssh-0123456789", "setAt": "…" } } }
 ```
 
-Bounds live in `src/storage.ts`: 64 targets, 4 concurrent remote operations
-shared by probes and commands, 12 per `probeAll` round, a fixed 10 s probe
+Bounds live in `src/storage.ts`: 64 targets, 16 concurrent remote operations
+shared by probes and commands, 8 servers that may each hold one shared
+connection (`MAX_LIVE_MASTERS`) before the idle longest-quiet one is retired, a
+five-minute idle timeout on a master (`CONTROL_PERSIST_SECONDS`), 12 per
+`probeAll` round, a fixed 10 s probe
 deadline (`PROBE_TIMEOUT_MS`, also the download size pre-check's), 1 s–300 s
 command timeout, 1 KiB–4 MiB output ceiling, 1 KiB–512 MiB transfer ceiling, and
 at most 32 allowlisted program names of 64 characters each. A backgrounded
@@ -201,6 +206,55 @@ with no terminal: `mkdtemp($TMPDIR/dsh-ssh-askpass-)` at mode `0700`, one
 `askpass.sh` at mode `0700`, removed by the plugin's disposer. It reads the
 prompt text `ssh` passes as `$1` and answers from `DSH_SSH_ASKPASS_PASSPHRASE` or
 `DSH_SSH_ASKPASS_PASSWORD`, falling back to whichever slot is filled.
+
+### Connection pool (`src/pool.ts`)
+
+`MuxPool` leases a shared OpenSSH connection per target, so several calls ride one
+authenticated session instead of each paying for its own handshake and login. What
+it decides, and why:
+
+- **Naming.** `<muxdir>/<target id>-<10 hex>.sock`, where the digest covers the
+  authority, port, jump host, identity file, extra flags, auth mode, and a hash of
+  the secret the call actually holds. Two rules fall out of that one line: an
+  edited target cannot inherit the master its predecessor left open (the name
+  changes and the old master idles out on its own), and a draft probed with a
+  second password cannot ride along on a master that authenticated with the first
+  and report the wrong secret as good. The secret itself never appears in a name.
+- **The default runs the other way.** `sshOptions` hands a call
+  `ControlPath=none` unless its caller leased a socket first. The Host account's
+  own `~/.ssh/config` may name a `ControlPath`, and a child that inherited it would
+  be sharing a master nobody here is counting, on credentials nobody chose.
+  `ControlMaster=no` alone would not be enough: it still joins a master that is
+  already listening.
+- **No probe on the hot path.** The ledger holds a *belief*. Nothing runs
+  `ssh -O check` before a call, because `ControlMaster=auto` falls back to a fresh
+  direct connection when the master has died — asking first would spend a whole
+  process per call to learn something the child learns for free.
+- **Settling a lease.** A call that reached a session marks the master live. A call
+  that timed out, or printed one of `SESSION_SETUP_PATTERNS` (`session setup
+  failed`, `too many sessions`, `channel open failed`, `ControlSocket … already
+  exists`), drops it so the next call dials its own. A rejected credential or a
+  refused host key settles nothing either way: the release path already discards a
+  master that never proved itself.
+- **Two ceilings, for two different costs.** `MAX_CONCURRENT_OPS` (16) counts local
+  `ssh` children, which is what this machine pays for. `MAX_LIVE_MASTERS` (8)
+  counts servers holding a shared connection; when a ninth arrives, the idle entry
+  that has been quiet longest is retired with `ssh -O exit`, and when all eight are
+  busy the newcomer dials alone rather than opening an unplanned session on some
+  server. Teardown children take no operation slot: closing a socket is a local
+  conversation, and it must still be possible while every slot is full.
+- **The server has its own ceiling.** `sshd`'s `MaxSessions` (default 10) caps the
+  channels one master may carry, and a host configured lower is a real case. That
+  is what the per-target `pool: 'off'` switch is for: the page edits it under
+  **Advanced options**, the model sees it as a `pool off` chip, and the record
+  carries it as `pool`, which is why the domain is version 5.
+- **`ssh -G` leases nothing.** The resolve view answers where an alias points;
+  naming a control socket in it would describe a connection the call never makes.
+- **Lifetime.** The socket directory is a `mkdtemp` 0700 tree under the system temp
+  directory, made at activation and removed at unload, exactly like the askpass
+  helper. A master is a process OpenSSH left in the background, not a child this
+  Host still watches, so a Host killed outright leaves each master on its server
+  until `CONTROL_PERSIST_SECONDS` (300) runs out.
 
 ### Tool (`src/tool.ts`)
 
@@ -307,6 +361,19 @@ next round does not have to re-derive them:
   cannot leak a credential, and answers the alias question instantly. The plugin
   passes only its own port/key/jump/extra-flag overrides, so what it prints is
   what a probe would dial.
+- Connection sharing, reproduced against a live server (OpenSSH 10.0p2 client,
+  `jiegg@10.100.1.1`) while 0.0.22 was written, so none of the pool rests on a
+  reading of the manual: `-o ControlMaster=auto -o ControlPath=<literal path> -o
+  ControlPersist=300` leaves the master **running after the first client exits** —
+  the socket file is still there and `ssh -O check` answers `Master running
+  (pid=…)` — a second call rides it, and `ssh -O exit` answers `Exit request
+  sent.` *and removes the socket file*. A later `-O check` on that path fails with
+  `Control socket connect(…): No such file or directory` and exit 255, while a
+  fresh call on the same dead path authenticates again and exits 0. That last line
+  is the whole reason the pool never probes liveness on the hot path: OpenSSH
+  heals a dead master by dialing directly, for free, inside the call that needed
+  it. A control socket named by a literal path (no `%h`/`%C` tokens) works for
+  `-O` too, which is what makes an eviction targetable.
 - `fs/write-intent` is a single-slot **decision** waterfall: a listener may
   answer `createIfAbsent` or `replaceIfVersion` and never consults your write, so
   the plugin must act on the answer — a create-only guard against an existing file

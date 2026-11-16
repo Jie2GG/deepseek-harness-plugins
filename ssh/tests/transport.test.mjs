@@ -1,8 +1,9 @@
-// The pure decision functions of the transport: quoting, program extraction,
-// and the two fingerprint tables with their deliberate ordering difference.
+// The pure decision functions of the transport: quoting, program extraction, the
+// two fingerprint tables with their deliberate ordering difference, and the flags
+// a call is handed about sharing.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { shellQuote, leadingProgram, classifyProbe, classifyRun, tail, HOST_KEY_SETTING } from '../lib/transport.js'
+import { shellQuote, leadingProgram, classifyProbe, classifyRun, tail, HOST_KEY_SETTING, SshTransport } from '../lib/transport.js'
 
 test('shellQuote makes any path one word for the remote shell', () => {
   assert.equal(shellQuote('/tmp/a b'), "'/tmp/a b'")
@@ -72,4 +73,56 @@ test('tail puts stderr first and keeps the last 2048 characters', () => {
   const kept = tail(long, '')
   assert.equal(kept.length, 2048)
   assert.equal(kept, 'a'.repeat(2048)) // the tail of the stream, not the head
+})
+
+// ── what the transport hands a child about sharing ─────────────────────────
+const CEILINGS = { maxOutputBytes: 65_536, remoteTimeoutMs: 30_000, maxTransferBytes: 33_554_432 }
+const bare = new SshTransport({})
+
+test('a call that leased nothing is told not to share', () => {
+  const { flags } = bare.sshOptions({ host: '10.0.0.9' }, CEILINGS, {}, 10_000)
+  assert.ok(flags.includes('ControlPath=none'))
+  assert.ok(flags.includes('ControlMaster=no'))
+  assert.ok(!flags.includes('ControlMaster=auto'))
+  // `none` is not decoration: the Host account's own ~/.ssh/config may name a
+  // ControlPath, and a child that inherited it would share a master nobody here
+  // is counting, on credentials nobody here chose.
+})
+
+test('leased flags land before the target’s own arguments, so a written -o still wins', () => {
+  const poolFlags = ['-o', 'ControlMaster=auto', '-o', 'ControlPath=/tmp/dsh-ssh-mux-x/ssh-a1b2c3d4e5-cafe.sock', '-o', 'ControlPersist=300']
+  const own = '-oControlPath=/home/deploy/.ssh/cm-%h.sock'
+  const { flags } = bare.sshOptions({ host: '10.0.0.9', extraArgs: [own] }, CEILINGS, {}, 10_000, { poolFlags })
+  const socket = flags.indexOf('ControlPath=/tmp/dsh-ssh-mux-x/ssh-a1b2c3d4e5-cafe.sock')
+  assert.ok(socket >= 0)
+  assert.ok(socket < flags.indexOf(own))
+  assert.ok(flags.includes('ControlPersist=300'))
+  assert.ok(flags.indexOf('BatchMode=yes') < socket) // the base options keep their order
+})
+
+test('a multiplexing complaint is told apart from a server refusing the call', () => {
+  assert.equal(bare.sessionBroken('session setup failed: too many sessions'), true)
+  assert.equal(bare.sessionBroken('channel open failed: open failed'), true)
+  assert.equal(bare.sessionBroken('mux_handler: read error'), true)
+  assert.equal(bare.sessionBroken('ControlSocket /tmp/x already exists, disabling multiplexing'), true)
+  assert.equal(bare.sessionBroken('Permission denied (publickey).'), false) // the credential, not the channel
+  assert.equal(bare.sessionBroken('ssh: connect to host x: Connection refused'), false)
+})
+
+test('a lease is settled by whether the call reached a session at all', () => {
+  const seen = []
+  const ticket = {
+    pooled: true, flags: [], note: undefined,
+    release () {}, markLive () { seen.push('live') }, drop () { seen.push('drop') }
+  }
+  bare.noteShared(ticket, true)
+  bare.noteShared(ticket, false)
+  assert.deepEqual(seen, ['live', 'drop'])
+  const unshared = {
+    pooled: false, flags: [], note: undefined,
+    release () {}, markLive () { seen.push('should not happen') }, drop () { seen.push('should not happen') }
+  }
+  bare.noteShared(unshared, true)
+  bare.noteShared(undefined, true) // a call with no pool assembled is a normal day
+  assert.deepEqual(seen, ['live', 'drop'])
 })

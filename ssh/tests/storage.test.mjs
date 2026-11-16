@@ -3,7 +3,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  DOMAIN_NAME, DOMAIN_VERSION, COMPATIBLE_VERSIONS, MAX_CONNECTIONS, MAX_CONCURRENT_PROBES,
+  DOMAIN_NAME, DOMAIN_VERSION, COMPATIBLE_VERSIONS, MAX_CONNECTIONS, MAX_CONCURRENT_OPS,
+  MAX_LIVE_MASTERS, CONTROL_PERSIST_SECONDS, poolChoiceSchema,
   MAX_ALLOWED_COMMANDS, BACKGROUND_DEADLINE_MS, DEFAULT_SETTINGS, PROBE_TIMEOUT_MS,
   SSH_EXECUTABLE, SSH_FALLBACK_PATHS,
   connectionRecordSchema, connectionInputSchema, settingsRecordSchema, remotePathSchema,
@@ -21,8 +22,8 @@ const base = {
 
 test('the domain declares its version ladder and tables', () => {
   assert.equal(DOMAIN_NAME, 'ssh_targets')
-  assert.equal(DOMAIN_VERSION, 4)
-  assert.deepEqual([...COMPATIBLE_VERSIONS], [1, 2, 3])
+  assert.equal(DOMAIN_VERSION, 5)
+  assert.deepEqual([...COMPATIBLE_VERSIONS], [1, 2, 3, 4])
   assert.deepEqual(Object.keys(sshTargetsDomain.tables).sort(), ['connections', 'sessions'])
 })
 
@@ -30,6 +31,8 @@ test('a stored record fills the safe defaults for the agent fields', () => {
   const out = connectionRecordSchema.parse(base)
   assert.equal(out.auth, 'key')
   assert.equal(out.agentAccess, 'on')
+  // Version 4 wrote no `pool` at all; sharing is what it meant, and what it gets.
+  assert.equal(out.pool, 'on')
   assert.deepEqual([...out.allowedCommands], [])
 })
 
@@ -72,7 +75,24 @@ test('settings carry the three ceilings, each with its bound', () => {
   assert.equal(settingsRecordSchema.parse({ maxTransferBytes: 536_870_912 }).maxTransferBytes, 536_870_912)
   assert.equal(BACKGROUND_DEADLINE_MS, 1_800_000)
   assert.equal(MAX_CONNECTIONS, 64)
-  assert.equal(MAX_CONCURRENT_PROBES, 4)
+  // The lane count is no longer "probes": it counts every remote operation, page
+  // and conversation alike, because sharing moved the connection ceiling elsewhere.
+  assert.equal(MAX_CONCURRENT_OPS, 16)
+  assert.equal(MAX_LIVE_MASTERS, 8)
+  assert.equal(CONTROL_PERSIST_SECONDS, 300)
+})
+
+test('sharing is a per-target choice the page may state either way', () => {
+  assert.equal(connectionRecordSchema.parse({ ...base, pool: 'off' }).pool, 'off')
+  assert.throws(() => connectionRecordSchema.parse({ ...base, pool: 'sometimes' }))
+  assert.throws(() => connectionRecordSchema.parse({ ...base, pool: true }))
+  // The page sends the field only when the loaded Host has a pool to receive it.
+  const input = { label: 'P', host: 'h' }
+  assert.equal(connectionInputSchema.parse(input).pool, undefined)
+  assert.equal(connectionInputSchema.parse({ ...input, pool: 'off' }).pool, 'off')
+  // An unsaved form probes with the same switch it would save with.
+  assert.equal(probeDraftSchema.parse({ host: 'h', pool: 'off' }).pool, 'off')
+  assert.equal(poolChoiceSchema.parse('on'), 'on')
 })
 
 test('a pre-0.0.18 global slot still opens: the retired fields are accepted, ignored, ranged', () => {
