@@ -15,6 +15,8 @@ import {
   targetParamHint,
   buildRemoteTool
 } from '../lib/tool.js'
+import { defaultBounds } from '../lib/bounds.js'
+import { DRAIN_MS } from '../lib/transport.js'
 import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import { assertPayloadValid } from './helpers.mjs'
 
@@ -240,7 +242,17 @@ function fakeOps () {
     async list () {
       return {
         connections: [{ id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9', user: 'deploy', auth: 'key', agentAccess: 'on', allowedCommands: [], secrets: { password: true, passphrase: false }, lastProbe: { status: 'reachable', at: '2026-01-01T00:00:00.000Z' } }],
-        settings: { command: 'ssh', probeTimeoutMs: 10000, maxOutputBytes: 65536, remoteTimeoutMs: 30000, maxTransferBytes: 33554432 }
+        settings: { maxOutputBytes: 65536, remoteTimeoutMs: 30000, maxTransferBytes: 33554432 },
+        // The resolved view the page and this model-facing line both read from.
+        bounds: {
+          timeoutMs: 30000, maxTimeoutMs: 300000,
+          outputBytes: 65536, maxOutputBytes: 4194304,
+          transferBytes: 33554432, maxTransferBytes: 536870912,
+          probeTimeoutMs: 30000, statTimeoutMs: 10000, maxSpillBytes: 67108864, graceMs: 2000,
+          promoteOnTimeout: true,
+          effective: { maxOutputBytes: 65536, remoteTimeoutMs: 30000, maxTransferBytes: 33554432, probeTimeoutMs: 30000, statTimeoutMs: 10000, maxSpillBytes: 67108864, graceMs: 2000 },
+          notes: []
+        }
       }
     },
     async runCommand (params) {
@@ -428,7 +440,14 @@ test('presentationMeta and presentCall read only the canonical value', () => {
   assert.equal(card.title, 'ssh_client write')
   assert.equal(card.kind, 'edit')
   assert.equal(definition.presentCall({ action: 'exec', command: 'uptime' }).kind, 'execute')
-  assert.equal(definition.timeoutMs, 300_000)
+  // The declared call budget has to sit **above** the longest wait this plugin can
+  // have — the capped deadline, the kill grace, and the pipe drain. An equality (or
+  // anything smaller) would let `guard/timeout-policy` win the race and replace the
+  // plugin's own classified answer with its generic `TOOL_TIMEOUT` sentence, which is
+  // exactly the collision the shipped 300s/300s pair used to have.
+  const bounds = defaultBounds()
+  assert.ok(definition.timeoutMs > bounds.maxTimeoutMs + bounds.graceMs + DRAIN_MS)
+  assert.equal(definition.timeoutMs, bounds.maxTimeoutMs + bounds.graceMs + DRAIN_MS + 5_000)
 })
 
 test('every action keeps its schema honest when a producer forgets a field', () => {

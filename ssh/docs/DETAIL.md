@@ -17,8 +17,8 @@ General settings. Across its top sit two tabs:
 
 - **SSH targets** — the list: add, edit, delete, and test.
 - **Client settings** — the output ceiling, the command timeout, and the
-  transfer ceiling, next to the bounds the plugin fixes in code (which include
-  how it finds `ssh` and `scp` by itself and the fixed 30-second probe deadline).
+  transfer ceiling, each stated as this profile's override of a configured default
+  and cap, next to the bounds this Host resolves them against.
 
 Both tabs read and write one page state, so a probe you started on the first tab
 keeps running while you edit values on the second.
@@ -68,15 +68,19 @@ keeps running while you edit values on the second.
   connection** switch.
 - **Client settings**, on the second tab: the captured output ceiling, the
   command timeout every agent-issued remote call obeys, and the file-transfer
-  ceiling a copy may not exceed. Which program dials and how long a connectivity
-  test waits are no longer settings at all: `ssh` and `scp` are found by
-  themselves (`PATH` first, then the usual install locations), and a probe waits a
-  fixed thirty seconds — the download's size pre-check keeps its own ten, because
-  one file's metadata should not be given a connectivity test's patience. That tab
-  also states the bounds the plugin fixes
-  in code, so a value outside a range is not a surprise — three of those lines
-  are about sharing: how many remote operations run at once, how many servers
-  may each hold one, and how long an idle shared connection stays open.
+  ceiling a copy may not exceed. Those three fields are now this profile's
+  **overrides**: empty follows the configured default, and any positive number is
+  accepted — one past the cap is capped, and the value that actually applied is
+  echoed back instead of the number being refused. Which program dials is still
+  not a setting (`ssh` and `scp` find themselves, `PATH` first and then the usual
+  install locations). The card beside them is no longer **Fixed bounds** but
+  **Resolved bounds**: each ceiling reads “in force / default / cap”, so the
+  number a call actually ran against is visible rather than inferred, and the
+  remaining lines are this Host's fixed rules — how many remote operations run at
+  once, how many servers may each hold one shared connection, how long an idle
+  connection stays open, how many targets one **Test all** round covers, and how
+  long a probe waits (thirty seconds, with the download's size pre-check keeping
+  its own ten).
 
 ## Using it from the chat
 
@@ -217,10 +221,29 @@ list — the pollable background job and the `ssh -G` resolve view — have both
 
 ## Configuration
 
-The bundle inserts one plugin row with `config: {}` and this release declares no
-configuration fields: everything the page edits lives either in the plugin's own
-storage or in the credential store. Any key you add to that row is currently
-ignored.
+The plugin row the bundle inserts now **reads** its `config:` keys. Every tunable
+is a default-and-cap pair, and every one is live — a profile edit reaches the next
+call rather than the next restart:
+
+| Key | Default | Cap | What it governs |
+| --- | --- | --- | --- |
+| `timeoutMs` / `maxTimeoutMs` | 30 s | 300 s | One foreground remote command, and the most any layer (page, target, one call) may ask for |
+| `outputBytes` / `maxOutputBytes` | 64 KiB | 4 MiB | Per-stream in-memory capture — stdout and stderr each get their own |
+| `transferBytes` / `maxTransferBytes` | 32 MiB | 512 MiB | One copy |
+| `probeTimeoutMs` | 30 s | — | How long a connectivity test waits; the page has no field for it |
+| `statTimeoutMs` | 10 s | — | The size-and-type pre-check one download asks first |
+| `maxSpillBytes` | 64 MiB | — | How large a spill file may grow; `0` means no spill file (**declared this round, wired next**: over-cap output still keeps only its in-memory tail) |
+| `promoteOnTimeout` | on | — | Hand a command that runs out of time to the job registry instead of killing it (**declared this round, not wired yet**) |
+| `graceMs` | 2 s | — | SIGTERM to SIGKILL grace for a child |
+
+Two things follow from that, and both are worth knowing before you reach for the
+page. The three fields on it are now this profile's **overrides**: empty means
+“follow the configured default”, and any positive number is accepted — one past
+the cap is **capped and echoed back**, where the old build rejected it outright.
+And raising `maxTimeoutMs` above 300 s needs a Host restart before the plugin's
+*declared tool-call budget* follows it; until then the harness answers a call that
+outlives the old budget with its own `tool call timed out`, not with this plugin's
+classified result.
 
 ## Limits of this release
 

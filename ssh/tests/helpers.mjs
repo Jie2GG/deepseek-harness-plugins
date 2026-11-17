@@ -54,7 +54,7 @@ export function fakeRunner () {
       // The real transport leases around a call; so does the stand-in, so a test
       // can see what a call would have handed the pool.
       const ticket = runner.share(target, auth)
-      state.calls.push({ kind: 'run', command, options, target, auth, maxOutputBytes: options.maxOutputBytes })
+      state.calls.push({ kind: 'run', command, options, target, auth, settings, maxOutputBytes: options.maxOutputBytes })
       try {
         const canned = typeof state.nextRun === 'function' ? state.nextRun(command, options) : state.runQueue.shift()
         return canned ?? { status: 'succeeded', at: new Date().toISOString(), exitCode: 0, stdout: '', stderr: '', durationMs: 1 }

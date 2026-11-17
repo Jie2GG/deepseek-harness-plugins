@@ -21,7 +21,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-subprocess'
-import { MAX_CONCURRENT_OPS, MIN_MAX_TRANSFER_BYTES, MIN_REMOTE_TIMEOUT_MS, PROBE_TIMEOUT_MS, SCP_EXECUTABLE, SCP_FALLBACK_PATHS, SSH_EXECUTABLE, SSH_FALLBACK_PATHS } from './storage.ts'
+import { MAX_CONCURRENT_OPS, SCP_EXECUTABLE, SCP_FALLBACK_PATHS, SSH_EXECUTABLE, SSH_FALLBACK_PATHS } from './storage.ts'
 import { NO_SHARE_FLAGS, type MuxSource, type PoolTicket } from './pool.ts'
 import { SshError } from './types.ts'
 import type { AuthMode, ProbeOutcome, ProbeStatus, RemoteRunResult, RemoteStatus, SshSettings } from './types.ts'
@@ -128,8 +128,15 @@ const NETWORK_PATTERNS: readonly RegExp[] = [
 /** Bytes of combined output kept as a failure explanation. */
 const DETAIL_LIMIT = 2048
 
-/** How long to wait for the provider to drain the pipes after termination. */
-const DRAIN_MS = 400
+/**
+ * How long to wait for the provider to drain the pipes after termination.
+ *
+ * Exported because the budget this plugin declares to the harness has to sit above
+ * the worst case an internal deadline can take, and that worst case is the
+ * deadline plus this drain plus the kill grace — three numbers that live in
+ * different files and have to be read together to stay true.
+ */
+export const DRAIN_MS = 400
 
 /**
  * How long one `ssh -O exit` teardown child gets before it is given up on.
@@ -140,11 +147,20 @@ const DRAIN_MS = 400
  */
 const MASTER_EXIT_MS = 2_000
 
-/** The ceilings a teardown child runs under, for the same reason. */
+/**
+ * The ceilings a teardown child runs under, for the same reason. Stated here and
+ * not read from the bounds layer on purpose: these are this module's own small
+ * budget for talking to a local socket, and a profile that sets a generous
+ * transfer ceiling has no bearing on closing a master.
+ */
 const CONTROL_SETTINGS: SshSettings = {
   maxOutputBytes: 8_192,
   remoteTimeoutMs: MASTER_EXIT_MS,
-  maxTransferBytes: MIN_MAX_TRANSFER_BYTES,
+  maxTransferBytes: 1_024,
+  probeTimeoutMs: MASTER_EXIT_MS,
+  statTimeoutMs: MASTER_EXIT_MS,
+  maxSpillBytes: 0,
+  graceMs: 500,
 }
 
 /** An unknown host key is recorded on first contact; a changed one still fails. */
@@ -713,7 +729,7 @@ export class SshTransport {
         stdout: { maxBytes: settings.maxOutputBytes },
         stderr: { maxBytes: settings.maxOutputBytes },
       },
-      graceMs: 2_000,
+      graceMs: settings.graceMs,
       ...(env === undefined ? {} : { env }),
       signal: controller.signal,
     })
@@ -762,7 +778,7 @@ export class SshTransport {
         timer = setTimeout(() => {
           controller.abort()
           resolve(external?.aborted === true ? { kind: 'cancelled' } : { kind: 'timeout' })
-        }, Math.max(MIN_REMOTE_TIMEOUT_MS, deadlineMs))
+        }, deadlineMs)
       })
     } finally {
       if (timer !== undefined) clearTimeout(timer)
@@ -856,7 +872,7 @@ export class SshTransport {
     const controller = this.#takeLane('probe')
     const ticket = this.share(target, auth ?? {})
     try {
-      const deadline = PROBE_TIMEOUT_MS
+      const deadline = settings.probeTimeoutMs
       const { flags, env } = this.sshOptions(target, settings, auth ?? {}, deadline, { poolFlags: ticket?.flags })
       const program = await this.resolveSsh(controller.signal)
       if (program === undefined) {
@@ -949,7 +965,7 @@ export class SshTransport {
       readonly tty?: boolean | undefined
     } = {},
   ): Promise<RemoteJob | undefined> {
-    const deadline = Math.max(MIN_REMOTE_TIMEOUT_MS, options.timeoutMs ?? settings.remoteTimeoutMs)
+    const deadline = options.timeoutMs ?? settings.remoteTimeoutMs
     const controller = this.#takeLane('background command')
     const ticket = this.share(target, auth)
     const program = await this.resolveSsh(controller.signal)
@@ -1050,7 +1066,7 @@ export class SshTransport {
       readonly tty?: boolean | undefined
     } = {},
   ): Promise<RemoteRunResult> {
-    const deadline = Math.max(MIN_REMOTE_TIMEOUT_MS, options.timeoutMs ?? settings.remoteTimeoutMs)
+    const deadline = options.timeoutMs ?? settings.remoteTimeoutMs
     const bounded: SshSettings = options.maxOutputBytes === undefined ? settings : { ...settings, maxOutputBytes: options.maxOutputBytes }
     const controller = this.#takeLane('remote command')
     const ticket = this.share(target, auth)

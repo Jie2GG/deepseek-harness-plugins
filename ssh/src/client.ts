@@ -62,6 +62,12 @@ window.__ModuleLoader__.load({
         settingsMaxTransfer: 'Transfer ceiling (bytes)',
         settingsSave: 'Save settings',
         settingsSaved: 'Saved.',
+        settingsOverrideHint: 'Empty means “follow the configured default”. Any positive number is accepted: one above the cap is capped, and the value that applied is shown back.',
+        boundsEffectiveOf: 'in force {value}',
+        boundsDefaultOf: 'default {value}',
+        boundsCapOf: 'cap {value}',
+        boundsResolvedTitle: 'Resolved bounds',
+        boundsFromConfig: 'These numbers come from the plugin’s configuration on this Host — a default and a cap per ceiling. Editing the profile’s ssh row changes them, with no code release involved.',
         boundsTitle: 'Fixed bounds',
         boundsTargets: 'Targets per profile',
         boundsOps: 'Remote operations at once',
@@ -183,6 +189,12 @@ window.__ModuleLoader__.load({
         settingsMaxTransfer: '传输上限（字节）',
         settingsSave: '保存参数',
         settingsSaved: '已保存。',
+        settingsOverrideHint: '留空表示「跟配置里的默认走」。填任何正数都收：超过上限会被夹到上限，并且回显真正生效的值。',
+        boundsEffectiveOf: '生效 {value}',
+        boundsDefaultOf: '默认 {value}',
+        boundsCapOf: '上限 {value}',
+        boundsResolvedTitle: '解析后的边界',
+        boundsFromConfig: '这些数字来自这台 Host 上插件的配置——每个上限都有一个默认值和一个封顶值。改 profile 里 ssh 那一行就能调，不用改代码发版。',
         boundsTitle: '固定边界',
         boundsTargets: '每个 profile 可存的目标数',
         boundsOps: '同时在跑的远程操作数',
@@ -897,6 +909,9 @@ window.__ModuleLoader__.load({
       // survives a re-render of the list.
       const [resolved, setResolved] = React.useState({} as Record<string, any>)
       const [settingsDraft, setSettingsDraft] = React.useState({ maxOutputBytes: '', remoteTimeoutMs: '', maxTransferBytes: '' })
+      // The bounds as the running Host resolves them: a default and a cap per
+      // ceiling, what is in force, and any correction its configuration needed.
+      const [bounds, setBounds] = React.useState(null as Record<string, any> | null)
       const alive = React.useRef(true)
 
       React.useEffect(() => {
@@ -923,6 +938,7 @@ window.__ModuleLoader__.load({
           // `limits` shape, and the bounds rows would print blanks over it.
           if (result.limits !== undefined) setLimits((current: typeof limits) => ({ ...current, ...result.limits }))
           setAskpass(result.askpass ?? 'ready')
+          if (result.bounds !== undefined) setBounds(result.bounds)
           setPooling(result.pool !== undefined)
           if (result.pool !== undefined) setPool(result.pool)
           setModern(result.askpass !== undefined)
@@ -1090,9 +1106,14 @@ window.__ModuleLoader__.load({
        * @returns resolution once the new values landed.
        */
       async function saveSettings(): Promise<void> {
-        const whole = (value: string): number | undefined => {
+        // An empty box is a choice, not a no-op: it clears this profile's override so
+        // the configured default applies again. Only a box that holds a bad number is
+        // left out of the request.
+        const whole = (value: string): number | null | undefined => {
           const trimmed = (value ?? '').trim()
-          return trimmed === '' ? undefined : Number(trimmed)
+          if (trimmed === '') return null
+          const parsed = Number(trimmed)
+          return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
         }
         await act('settings', async () => {
           const output = whole(settingsDraft.maxOutputBytes)
@@ -1100,9 +1121,9 @@ window.__ModuleLoader__.load({
           const transfer = whole(settingsDraft.maxTransferBytes)
           const result = await rpc('configUpdate', {
             settings: {
-              ...(output === undefined || Number.isNaN(output) ? {} : { maxOutputBytes: output }),
-              ...(remote === undefined || Number.isNaN(remote) ? {} : { remoteTimeoutMs: remote }),
-              ...(transfer === undefined || Number.isNaN(transfer) ? {} : { maxTransferBytes: transfer }),
+              ...(output === undefined ? {} : { maxOutputBytes: output }),
+              ...(remote === undefined ? {} : { remoteTimeoutMs: remote }),
+              ...(transfer === undefined ? {} : { maxTransferBytes: transfer }),
             },
           })
           if (!alive.current) return
@@ -1113,6 +1134,12 @@ window.__ModuleLoader__.load({
               remoteTimeoutMs: String(result.settings.remoteTimeoutMs ?? ''),
               maxTransferBytes: String(result.settings.maxTransferBytes ?? ''),
             })
+          }
+          // The resolved numbers move with the save: a value the cap pulled down has
+          // to show up in the card, not just in what was typed.
+          if (result.bounds !== undefined) setBounds(result.bounds)
+          else if (result.effective !== undefined) {
+            setBounds((current: any) => (current === null ? current : { ...current, effective: result.effective }))
           }
         }, t('settingsSaved'))
       }
@@ -1563,17 +1590,37 @@ window.__ModuleLoader__.load({
             onClick: () => { void saveSettings() },
           }, busy === 'settings' ? t('saving') : t('settingsSave')),
         ),
+        h('p', { class: 'dshssh-muted' }, t('settingsOverrideHint')),
         h('div', { class: 'dshssh-grid' },
-          h(TextField, { label: t('settingsMaxOutput'), value: settingsDraft.maxOutputBytes, type: 'number', disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, maxOutputBytes: value })) } }),
-          h(TextField, { label: t('settingsRemoteTimeout'), value: settingsDraft.remoteTimeoutMs, type: 'number', disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, remoteTimeoutMs: value })) } }),
-          h(TextField, { label: t('settingsMaxTransfer'), value: settingsDraft.maxTransferBytes, type: 'number', disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, maxTransferBytes: value })) } }),
+          h(TextField, { label: t('settingsRemoteTimeout'), value: settingsDraft.remoteTimeoutMs, type: 'number', placeholder: bounds === null || bounds.timeoutMs === undefined ? undefined : String(bounds.timeoutMs), disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, remoteTimeoutMs: value })) } }),
+          h(TextField, { label: t('settingsMaxOutput'), value: settingsDraft.maxOutputBytes, type: 'number', placeholder: bounds === null || bounds.outputBytes === undefined ? undefined : String(bounds.outputBytes), disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, maxOutputBytes: value })) } }),
+          h(TextField, { label: t('settingsMaxTransfer'), value: settingsDraft.maxTransferBytes, type: 'number', placeholder: bounds === null || bounds.transferBytes === undefined ? undefined : String(bounds.transferBytes), disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, maxTransferBytes: value })) } }),
         ),
         settings === null ? h('span', { class: 'dshssh-muted' }, loading ? t('listProbing') : t('listLoadFailed')) : null,
       )
 
       /** What the plugin fixes in code, so a value is never a surprise. */
+      /**
+       * One ceiling stated the way a reader of this card needs it: what is in force
+       * right now, and the default and cap it was resolved from. The order is
+       * deliberate — the number that actually applies goes first, because that is the
+       * one a call is being measured against.
+       * @param def - the configured default.
+       * @param cap - the configured cap.
+       * @param inForce - what a call with no override would run with.
+       * @param unit - how to state the three.
+       * @returns the one-line description.
+       */
+      function ceilingText(def: number | undefined, cap: number | undefined, inForce: number | undefined, unit: 'ms' | 'bytes'): string {
+        return [
+          format(t('boundsEffectiveOf'), { value: measure(inForce, unit) }),
+          format(t('boundsDefaultOf'), { value: measure(def, unit) }),
+          format(t('boundsCapOf'), { value: measure(cap, unit) }),
+        ].join(' · ')
+      }
+
       const boundsCard = h('section', { class: 'dshssh-card' },
-        h('h3', { class: 'dshssh-card-title' }, t('boundsTitle')),
+        h('h3', { class: 'dshssh-card-title' }, bounds === null ? t('boundsTitle') : t('boundsResolvedTitle')),
         h('dl', { class: 'dshssh-bounds' },
           h('div', { class: 'dshssh-bound', key: 'targets' }, h('dt', {}, t('boundsTargets')), h('dd', {}, String(limits.maxConnections))),
           // A Host that predates the pool sends no operation count and no sharing
@@ -1585,11 +1632,31 @@ window.__ModuleLoader__.load({
             h('div', { class: 'dshssh-bound', key: 'persist' }, h('dt', {}, t('boundsPersist')), h('dd', {}, idleFor(limits.controlPersistSeconds))),
           ] : []),
           h('div', { class: 'dshssh-bound', key: 'round' }, h('dt', {}, t('boundsPerRound')), h('dd', {}, String(limits.probeAllLimit))),
-          h('div', { class: 'dshssh-bound', key: 'timeout' }, h('dt', {}, t('boundsTimeout')), h('dd', {}, measure(limits.probeTimeoutMs, 'ms'))),
-          h('div', { class: 'dshssh-bound', key: 'remote' }, h('dt', {}, t('boundsRemoteTimeout')), h('dd', {}, `${measure(limits.remoteTimeoutMinMs, 'ms')} – ${measure(limits.remoteTimeoutMaxMs, 'ms')}`)),
-          h('div', { class: 'dshssh-bound', key: 'output' }, h('dt', {}, t('boundsOutput')), h('dd', {}, `${measure(limits.outputMinBytes, 'bytes')} – ${measure(limits.outputMaxBytes, 'bytes')}`)),
-          h('div', { class: 'dshssh-bound', key: 'transfer' }, h('dt', {}, t('boundsTransfer')), h('dd', {}, `${measure(limits.transferMinBytes, 'bytes')} – ${measure(limits.transferMaxBytes, 'bytes')}`)),
+          h('div', {
+            class: 'dshssh-bound',
+            key: 'timeout',
+          }, h('dt', {}, t('boundsTimeout')), h('dd', {}, measure(bounds?.probeTimeoutMs ?? limits.probeTimeoutMs, 'ms'))),
+          // A Host that resolves its bounds from configuration states each ceiling as
+          // default / cap / in force, which is what makes a capped call legible. An
+          // older one only ever published a two-sided range, so its row keeps that
+          // shape rather than inventing a "default" it never had.
+          ...(bounds === null ? [
+            h('div', { class: 'dshssh-bound', key: 'remote' }, h('dt', {}, t('boundsRemoteTimeout')), h('dd', {}, `${measure(limits.remoteTimeoutMinMs, 'ms')} – ${measure(limits.remoteTimeoutMaxMs, 'ms')}`)),
+            h('div', { class: 'dshssh-bound', key: 'output' }, h('dt', {}, t('boundsOutput')), h('dd', {}, `${measure(limits.outputMinBytes, 'bytes')} – ${measure(limits.outputMaxBytes, 'bytes')}`)),
+            h('div', { class: 'dshssh-bound', key: 'transfer' }, h('dt', {}, t('boundsTransfer')), h('dd', {}, `${measure(limits.transferMinBytes, 'bytes')} – ${measure(limits.transferMaxBytes, 'bytes')}`)),
+          ] : [
+            h('div', { class: 'dshssh-bound', key: 'remote' }, h('dt', {}, t('settingsRemoteTimeout')), h('dd', {}, ceilingText(bounds.timeoutMs, bounds.maxTimeoutMs, bounds.effective?.remoteTimeoutMs, 'ms'))),
+            h('div', { class: 'dshssh-bound', key: 'output' }, h('dt', {}, t('settingsMaxOutput')), h('dd', {}, ceilingText(bounds.outputBytes, bounds.maxOutputBytes, bounds.effective?.maxOutputBytes, 'bytes'))),
+            h('div', { class: 'dshssh-bound', key: 'transfer' }, h('dt', {}, t('settingsMaxTransfer')), h('dd', {}, ceilingText(bounds.transferBytes, bounds.maxTransferBytes, bounds.effective?.maxTransferBytes, 'bytes'))),
+          ]),
         ),
+        // Where a number came from, and what this Host had to correct on the way to
+        // it: a configuration whose cap sat below its default is a mistake worth
+        // naming out loud rather than one the reader discovers through a surprise.
+        bounds === null ? null : h('p', { class: 'dshssh-muted' }, t('boundsFromConfig')),
+        bounds?.notes?.length > 0
+          ? h('p', { class: 'dshssh-muted' }, String((bounds.notes as unknown[]).join(' · ')))
+          : null,
         // A fact about this machine, not a bound: the pool only exists if the Host
         // could make a private directory for its sockets, and when it could not,
         // every number above still holds while sharing simply does not happen.

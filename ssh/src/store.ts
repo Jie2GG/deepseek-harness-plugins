@@ -12,7 +12,7 @@ import { randomBytes } from 'node:crypto'
 import type { Domain } from '@deepseek-ai/dsh-storage-domain'
 import { connectionRecordSchema, MAX_ALLOWED_COMMANDS, MAX_CONNECTIONS, settingsRecordSchema, sshTargetsDomain } from './storage.ts'
 import { SshError } from './types.ts'
-import type { ConnectionInput, ConnectionRecord, ProbeOutcome, SessionTarget, SshSettings } from './types.ts'
+import type { ConnectionInput, ConnectionRecord, ProbeOutcome, SessionTarget, StoredSettings } from './types.ts'
 
 /** The opened domain this store wraps. */
 type SshTargetsDomain = Domain<typeof sshTargetsDomain>
@@ -119,17 +119,20 @@ export class TargetStore {
     return this.#table().size
   }
 
-  /** The shared settings, with the schema defaults applied. */
-  settings(): SshSettings {
+  /**
+   * This profile's stored ceilings: overrides only, any of which may be absent
+   * because the plugin's config now carries a default and a cap behind them.
+   */
+  settings(): StoredSettings {
     return this.#domain.global.get()
   }
 
   /**
-   * Replace the shared settings.
-   * @param next - the settings to persist.
-   * @returns the persisted settings.
+   * Replace this profile's stored ceilings.
+   * @param next - the overrides to persist; an absent key means the configured default.
+   * @returns the persisted overrides.
    */
-  async saveSettings(next: SshSettings): Promise<SshSettings> {
+  async saveSettings(next: StoredSettings): Promise<StoredSettings> {
     const value = settingsRecordSchema.parse(next)
     await this.#domain.global.set(value)
     return value

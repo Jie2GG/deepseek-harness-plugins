@@ -17,6 +17,84 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.24
+
+### Changed
+
+- **The bounds model is now the harness's, not one this plugin invented.** The
+  three ceilings carried two-sided ranges — `1 s – 300 s`, `1 KiB – 4 MiB`,
+  `1 KiB – 512 MiB` — enforced with rejections, and a value outside them was an
+  error rather than a decision. No harness tool works that way: `bash-local`
+  declares a **default and a cap** as volatile config and *clamps* an override in
+  `resolve()`, the shell seam echoes the effective timeout back, and `tool-jobs`
+  caps a wait the same way while refusing at load time when a cap sits below its
+  default. The plugin now does the same thing: `src/config.ts` holds a
+  `{name}` / `max{name}` pair per ceiling (plus the probe deadline, the pre-check
+  deadline, the spill cap, the kill grace, and the promotion switch), all live, and
+  `src/bounds.ts` is the one place that resolves **call → target → profile override
+  → configured default**, caps the result, and returns a receipt per correction.
+- **A number past the cap is no longer a refusal.** An over-cap deadline, output
+  ceiling, or transfer limit is now capped to the cap, and the value that actually
+  ran is echoed in the result (`timeoutMs`, `outputBytes`, `bytesLimit`) with a note
+  naming what moved. Only a value that cannot mean a deadline at all — zero, a
+  negative, a non-finite number — is still refused, and the hint says where the line
+  is now. The floor is gone on purpose: 500 ms is a decision someone can make.
+- **The settings page edits overrides, not the truth.** Empty means "follow the
+  configured default", `null` clears an override, and the card next to the fields
+  is renamed from **Fixed bounds** to **Resolved bounds**, stating each ceiling as
+  *in force / default / cap* so a reader sees the number a call actually met rather
+  than one they hoped for.
+- **The storage domain is version 6**, reading 1 through 5: the global slot's three
+  ceilings became optional, because a default and a cap live in configuration now.
+  Nothing migrates — a stored file with all three numbers reads on as three
+  overrides, and a hand-written value outside the current cap stores fine and is
+  capped where it is used, which is the only consistent story once saving is no
+  longer the place bounds are enforced.
+
+### Added
+
+- `src/config.ts` (the plugin's first declared `Config`, so the bundle row's
+  `config:` keys are read rather than ignored) and `src/bounds.ts` (resolution,
+  capping, receipts). New reuse, not new code: `clampTimeout` comes from
+  `@deepseek-ai/dsh-timeout`, and `@deepseek-ai/schemastery` supplies
+  `.volatile()`, which is what makes a profile edit reach the next call instead of
+  the next restart.
+- A `bounds.test.mjs` suite over the resolution layer alone: layer order, what a cap
+  does, what is refused, the raised-cap note, and the config schema filling
+  defaults.
+
+### Fixed
+
+- **A `read` that asked for `maxOutputBytes` did not get it.** The per-call ceiling
+  reached `exec` and transfers but silently not the file actions, and the old
+  suite pinned that behaviour in place with a comment calling it a wart. Folding
+  the file path into the same resolution as every other call fixes it: the value
+  asked for is the value used (capped, and echoed).
+- **The plugin's declared call budget used to equal its own internal cap**, both at
+  300 s. `guard/timeout-policy` reads the declaration, arms its own timer, and
+  **replaces whatever the tool returned** with `Error: tool call timed out after
+  <N>ms` if that timer wins — so an ordinary remote timeout was a coin toss between
+  this plugin's classified answer and a generic sentence. The declared budget is now
+  derived (`maxTimeoutMs + graceMs + drain + 5 s` slack) with a test pinning the
+  inequality, so the plugin's own answer always wins on a normal deadline and the
+  wrapper is left to what it is for: a call that hangs with nothing to time out on.
+
+### Notes
+
+- Two of the new keys are **declared this round and wired in the next two**:
+  `maxSpillBytes` (the provider already writes a full-stream spill file when asked;
+  surfacing its path is 0.0.25) and `promoteOnTimeout` (0.0.26). The detail page
+  says so rather than letting a table imply more than the code does.
+- Raising `maxTimeoutMs` above the default cap needs a Host restart before the
+  *declared* tool budget follows it, because registration fixed the number; the
+  internal deadlines follow immediately. Documented in the config section and on the
+  field itself.
+- `bash` declares no call budget at all and never meets this collision; that is the
+  alternative shape, and the reason to keep a declaration here is stated in
+  `README.md` rather than left implicit.
+- 114 tests across eleven suites are green; `tsc` clean and `oxlint` reports 0
+  warnings and 0 errors. Version 0.0.23 → 0.0.24 under the three-segment rule.
+
 ## 0.0.23
 
 ### Changed

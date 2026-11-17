@@ -18,6 +18,9 @@ import type {} from '@deepseek-ai/dsh-subprocess'
 import type {} from '@deepseek-ai/dsh-fs'
 import type {} from '@deepseek-ai/dsh-working-directory'
 import { sshTargetsDomain } from './storage.ts'
+// `Config` itself is re-exported below for the loader; only its type is used here.
+import { type SshConfig } from './config.ts'
+import { readBounds } from './bounds.ts'
 import { resolveLocalInside } from './local-path.ts'
 import type { JobRegistry } from './jobs.ts'
 import { effectiveApprovalPolicy } from './approval.ts'
@@ -37,6 +40,14 @@ import { RPC_ROUTE_PATH, SshError } from './types.ts'
 export const name = 'ssh'
 
 /**
+ * The plugin's bounds: a default and a cap per ceiling, every one live. Re-exported
+ * from `config.ts` so the bundle row's `config:` keys are validated against it,
+ * which is the point — retuning a ceiling is profile configuration, not a code
+ * release.
+ */
+export { Config } from './config.ts'
+
+/**
  * Services this plugin needs. Each one is a hard requirement because the
  * settings page is the plugin's only product surface: a profile without the
  * `/api` carrier, a subprocess provider, the domain facility, or the credential
@@ -51,8 +62,10 @@ export const inject = ['connection', 'subprocess', 'storageDomain', 'credentials
  *
  * @param ctx - Host plugin context carrying `connection`, `subprocess`,
  *   `storageDomain`, and `credentials`.
+ * @param config - this plugin's validated bounds, read live on every call rather
+ *   than snapshotted here.
  */
-export function apply(ctx: Context): void {
+export function apply(ctx: Context, config: SshConfig): void {
   const askpass = new AskPassHelper()
   // The pool owns control sockets; the transport owns the children that open and
   // close them, so the pool is handed back the way to say `-O exit`.
@@ -99,6 +112,9 @@ export function apply(ctx: Context): void {
     // it simply refuses to background a command there. The cast absorbs the two
     // nominal id types each copy of the jobs package brands its own way.
     jobs: ctx.get('jobs') === undefined ? undefined : (ctx.get('jobs') as unknown as JobRegistry),
+    // Read per call, never snapshotted: a volatile config value that was copied at
+    // activation would keep last week's cap until the Host restarted.
+    bounds: () => readBounds(config),
     // The model chooses between the saved aliases, and the tool's description is
     // frozen at definition time, so an inventory change means re-registering.
     onInventoryChanged: () => { rerenderRemoteTool() },
@@ -188,6 +204,7 @@ export function apply(ctx: Context): void {
       // Read without injecting: a profile with no approval service must still get the
       // tool, it simply cannot be asked anything.
       approvalPolicyOf: exec => effectiveApprovalPolicy(ctx.get('approval'), exec.agent),
+      boundsOf: () => readBounds(config),
     }
   }
 

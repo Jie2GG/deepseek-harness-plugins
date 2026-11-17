@@ -34,9 +34,11 @@ test('list carries the views, the limits, the pool state, and the askpass health
   assert.equal(out.connections.length, 1)
   assert.deepEqual(out.connections[0].secrets, { password: true, passphrase: false })
   assert.equal(out.limits.maxConnections, 64)
-  assert.equal(out.limits.transferMaxBytes, 536_870_912)
-  assert.equal(out.limits.probeTimeoutMs, 30_000) // one fixed fact, not a range any more
-  // The bounds card reads these names, so a rename is a page change too.
+  // The ceilings moved out of `limits` and into a resolved view: a default, a cap,
+  // and what a call with no override would run with.
+  assert.equal(out.bounds.maxTransferBytes, 536_870_912)
+  assert.equal(out.bounds.probeTimeoutMs, 30_000)
+  assert.equal(out.bounds.effective.remoteTimeoutMs, 30_000)
   assert.equal(out.limits.concurrentOps, 16)
   assert.equal(out.limits.maxLiveMasters, 8)
   assert.equal(out.limits.controlPersistSeconds, 300)
@@ -91,18 +93,28 @@ test('pickTarget answers by reference, by session, or by the lone row, and names
 })
 
 // ── exec ────────────────────────────────────────────────────────────────────
-test('runCommand forwards tty, stdin, and the per-target ceiling overrides', async () => {
+test('runCommand resolves the ceilings it hands the transport, in layer order', async () => {
   const { ops, state } = build({ records: [record({ remoteTimeoutMs: 15_000, maxOutputBytes: 4096 })] })
   await ops.runCommand({ command: 'ls', tty: true, input: 'answer\n' })
   const call = state.calls[0]
   assert.equal(call.options.tty, true)
   assert.equal(call.options.stdin, 'answer\n')
-  assert.equal(call.options.timeoutMs, 15_000) // the record's override replaces the shared default
-  assert.equal(call.options.maxOutputBytes, 4096)
+  // The resolved ceilings travel in `settings`: the transport no longer re-decides
+  // which layer won, because one place (bounds.ts) resolved call > target > profile
+  // > default and capped the result.
+  assert.equal(call.settings.remoteTimeoutMs, 15_000) // the record's override replaces the shared default
+  assert.equal(call.settings.maxOutputBytes, 4096)
   assert.equal(call.auth.password, undefined) // key auth: no password read
   const explicit = build({ records: [record({ remoteTimeoutMs: 15_000 })] })
   await explicit.ops.runCommand({ command: 'ls', timeoutMs: 20_000 })
-  assert.equal(explicit.state.calls[0].options.timeoutMs, 20_000) // an explicit call beats the record
+  assert.equal(explicit.state.calls[0].settings.remoteTimeoutMs, 20_000) // an explicit call beats the record
+  // Past the cap there is no refusal any more: the number comes down to the cap,
+  // the effective value is echoed, and the correction is stated.
+  const capped = build()
+  const cappedOut = await capped.ops.runCommand({ command: 'ls', timeoutMs: 900_000 })
+  assert.equal(cappedOut.run.timeoutMs, 300_000)
+  assert.equal(cappedOut.run.outputBytes, 65_536)
+  assert.match((cappedOut.run.notes ?? []).join('\n'), /command timeout asked for 900000 and was capped to 300000/)
 })
 
 test('a bad command line is a bad-input refusal naming the field', async () => {
@@ -151,14 +163,18 @@ test('read answers file, directory, other, and missing from one marker line', as
   assert.equal(clipped.truncated, true)
 })
 
-test('read carries the size and the truth about the call ceiling', async () => {
-  // Pinned current behaviour: ops takes the ceiling from the createOptions closure
-  // or the settings, not from per-call params — the tool's maxBytes reaches exec
-  // and transfers, but file reads run at the shared ceiling until that is fixed.
+test('read carries the size and honours the ceiling this call asked for', async () => {
+  // Fixed in 0.0.24: a `read` that asks for `maxOutputBytes` used to run at the
+  // shared ceiling anyway, and the old suite pinned that. The per-call value now
+  // wins over the target's, and both are held to the configured cap.
   const { ops, state } = build({ records: [record({ maxOutputBytes: 2048 })] })
   state.nextRun = () => ({ status: 'succeeded', at: iso, exitCode: 0, stdout: 'ssh-plugin: file 1\nx' })
-  await ops.readPath({ path: '/x', maxOutputBytes: 999 })
-  assert.equal(state.calls[0].maxOutputBytes, 2048) // the per-target ceiling wins
+  const out = await ops.readPath({ path: '/x', maxOutputBytes: 999 })
+  assert.equal(state.calls[0].settings.maxOutputBytes, 999)
+  assert.equal(out.outputBytes, 999)
+  const over = await ops.readPath({ path: '/x', maxOutputBytes: 9_999_999 })
+  assert.equal(state.calls[1].settings.maxOutputBytes, 4_194_304) // capped, not refused
+  assert.match((over.notes ?? []).join('\n'), /output ceiling asked for 9999999 and was capped to 4194304/)
 })
 
 test('a relative or punctuated path refuses before any round trip', async () => {
@@ -529,12 +545,29 @@ test('the session target writes only when a real row is named, and the settings 
   // The saved slot carries only the three ceilings: the next save drops whatever
   // pre-0.0.18 keys the stored file still had.
   assert.deepEqual(Object.keys(cfg.settings).sort(), ['maxOutputBytes', 'maxTransferBytes', 'remoteTimeoutMs'])
-  let rejected
+  assert.equal(cfg.effective.remoteTimeoutMs, 45_000)
+  assert.deepEqual(cfg.notes, [])
+  // A stored 10 ms is no longer refused: the two-sided range is gone, and a value
+  // that means something is used as given. Only a value that cannot mean a deadline
+  // at all is a refusal.
+  const tiny = await ops.configUpdate({ settings: { remoteTimeoutMs: 10 } })
+  assert.equal(tiny.settings.remoteTimeoutMs, 10)
+  assert.equal(tiny.effective.remoteTimeoutMs, 10)
+  // Past the cap it is stored and capped where used, with the receipt on the way by.
+  const big = await ops.configUpdate({ settings: { remoteTimeoutMs: 900_000 } })
+  assert.equal(big.settings.remoteTimeoutMs, 900_000)
+  assert.equal(big.effective.remoteTimeoutMs, 300_000)
+  assert.match(big.notes.join('\n'), /capped to 300000/)
+  // `null` drops the override, which is how a profile gets back to the default.
+  const cleared = await ops.configUpdate({ settings: { remoteTimeoutMs: null } })
+  assert.equal(cleared.settings.remoteTimeoutMs, undefined)
+  assert.equal(cleared.effective.remoteTimeoutMs, 30_000)
+  let nonsensical
   try {
-    await ops.configUpdate({ settings: { remoteTimeoutMs: 10 } })
-  } catch (error) { rejected = error }
-  assert.equal(rejected?.code, 'bad-input')
-  assert.equal(rejected.field, 'remoteTimeoutMs')
+    await ops.configUpdate({ settings: { remoteTimeoutMs: 0 } })
+  } catch (error) { nonsensical = error }
+  assert.equal(nonsensical?.code, 'bad-input')
+  assert.equal(nonsensical.field, 'remoteTimeoutMs')
   // The retired fields are no one's to write any more: the page that still
   // sends probeTimeoutMs gets a clean refusal, not a silent ignore.
   let stale

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import {
   DOMAIN_NAME, DOMAIN_VERSION, COMPATIBLE_VERSIONS, MAX_CONNECTIONS, MAX_CONCURRENT_OPS,
   MAX_LIVE_MASTERS, CONTROL_PERSIST_SECONDS, poolChoiceSchema,
-  MAX_ALLOWED_COMMANDS, BACKGROUND_DEADLINE_MS, DEFAULT_SETTINGS, PROBE_TIMEOUT_MS, STAT_TIMEOUT_MS,
+  MAX_ALLOWED_COMMANDS, BACKGROUND_DEADLINE_MS, DEFAULT_SETTINGS,
   SSH_EXECUTABLE, SSH_FALLBACK_PATHS,
   connectionRecordSchema, connectionInputSchema, settingsRecordSchema, remotePathSchema,
   remoteRunSchema, transferInputSchema, secretPatchSchema, probeDraftSchema,
@@ -22,8 +22,8 @@ const base = {
 
 test('the domain declares its version ladder and tables', () => {
   assert.equal(DOMAIN_NAME, 'ssh_targets')
-  assert.equal(DOMAIN_VERSION, 5)
-  assert.deepEqual([...COMPATIBLE_VERSIONS], [1, 2, 3, 4])
+  assert.equal(DOMAIN_VERSION, 6)
+  assert.deepEqual([...COMPATIBLE_VERSIONS], [1, 2, 3, 4, 5])
   assert.deepEqual(Object.keys(sshTargetsDomain.tables).sort(), ['connections', 'sessions'])
 })
 
@@ -65,14 +65,16 @@ test('a page input may carry an id or clear an override with null, and never key
   assert.throws(() => probeOutcomeSchema.parse({ at: '2026-01-01T00:00:00.000Z', status: 'sort-of' }))
 })
 
-test('settings carry the three ceilings, each with its bound', () => {
-  const out = settingsRecordSchema.parse({})
-  assert.deepEqual(out, DEFAULT_SETTINGS)
-  assert.deepEqual(Object.keys(out).sort(), ['maxOutputBytes', 'maxTransferBytes', 'remoteTimeoutMs'])
-  assert.throws(() => settingsRecordSchema.parse({ remoteTimeoutMs: 300_001 }))
-  assert.throws(() => settingsRecordSchema.parse({ maxOutputBytes: 1023 }))
-  assert.throws(() => settingsRecordSchema.parse({ maxOutputBytes: 4_194_305 }))
-  assert.equal(settingsRecordSchema.parse({ maxTransferBytes: 536_870_912 }).maxTransferBytes, 536_870_912)
+test('settings hold overrides, and every one of them may be absent', () => {
+  // 0.0.24 moved the default and the cap into the plugin's config, so the stored
+  // slot is no longer the whole answer: an absent key means "follow configuration".
+  assert.deepEqual(DEFAULT_SETTINGS, {})
+  assert.deepEqual(settingsRecordSchema.parse({}), {})
+  assert.equal(settingsRecordSchema.parse({ remoteTimeoutMs: 900_000 }).remoteTimeoutMs, 900_000) // over the old max, and still storable
+  assert.equal(settingsRecordSchema.parse({ maxOutputBytes: 1023 }).maxOutputBytes, 1023) // no floor but a positive one
+  assert.throws(() => settingsRecordSchema.parse({ remoteTimeoutMs: 0 }))
+  assert.throws(() => settingsRecordSchema.parse({ maxOutputBytes: -1 }))
+  assert.throws(() => settingsRecordSchema.parse({ oops: 1 }))
   assert.equal(BACKGROUND_DEADLINE_MS, 1_800_000)
   assert.equal(MAX_CONNECTIONS, 64)
   // The lane count is no longer "probes": it counts every remote operation, page
@@ -109,12 +111,10 @@ test('a pre-0.0.18 global slot still opens: the retired fields are accepted, ign
   // still a storage-error rather than a silently ignored one.
   assert.throws(() => settingsRecordSchema.parse({ command: 'x'.repeat(257) }))
   assert.throws(() => settingsRecordSchema.parse({ probeTimeoutMs: 999 }))
-  // The values the plugin now uses are code, not config — and 0.0.23 moved the
-  // probe to thirty seconds while the download's size pre-check kept ten, so a
-  // stalled server stalls a copy, not the whole page.
-  assert.equal(PROBE_TIMEOUT_MS, 30_000)
-  assert.equal(STAT_TIMEOUT_MS, 10_000)
-  assert.notEqual(PROBE_TIMEOUT_MS, STAT_TIMEOUT_MS)
+  // The values the plugin now uses are configuration, not stored config — since
+  // 0.0.24 the probe and the pre-check deadlines live in the plugin's own config
+  // (`probeTimeoutMs` / `statTimeoutMs`, two budgets so retuning one cannot triple
+  // the other), which `bounds.test.mjs` pins.
   assert.equal(SSH_EXECUTABLE, 'ssh')
   assert.ok(SSH_FALLBACK_PATHS.includes('/usr/bin/ssh'))
 })
@@ -153,7 +153,11 @@ test('elevation fields: sudo wants a bare account name, and one mechanism per ca
 
 test('transfer and session inputs demand what they need; secrets are never blank', () => {
   assert.throws(() => transferInputSchema.parse({ path: '/x' })) // localPath required
-  assert.throws(() => transferInputSchema.parse({ path: '/x', localPath: 'a', maxBytes: 1023 }))
+  // A tiny ceiling is storable now: 0.0.24 dropped the two-sided range, so a value
+  // above the cap is capped at use and a small positive one is simply what the
+  // caller asked for.
+  assert.equal(transferInputSchema.parse({ path: '/x', localPath: '/y', maxBytes: 1023 }).maxBytes, 1023)
+  assert.throws(() => transferInputSchema.parse({ path: '/x', localPath: 'a', maxBytes: 0 }))
   assert.throws(() => sessionTargetInputSchema.parse({ sessionId: '' }))
   assert.equal(sessionTargetInputSchema.parse({ sessionId: 's' }).targetId, undefined)
   assert.throws(() => secretPatchSchema.parse({ password: '' })) // empty is absent, not blank

@@ -48,7 +48,9 @@ export type GateDecision =
   | { kind: 'deny'; reason: string }
   | { kind: 'cancel' }
   | { kind: 'ask'; reason?: string; displayReason?: { readonly en: string; readonly [locale: string]: string } }
-import { leadingProgram } from './transport.ts'
+import { leadingProgram, DRAIN_MS } from './transport.ts'
+import { defaultBounds } from './bounds.ts'
+import type { Bounds } from './bounds.ts'
 import type { Ops, Params, RemoteFileResult } from './ops.ts'
 
 /** Actions the tool offers: reads (`get_connection`, `read`, `download`) and writes (`exec`, `write`, `edit`, `upload`). */
@@ -99,6 +101,13 @@ export interface RemoteToolDeps {
    * refusal the plugin authored itself.
    */
   approvalPolicyOf?: ((exec: Readonly<PendingCall>) => ApprovalAnswer | undefined) | undefined
+  /**
+   * The live bounds, so the declared tool-call budget can sit above the longest
+   * deadline this plugin will wait to. Read at registration; a profile that raises
+   * a cap re-registers on the next inventory change. An assembly that brings none
+   * gets the published defaults, each cap at the height of its own default.
+   */
+  boundsOf?: (() => Bounds) | undefined
 }
 
 /** One saved target as the tool description presents it to the model. */
@@ -505,7 +514,20 @@ async function rememberSessionTarget(
   }
 }
 
+/**
+ * Slack on top of the longest internal wait, so a call that reaches its own
+ * deadline always answers before the harness wrapper answers for it. The wrapper in
+ * `guard/timeout-policy` replaces whatever the tool returned with
+ * `Error: tool call timed out after <N>ms`, and a plugin whose budget equals its
+ * internal deadline is a plugin that loses its own classification to a race.
+ */
+const BUDGET_SLACK_MS = 5_000
+
 export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
+  // The worst case this plugin can wait to: the capped command deadline, the kill
+  // grace the provider gets, the pipe drain, and the slack above that.
+  const bounds = (deps.boundsOf ?? defaultBounds)()
+  const callBudgetMs = bounds.maxTimeoutMs + bounds.graceMs + DRAIN_MS + BUDGET_SLACK_MS
   return defineTool({
     name: REMOTE_TOOL_NAME,
     description: describeRemote(deps.targetsOf?.() ?? []),
@@ -525,7 +547,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
       mkdir: { type: 'boolean', description: 'For `write`: create the parent directory first. Defaults to true.' },
       localPath: { type: 'string', description: 'For `upload` and `download`: the path on this machine. Relative paths are resolved inside the conversation workspace, and a path outside it is refused.' },
       recursive: { type: 'boolean', description: 'For `upload` and `download`: move a directory rather than one file.' },
-      timeoutMs: { type: 'integer', description: 'For `exec`: override the command deadline for this call, in milliseconds.' },
+      timeoutMs: { type: 'integer', description: 'For `exec`: the deadline for this call, in milliseconds. The plugin applies its configured default and cap — a number above the cap is capped to it and the effective value is echoed back, never refused.' },
       background: { type: 'boolean', description: 'For `exec`: start the command as a background job and return its id at once instead of waiting for it. Poll it with the `job_output` tool and stop it with `job_kill`; the command also ends when this conversation ends.' },
       maxBytes: { type: 'integer', description: 'For `exec` and `read`: the largest amount of output to bring back.' },
       tty: { type: 'boolean', description: 'For `exec`: run under `ssh -tt`, for a program that inspects its own terminal (it then merges stderr into stdout and ends lines with CRLF).' },
@@ -587,7 +609,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
         }
       },
     },
-    timeoutMs: 300_000,
+    timeoutMs: callBudgetMs,
     presentCall: (args) => {
       const call = args as RemoteCallArgs
       const label = call.command !== undefined ? call.command : call.path ?? call.action
@@ -621,7 +643,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           }))
           const stored = sessionId === undefined || (call.target ?? '').trim() !== '' ? undefined : deps.sessionTargetOf?.(sessionId)
           const resolved = findTarget(snapshots, call, stored)
-          return listedResult(listed.connections, listed.settings, resolved === undefined ? undefined : {
+          return listedResult(listed.connections, listed.bounds, resolved === undefined ? undefined : {
             id: resolved.id,
             label: resolved.label,
             host: resolved.host,
@@ -789,7 +811,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
  */
 function listedResult(
   connections: Awaited<ReturnType<Ops['list']>>['connections'],
-  settings: Awaited<ReturnType<Ops['list']>>['settings'],
+  bounds: Awaited<ReturnType<Ops['list']>>['bounds'],
   selected?: { id: string; label: string; host: string; user?: string | undefined; via: string } | undefined,
 ): Record<string, unknown> {
   return {
@@ -820,7 +842,10 @@ function listedResult(
     }),
     message: connections.length === 0
       ? 'No SSH target is saved yet. Add one under Settings → Remote connections, then choose it for this conversation.'
-      : `Default ceilings: command ${String(settings.remoteTimeoutMs)} ms, output ${String(settings.maxOutputBytes)} bytes, transfer ${String(settings.maxTransferBytes)} bytes.`,
+      // Stated as default / cap / in force, because a call that asks above the cap
+      // is capped rather than refused — and a model that cannot see the cap has no
+      // way to know its number was changed on it.
+      : `Ceilings as this Host resolves them (default to cap, and what is in force): command ${String(bounds.timeoutMs)}–${String(bounds.maxTimeoutMs)} ms, in force ${String(bounds.effective.remoteTimeoutMs)} ms; output ${String(bounds.outputBytes)}–${String(bounds.maxOutputBytes)} bytes per stream, in force ${String(bounds.effective.maxOutputBytes)}; transfer ${String(bounds.transferBytes)}–${String(bounds.maxTransferBytes)} bytes, in force ${String(bounds.effective.maxTransferBytes)}. A number past the cap is capped to it, not refused.`,
   }
 }
 

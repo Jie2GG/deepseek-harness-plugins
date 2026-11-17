@@ -12,7 +12,6 @@
  */
 
 import { shellQuote } from './transport.ts'
-import { STAT_TIMEOUT_MS } from './storage.ts'
 import type { AskPassSource, RemoteAuth, RemoteTarget, SshTransport } from './transport.ts'
 import type { SshSettings } from './types.ts'
 
@@ -69,10 +68,11 @@ export async function remoteStat(
   path: string,
 ): Promise<{ bytes: number; kind: string } | undefined> {
   const run = await transport.run(target, settings, auth, `stat -c '%s %F' -- ${shellQuote(path)}`, {
-    // The pre-check keeps its own ten seconds. It asks for one file's metadata, so
-    // a server that has gone quiet should stall a copy, not stall the page for as
-    // long as a connectivity probe is willing to wait.
-    timeoutMs: STAT_TIMEOUT_MS,
+    // The pre-check keeps its own budget (`statTimeoutMs`, ten seconds by
+    // default), separate from the probe's: it asks for one file's metadata, so a
+    // server that has gone quiet should stall a copy, not stall it for as long as a
+    // connectivity test is willing to wait.
+    timeoutMs: settings.statTimeoutMs,
   })
   if (run.status !== 'succeeded') return undefined
   const match = /^(\d+)\s+(.+)$/u.exec((run.stdout ?? '').trim())

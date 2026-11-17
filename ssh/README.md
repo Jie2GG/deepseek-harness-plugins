@@ -95,11 +95,15 @@ fresh module generation.
 | --- | --- | --- |
 | `name` | `'ssh'` | Cordis plugin name for loader diagnostics. |
 | `inject` | `['connection', 'subprocess', 'storageDomain', 'credentials']` | Hard requirements: without them the row stays inactive rather than throwing. |
-| `apply(ctx)` | `(ctx: Context) => void` | Opens the domain, then registers `/api/ssh/rpc` inside `ctx.effect`; both disposers run on unload. |
+| `apply(ctx, config)` | `(ctx: Context, config: SshConfig) => void` | Opens the domain, then registers `/api/ssh/rpc` inside `ctx.effect`; both disposers run on unload. |
 
-No `Config` is declared: every editable value lives in the plugin's storage
-domain, so the row's `config: {}` is accepted as-is and saving from the page
-never rewrites the profile patch file or restarts the plugin.
+The plugin declares a `Config` (`src/config.ts`) for its ceilings: a default and a
+cap per ceiling, every one `.volatile()`, so editing the row's `config:` changes
+what the next call resolves against without a restart and without touching the
+storage domain. What the page edits stays in the domain (target list, overrides,
+conversation choices), and the credentials stay in the credential store — so
+saving from the page still never rewrites the profile patch file or restarts the
+plugin.
 
 ### Route (`POST` and `GET` on `/api/ssh/rpc`)
 
@@ -159,27 +163,71 @@ The file's shape, asserted by an integration run against the published json
 backend:
 
 ```json
-{ "unit": { "name": "ssh_targets", "version": 5 },
+{ "unit": { "name": "ssh_targets", "version": 6 },
   "global": { "maxOutputBytes": 65536, "remoteTimeoutMs": 30000, "maxTransferBytes": 33554432 },
   "tables": { "connections": { "ssh-0123456789": { "id": "…", "label": "…", "host": "…", "auth": "password", "agentAccess": "on", "pool": "on", "allowedCommands": ["git"], "extraArgs": ["-4"], "createdAt": "…", "updatedAt": "…", "lastProbe": { "status": "auth-failed" } } }, "sessions": { "session-77": { "sessionId": "session-77", "targetId": "ssh-0123456789", "setAt": "…" } } }
 ```
 
-Bounds live in `src/storage.ts`: 64 targets, 16 concurrent remote operations
-shared by probes and commands, 8 servers that may each hold one shared
-connection (`MAX_LIVE_MASTERS`) before the idle longest-quiet one is retired, a
-five-minute idle timeout on a master (`CONTROL_PERSIST_SECONDS`), 12 per
-`probeAll` round, a fixed 30 s probe
-deadline (`PROBE_TIMEOUT_MS`, with the download size pre-check on its own
-separate `STAT_TIMEOUT_MS` of 10 s), 1 s–300 s
-command timeout, 1 KiB–4 MiB output ceiling, 1 KiB–512 MiB transfer ceiling, and
-at most 32 allowlisted program names of 64 characters each. A backgrounded
-command runs to its own 30-minute deadline (`BACKGROUND_DEADLINE_MS`, whichever
-is larger against the configured command timeout), text fed to a command's stdin
-is capped at 1,000,000 characters, and a remote command line at 8,192. Which
-program dials is not a bound at all: `SSH_EXECUTABLE` and `SSH_FALLBACK_PATHS`
-(and the same pair for scp) are the auto-detection search.
+Bounds split in two since 0.0.24. The structural ones still live in
+`src/storage.ts`: 64 targets, 16 concurrent remote operations shared by probes and
+commands, 8 servers that may each hold one shared connection (`MAX_LIVE_MASTERS`)
+before the idle longest-quiet one is retired, a five-minute idle timeout on a
+master (`CONTROL_PERSIST_SECONDS`), 12 per `probeAll` round, a 30-minute outer
+deadline on a backgrounded command (`BACKGROUND_DEADLINE_MS`), text fed to a
+command's stdin capped at 1,000,000 characters, a remote command line at 8,192,
+and at most 32 allowlisted program names of 64 characters each. The three
+*ceilings* a reader or a call can move — command timeout, per-stream output,
+transfer size — plus the probe and pre-check deadlines, the spill cap, the kill
+grace, and whether a timed-out command is promoted, now live in `src/config.ts`
+as a default-and-cap pair each, all `.volatile()`.
 
-Record format is `version: 4` with `compatibleVersions: [1, 2, 3]`.
+### Bounds resolution (`src/config.ts`, `src/bounds.ts`)
+
+The plugin used to carry two-sided ranges (`1 s – 300 s`, `1 KiB – 4 MiB`,
+`1 KiB – 512 MiB`) and **reject** a value outside them. The harness has no such
+shape anywhere, and that was the argument for changing it:
+
+- `bash-local` declares `timeoutMs` (default 120 s) and `maxTimeoutMs` (600 s) as
+  **volatile config**, and its `resolve()` *clamps* an override rather than
+  refusing it (`packages/shell/bash-local/src/index.ts:100-107,122-127`).
+- The one rule a shell request enforces is "positive and finite":
+  `clampTimeout(requested, def, max, name)` throws only on that, and otherwise
+  returns `min(requested ?? def, max)` (`packages/util/timeout/src/index.ts:45-55`).
+- The shell result **echoes the effective timeout** — `ShellRunResult.timeoutMs`,
+  "after defaulting/capping" (`packages/shell/shell/src/types.ts:159-160`).
+- `tool-jobs` caps a wait the same way, and refuses at **load time** when a cap is
+  configured below its default (`packages/jobs/tool-jobs/src/index.ts:241-253`).
+
+So `bounds.ts` is now the only place the layering is stated — **call → target →
+profile override → configured default**, capped by `max*` — and it returns the
+effective value plus a note per correction, which `stampCeilings` attaches to the
+result (`timeoutMs`, `outputBytes`, `notes`; transfers add `bytesLimit`). A value
+past the cap is no longer an error; a value that cannot mean a deadline (zero,
+negative, non-finite) still is, and the hint says where the line now sits.
+`readBounds` re-reads the volatile values per call — never snapshotted — so a
+profile edit lands on the next call, and a cap configured below its default is
+raised with a note rather than silently strangling the default.
+
+One asymmetry the harness cannot absorb for us: this plugin declares a
+`ToolDefinition.timeoutMs` (it did not before), and `guard/timeout-policy` reads
+that declaration and **replaces whatever the tool returned** with
+`Error: tool call timed out after <N>ms` when its own timer wins
+(`packages/guard/timeout-policy/src/index.ts:57-79`). Declaring the same number as
+the internal cap — which is what 0.0.23 shipped, both at 300 s — meant that race
+was a coin toss. The declared budget is now derived
+(`maxTimeoutMs + graceMs + DRAIN_MS + 5 s` of slack) and a test pins the
+inequality, so the plugin's own classified answer always wins on an ordinary
+timeout. `bash` sidesteps the whole question by declaring no budget at all
+(`packages/shell/tool-bash/src/index.ts:368-534`); a remote call that hangs with
+nothing to time out on is the reason this plugin keeps one.
+
+`ssh -G`, `ssh -O`, and the probe deadlines are deliberately outside the override
+layers: the resolve view dials nothing, and a probe's budget is a rule for the
+page rather than a number a call negotiates. Which program dials is not a bound at
+all either: `SSH_EXECUTABLE` and `SSH_FALLBACK_PATHS` (and the same pair for scp)
+are the auto-detection search.
+
+Record format is `version: 6` with `compatibleVersions: [1, 2, 3, 4, 5]`.
 
 The shared settings slot carries the three ceilings the page still edits.
 Since 0.0.18 the ssh/scp programs are found at run time — bare name on `PATH`
@@ -248,7 +296,8 @@ it decides, and why:
   channels one master may carry, and a host configured lower is a real case. That
   is what the per-target `pool: 'off'` switch is for: the page edits it under
   **Advanced options**, the model sees it as a `pool off` chip, and the record
-  carries it as `pool`, which is why the domain is version 5.
+  carries it as `pool`, which is why the domain went to version 5; version 6 made
+  the global slot's three ceilings optional overrides of configured defaults.
 - **`ssh -G` leases nothing.** The resolve view answers where an alias points;
   naming a control socket in it would describe a connection the call never makes.
 - **A page probe warms the pool.** The settings test dials under the same lease an

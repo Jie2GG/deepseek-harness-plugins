@@ -10,9 +10,11 @@
  * @module @jie2gg/dsh-plugin-ssh/ops
  */
 
-import { connectionInputSchema, draftSecretSchema, remotePathSchema, transferInputSchema, sessionTargetInputSchema, BACKGROUND_DEADLINE_MS, CONTROL_PERSIST_SECONDS, MAX_CONCURRENT_OPS, MAX_CONNECTIONS, MAX_LIVE_MASTERS, MAX_MAX_OUTPUT_BYTES, MAX_MAX_TRANSFER_BYTES, MAX_REMOTE_TIMEOUT_MS, MIN_MAX_OUTPUT_BYTES, MIN_MAX_TRANSFER_BYTES, MIN_REMOTE_TIMEOUT_MS, PROBE_TIMEOUT_MS, probeDraftSchema, remoteRunSchema, secretPatchSchema, settingsInputSchema } from './storage.ts'
+import { connectionInputSchema, draftSecretSchema, remotePathSchema, transferInputSchema, sessionTargetInputSchema, BACKGROUND_DEADLINE_MS, CONTROL_PERSIST_SECONDS, MAX_CONCURRENT_OPS, MAX_CONNECTIONS, MAX_LIVE_MASTERS, probeDraftSchema, remoteRunSchema, secretPatchSchema, settingsInputSchema } from './storage.ts'
+import { defaultBounds, resolveSettings } from './bounds.ts'
+import type { Bounds, CeilingLayers, ResolvedSettings } from './bounds.ts'
 import { SshError } from './types.ts'
-import type { AuthMode, ConnectionRecord, ConnectionView, ProbeOutcome, ResolvedConfig, RemoteRunResult, RemoteTransferResult, SshSettings } from './types.ts'
+import type { AuthMode, ConnectionRecord, ConnectionView, ProbeOutcome, ResolvedConfig, RemoteRunResult, RemoteTransferResult, SshSettings, StoredSettings } from './types.ts'
 import { transfer } from './transfer.ts'
 import { applyEdit } from './edit.ts'
 import { startRemoteJob } from './jobs.ts'
@@ -111,6 +113,12 @@ export interface RemoteFileResult {
   exitCode?: number | null
   /** Duration of the whole call. */
   durationMs?: number
+  /** The deadline this call actually ran under, after capping. */
+  timeoutMs?: number
+  /** The per-stream capture ceiling that actually applied. */
+  outputBytes?: number
+  /** Objective sentences naming what a bounds resolution corrected on the way here. */
+  notes?: readonly string[]
   /** Failure or refusal explanation. */
   message?: string
   /** Hint naming the next step for a reader. */
@@ -122,21 +130,35 @@ export interface ListResult {
   connections: ConnectionView[]
   /** The target this conversation chose, when the caller names a session. */
   sessionTarget?: string
-  settings: SshSettings
+  /** What this profile stores as overrides; absent keys follow the configured default. */
+  settings: StoredSettings
   limits: {
     maxConnections: number
     concurrentOps: number
     maxLiveMasters: number
     controlPersistSeconds: number
     probeAllLimit: number
-    /** The fixed probe deadline, shown on the bounds card as a fact, not a range. */
+  }
+  /**
+   * The bounds as the running Host resolves them: the configured default and cap
+   * for each ceiling, what a call with no override would actually use, and the
+   * receipts for anything the configuration had to correct. The page shows this
+   * instead of publishing numbers of its own.
+   */
+  bounds: {
+    timeoutMs: number
+    maxTimeoutMs: number
+    outputBytes: number
+    maxOutputBytes: number
+    transferBytes: number
+    maxTransferBytes: number
     probeTimeoutMs: number
-    remoteTimeoutMinMs: number
-    remoteTimeoutMaxMs: number
-    outputMinBytes: number
-    outputMaxBytes: number
-    transferMinBytes: number
-    transferMaxBytes: number
+    statTimeoutMs: number
+    maxSpillBytes: number
+    graceMs: number
+    promoteOnTimeout: boolean
+    effective: SshSettings
+    notes: readonly string[]
   }
   /** Whether calls on this Host can share a connection, and how many masters do. */
   pool: { ready: boolean; liveMasters: number; failure?: string }
@@ -179,8 +201,8 @@ export interface Ops {
   editRemote(params: Params): Promise<RemoteFileResult>
   /** Write one remote file from text, with the overwrite guard. */
   writeRemote(params: Params): Promise<RemoteFileResult>
-  /** Replace the shared settings. */
-  configUpdate(params: Params): Promise<{ settings: SshSettings }>
+  /** Replace this profile's stored ceilings; `null` on a key drops the override. */
+  configUpdate(params: Params): Promise<{ settings: StoredSettings; effective: SshSettings; notes: readonly string[] }>
 }
 
 /** Dependencies the plugin entry assembles. */
@@ -205,6 +227,12 @@ export interface OpsDeps {
   options?: FileCallOptions
   /** The harness job registry, when the profile mounts one. */
   jobs?: JobRegistry | undefined
+  /**
+   * The live bounds, read per call so a profile edit lands on the next call. When
+   * an assembly brings no configuration the published defaults stand in, each cap at
+   * the height of its own default.
+   */
+  bounds?: (() => Bounds) | undefined
 }
 
 /**
@@ -335,10 +363,51 @@ export interface FileCallOptions {
  */
 export function createOps(deps: OpsDeps): Ops {
   const { runner, store, secrets, askpass } = deps
+  const liveBounds = deps.bounds ?? defaultBounds
   const options = deps.options ?? {}
   const localExists = deps.localExists
   const inventoryChanged = deps.onInventoryChanged
   const jobs = deps.jobs
+
+  /**
+   * The ceilings one call runs under.
+   *
+   * Config default, this profile's stored override, the target's own, and the
+   * call's request, in that precedence, capped by the config — and every number the
+   * cap pulled down is named in `notes`, because a value that silently changed is
+   * the kind of surprise this plugin keeps being asked not to produce.
+   * @param stored - what the settings page stores for this profile.
+   * @param target - the record the call resolved to, when it resolved to one.
+   * @param call - the per-call overrides the caller brought.
+   * @returns the resolved ceilings and their receipts.
+   */
+  function ceilings(stored: StoredSettings, target?: ConnectionRecord, call: CeilingLayers['call'] = {}): ResolvedSettings {
+    return resolveSettings(liveBounds(), {
+      stored,
+      ...(target === undefined ? {} : { target }),
+      call,
+    })
+  }
+
+  /**
+   * Attach to a finished remote call what actually applied, and any correction the
+   * cap made on the way.
+   *
+   * This is the layer that resolved the numbers, so this is the layer that can say
+   * what they came to; a caller who asked for a deadline above the cap has no other
+   * way to learn it was moved, and a silent correction is the surprise this plugin
+   * keeps being asked not to produce.
+   * @param run - the result the transport handed back.
+   * @param settings - the ceilings this call ran under.
+   * @param notes - the receipts from the resolution, if any.
+   * @returns the same result, stamped.
+   */
+  function stampCeilings(run: RemoteRunResult, settings: SshSettings, notes: readonly string[]): RemoteRunResult {
+    run.timeoutMs = settings.remoteTimeoutMs
+    run.outputBytes = settings.maxOutputBytes
+    if (notes.length > 0) run.notes = notes
+    return run
+  }
 
   /** One stored record as the page sees it. */
   async function viewOf(state: TargetStore, record: ConnectionRecord): Promise<ConnectionView> {
@@ -374,7 +443,7 @@ export function createOps(deps: OpsDeps): Ops {
    * @param action - which file action is running, for the refusal message.
    * @returns the resolved pieces.
    */
-  async function fileCall(params: Params, action: 'read' | 'write' | 'edit') {
+  async function fileCall(params: Params, action: 'read' | 'write' | 'edit', call: CeilingLayers['call'] = {}) {
     const state = await store()
     const globalSettings = state.settings()
     const record = pickTarget(state, params)
@@ -388,12 +457,18 @@ export function createOps(deps: OpsDeps): Ops {
     } catch (error: unknown) {
       throw new SshError('bad-input', `A remote ${action} needs an absolute path.`, { field: 'path', hint: messageOf(error) })
     }
-    const settings: SshSettings = {
-      ...globalSettings,
-      ...(record.maxOutputBytes === undefined ? {} : { maxOutputBytes: record.maxOutputBytes }),
-    }
+    // A per-call ceiling now reaches the file actions too. It used to be that a
+    // `read` asking for `maxOutputBytes` ran at the shared ceiling anyway — a wart
+    // the old suites pinned in place — and folding it into the same resolution every
+    // other call uses is the smaller lie than documenting it.
+    const asked = typeof params.maxOutputBytes === 'number' ? params.maxOutputBytes : undefined
+    const resolved = ceilings(globalSettings, record, {
+      ...call,
+      maxOutputBytes: asked ?? call.maxOutputBytes ?? options.maxOutputBytes,
+    })
+    const settings = resolved.settings
     const auth = await authFor(record.id, record.auth)
-    return { state, record, settings, auth, path }
+    return { state, record, settings, notes: resolved.notes, auth, path }
   }
 
   /**
@@ -430,6 +505,9 @@ export function createOps(deps: OpsDeps): Ops {
       ...(run.durationMs === undefined ? {} : { durationMs: run.durationMs }),
       ...(run.exitCode === undefined && run.status === 'succeeded' ? {} : { exitCode: run.exitCode ?? null }),
       ...(run.truncated === undefined ? {} : { truncated: run.truncated }),
+      ...(run.timeoutMs === undefined ? {} : { timeoutMs: run.timeoutMs }),
+      ...(run.outputBytes === undefined ? {} : { outputBytes: run.outputBytes }),
+      ...(run.notes === undefined ? {} : { notes: run.notes }),
       ...(entriesText === undefined || entriesText === '' ? {} : { entriesText }),
       ...(content === undefined ? {} : { content, bytes: Buffer.byteLength(content, 'utf8'), lines: content === '' ? 0 : content.split('\n').length }),
       ...extra,
@@ -558,10 +636,8 @@ export function createOps(deps: OpsDeps): Ops {
         hint: 'Pass overwrite to replace it.',
       }
     }
-    const settings: SshSettings = {
-      ...globalSettings,
-      ...(record.maxOutputBytes === undefined ? {} : { maxOutputBytes: record.maxOutputBytes }),
-    }
+    const resolved = ceilings(globalSettings, record, { timeoutMs: input.timeoutMs, maxBytes: input.maxBytes })
+    const settings = resolved.settings
     const auth = await authFor(record.id, record.auth)
     const outcome = await transfer(runner, askpassSource(), targetOf(record), settings, auth, {
       direction,
@@ -569,8 +645,10 @@ export function createOps(deps: OpsDeps): Ops {
       remotePath: input.path,
       ...(input.recursive === undefined ? {} : { recursive: input.recursive }),
       overwrite,
-      maxBytes: input.maxBytes ?? settings.maxTransferBytes,
-      timeoutMs: input.timeoutMs ?? record.remoteTimeoutMs ?? settings.remoteTimeoutMs,
+      // Both numbers are already resolved: the ceiling this copy runs under, and
+      // the deadline its pre-check and transfer wait to.
+      maxBytes: settings.maxTransferBytes,
+      timeoutMs: settings.remoteTimeoutMs,
     })
     const target = { id: record.id, label: record.label, host: record.host }
     const base: RemoteTransferResult = {
@@ -581,6 +659,9 @@ export function createOps(deps: OpsDeps): Ops {
       localPath: local,
       remotePath: input.path,
       durationMs: outcome.durationMs,
+      bytesLimit: settings.maxTransferBytes,
+      timeoutMs: settings.remoteTimeoutMs,
+      ...(resolved.notes.length === 0 ? {} : { notes: resolved.notes }),
       ...(outcome.bytes === undefined ? {} : { bytes: outcome.bytes }),
       ...(input.recursive === true ? { recursive: true } : {}),
       ...(outcome.overwrote === true ? { overwrote: true } : {}),
@@ -648,27 +729,37 @@ export function createOps(deps: OpsDeps): Ops {
   return {
     async list(params: Params = {}): Promise<ListResult> {
       const state = await store()
-      const settings = state.settings()
+      const stored = state.settings()
+      const bounds = liveBounds()
+      const resolved = ceilings(stored)
       const helper = askpass()
       const sessionId = typeof params.sessionId === 'string' ? params.sessionId : ''
       const chosen = sessionId === '' ? undefined : state.getSessionTarget(sessionId)?.targetId
       return {
         connections: await viewsOf(state),
         ...(chosen === undefined ? {} : { sessionTarget: chosen }),
-        settings,
+        settings: stored,
         limits: {
           maxConnections: MAX_CONNECTIONS,
           concurrentOps: MAX_CONCURRENT_OPS,
           maxLiveMasters: MAX_LIVE_MASTERS,
           controlPersistSeconds: CONTROL_PERSIST_SECONDS,
           probeAllLimit: PROBE_ALL_LIMIT,
-          probeTimeoutMs: PROBE_TIMEOUT_MS,
-          outputMinBytes: MIN_MAX_OUTPUT_BYTES,
-          outputMaxBytes: MAX_MAX_OUTPUT_BYTES,
-          remoteTimeoutMinMs: MIN_REMOTE_TIMEOUT_MS,
-          remoteTimeoutMaxMs: MAX_REMOTE_TIMEOUT_MS,
-          transferMinBytes: MIN_MAX_TRANSFER_BYTES,
-          transferMaxBytes: MAX_MAX_TRANSFER_BYTES,
+        },
+        bounds: {
+          timeoutMs: bounds.timeoutMs,
+          maxTimeoutMs: bounds.maxTimeoutMs,
+          outputBytes: bounds.outputBytes,
+          maxOutputBytes: bounds.maxOutputBytes,
+          transferBytes: bounds.transferBytes,
+          maxTransferBytes: bounds.maxTransferBytes,
+          probeTimeoutMs: bounds.probeTimeoutMs,
+          statTimeoutMs: bounds.statTimeoutMs,
+          maxSpillBytes: bounds.maxSpillBytes,
+          graceMs: bounds.graceMs,
+          promoteOnTimeout: bounds.promoteOnTimeout,
+          effective: resolved.settings,
+          notes: resolved.notes,
         },
         askpass: helper.ready ? 'ready' : 'unavailable',
         ...(helper.ready || helper.failure === undefined ? {} : { askpassFailure: helper.failure.slice(0, 512) }),
@@ -717,7 +808,7 @@ export function createOps(deps: OpsDeps): Ops {
 
     async probe(params: Params) {
       const state = await store()
-      const settings = state.settings()
+      const storedSettings = state.settings()
       if (params.draft !== undefined) {
         let draft: RemoteTarget & { auth?: AuthMode | undefined }
         try {
@@ -732,7 +823,7 @@ export function createOps(deps: OpsDeps): Ops {
           throw new SshError('bad-input', messageOf(error), { field: fieldOf(error), hint: 'A draft secret must be a non-empty string.' })
         }
         const auth = await authFor(undefined, draft.auth ?? 'key', transient)
-        const probe = await runner.probe(targetOf(draft), settings, auth)
+        const probe = await runner.probe(targetOf(draft), ceilings(storedSettings).settings, auth)
         return { probe, connections: await viewsOf(state) }
       }
       const id = typeof params.id === 'string' ? params.id : ''
@@ -740,7 +831,7 @@ export function createOps(deps: OpsDeps): Ops {
       const record = state.get(id)
       if (record === undefined) throw new SshError('not-found', `No stored SSH target carries the id "${id}".`, { field: 'id' })
       const auth = await authFor(record.id, record.auth)
-      const outcome = await runner.probe(targetOf(record), settings, auth)
+      const outcome = await runner.probe(targetOf(record), ceilings(storedSettings, record).settings, auth)
       const updated = await state.recordProbe(id, outcome)
       const connection = updated === undefined ? undefined : await viewOf(state, updated)
       return { ...(connection === undefined ? {} : { connection }), connections: await viewsOf(state) }
@@ -748,7 +839,7 @@ export function createOps(deps: OpsDeps): Ops {
 
     async probeAll() {
       const state = await store()
-      const settings = state.settings()
+      const storedSettings = state.settings()
       const all = state.list()
       const chosen = all.slice(0, PROBE_ALL_LIMIT)
       const failures: { id: string; message: string }[] = []
@@ -762,7 +853,7 @@ export function createOps(deps: OpsDeps): Ops {
             cursor += 1
             try {
               const auth = await authFor(record.id, record.auth)
-              const outcome = await runner.probe(targetOf(record), settings, auth)
+              const outcome = await runner.probe(targetOf(record), ceilings(storedSettings, record).settings, auth)
               await state.recordProbe(record.id, outcome)
             } catch (error: unknown) {
               failures.push({ id: record.id, message: messageOf(error) })
@@ -786,10 +877,8 @@ export function createOps(deps: OpsDeps): Ops {
       if (record.agentAccess === 'off') {
         throw new SshError('bad-input', `"${record.label}" is set to agent access off, so no remote command may run on it.`, { field: 'target', hint: 'Turn agent access on for this target in the settings page.' })
       }
-      const settings: SshSettings = {
-        ...globalSettings,
-        ...(record.maxOutputBytes === undefined ? {} : { maxOutputBytes: record.maxOutputBytes }),
-      }
+      const resolved = ceilings(globalSettings, record, { timeoutMs: input.timeoutMs, maxOutputBytes: input.maxOutputBytes })
+      const settings = resolved.settings
       const auth = await authFor(record.id, record.auth)
       // Elevation assembly. Both mechanisms need an answer at a prompt, and the
       // plugin holds secrets the model never sees: `as` reaches an account
@@ -832,18 +921,18 @@ export function createOps(deps: OpsDeps): Ops {
         if (stdin === undefined && rootPassword !== undefined) stdin = `${rootPassword}\n`
       }
       const run = await runner.run(targetOf(record), settings, auth, command, {
-        ...(input.timeoutMs === undefined && record.remoteTimeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs ?? record.remoteTimeoutMs }),
-        ...(record.maxOutputBytes === undefined ? {} : { maxOutputBytes: record.maxOutputBytes }),
         ...(tty === undefined ? {} : { tty }),
         ...(stdin === undefined ? {} : { stdin }),
       })
       if (elevated !== undefined) run.elevated = elevated
+      // What applied, and whether a cap had to move it: only this layer knows.
+      stampCeilings(run, settings, resolved.notes)
       const connection = await viewOf(state, record)
       return { run, connection, connections: await viewsOf(state) }
     },
 
     async readPath(params: Params): Promise<RemoteFileResult> {
-      const { record, settings, auth, path } = await fileCall(params, 'read')
+      const { record, settings, notes, auth, path } = await fileCall(params, 'read')
       // One round trip answers a file, a directory, and a miss. The remote shell
       // prints a marker line naming which it found — `file` carries the byte size
       // the server reported, so a clipped read can say how much was left behind —
@@ -855,9 +944,8 @@ export function createOps(deps: OpsDeps): Ops {
         + `elif [ -f ${quoted} ]; then printf 'ssh-plugin: file %s\\n' "$(wc -c < ${quoted} | tr -dc 0-9)"; cat -- ${quoted}; `
         + `elif [ -e ${quoted} ]; then printf 'ssh-plugin: other\\n'; ls -la -- ${quoted}; `
         + `else printf 'ssh-plugin: missing\\n'; exit 20; fi`
-      const run = await runner.run(targetOf(record), settings, auth, command, {
-        maxOutputBytes: options.maxOutputBytes ?? settings.maxOutputBytes,
-      })
+      const run = await runner.run(targetOf(record), settings, auth, command)
+      stampCeilings(run, settings, notes)
       const body = splitMarker(run.stdout ?? '')
       if (body === undefined) {
         return fileResult('read', record, path, run, undefined, run.stdout ?? '', { type: 'file' })
@@ -879,14 +967,13 @@ export function createOps(deps: OpsDeps): Ops {
     },
 
     async editRemote(params: Params): Promise<RemoteFileResult> {
-      const { record, settings, auth, path } = await fileCall(params, 'edit')
+      const { record, settings, notes, auth, path } = await fileCall(params, 'edit')
       const oldText = typeof params.oldText === 'string' ? params.oldText : ''
       const newText = typeof params.newText === 'string' ? params.newText : ''
       const quoted = shellQuote(path)
       const target = { id: record.id, label: record.label, host: record.host }
-      const read = await runner.run(targetOf(record), settings, auth, `if [ ! -f ${quoted} ]; then exit 20; fi; cat -- ${quoted}`, {
-        maxOutputBytes: options.maxOutputBytes ?? settings.maxOutputBytes,
-      })
+      const read = await runner.run(targetOf(record), settings, auth, `if [ ! -f ${quoted} ]; then exit 20; fi; cat -- ${quoted}`)
+      stampCeilings(read, settings, notes)
       if (read.status !== 'succeeded') {
         const missing = read.exitCode === 20
         return {
@@ -963,7 +1050,7 @@ export function createOps(deps: OpsDeps): Ops {
     },
 
     async writeRemote(params: Params): Promise<RemoteFileResult> {
-      const { record, settings, auth, path } = await fileCall(params, 'write')
+      const { record, settings, notes, auth, path } = await fileCall(params, 'write')
       const content = typeof params.content === 'string' ? params.content : ''
       const append = params.append === true
       const mkdir = params.mkdir !== false
@@ -976,8 +1063,8 @@ export function createOps(deps: OpsDeps): Ops {
       const prepare = mkdir && parent !== '' ? `mkdir -p -- ${shellQuote(parent)} && ` : ''
       const run = await runner.run(targetOf(record), settings, auth, `${guard}${prepare}cat ${append ? '>>' : '>'} ${quoted}`, {
         stdin: content,
-        maxOutputBytes: settings.maxOutputBytes,
       })
+      stampCeilings(run, settings, notes)
       return fileResult('write', record, path, run, undefined, undefined, {
         bytes: Buffer.byteLength(content, 'utf8'),
         overwrote: overwrite && !append,
@@ -986,8 +1073,8 @@ export function createOps(deps: OpsDeps): Ops {
 
     async resolveRemote(params: Params): Promise<ResolveResult> {
       const state = await store()
-      const settings = state.settings()
       const record = pickTarget(state, params)
+      const settings = ceilings(state.settings(), record).settings
       const collected = await runner.resolve(targetOf(record), settings)
       const target = { id: record.id, label: record.label, host: record.host }
       const stored: { host: string; user?: string | undefined; port?: number | undefined } = {
@@ -1056,16 +1143,14 @@ export function createOps(deps: OpsDeps): Ops {
           hint: 'Drop background and the same command runs and waits as usual.',
         })
       }
-      const settings: SshSettings = {
-        ...globalSettings,
-        ...(record.maxOutputBytes === undefined ? {} : { maxOutputBytes: record.maxOutputBytes }),
-      }
+      const resolved = ceilings(globalSettings, record, { timeoutMs: input.timeoutMs, maxOutputBytes: input.maxOutputBytes })
+      const settings = resolved.settings
       const auth = await authFor(record.id, record.auth)
       const owner = typeof input.sessionId === 'string' ? input.sessionId : undefined
       // A backgrounded command is not bounded by the foreground deadline: the whole
       // point is to outlive one reply. It still ends when the reader stops it, when
       // the conversation that owns it goes away, or when the Host process exits.
-      const deadline = input.timeoutMs ?? Math.max(BACKGROUND_DEADLINE_MS, settings.remoteTimeoutMs)
+      const deadline = Math.max(BACKGROUND_DEADLINE_MS, settings.remoteTimeoutMs)
       const label = `${record.label}: ${input.command}`
       const jobId = startRemoteJob(jobs, {
         label,
@@ -1136,14 +1221,23 @@ export function createOps(deps: OpsDeps): Ops {
       try {
         patch = settingsInputSchema.parse(value)
       } catch (error: unknown) {
-        throw new SshError('bad-input', messageOf(error), { field: fieldOf(error), hint: 'Fix the reported value or range and save again.' })
+        throw new SshError('bad-input', messageOf(error), {
+          field: fieldOf(error),
+          // The range is no longer the gate, so the hint that used to point at a
+          // range would send a reader hunting for a bound that does not exist.
+          hint: 'Send a positive whole number, or null to drop this profile\u2019s override and follow the configured default.',
+        })
       }
-      const settings = await state.saveSettings({
-        maxOutputBytes: patch.maxOutputBytes ?? current.maxOutputBytes,
-        remoteTimeoutMs: patch.remoteTimeoutMs ?? current.remoteTimeoutMs,
-        maxTransferBytes: patch.maxTransferBytes ?? current.maxTransferBytes,
-      })
-      return { settings }
+      // `null` clears an override rather than carrying one over, which is the only
+      // way a profile can go back to a configured default from the page.
+      const merged: StoredSettings = {
+        ...(patch.maxOutputBytes === undefined ? { maxOutputBytes: current.maxOutputBytes } : patch.maxOutputBytes === null ? {} : { maxOutputBytes: patch.maxOutputBytes }),
+        ...(patch.remoteTimeoutMs === undefined ? { remoteTimeoutMs: current.remoteTimeoutMs } : patch.remoteTimeoutMs === null ? {} : { remoteTimeoutMs: patch.remoteTimeoutMs }),
+        ...(patch.maxTransferBytes === undefined ? { maxTransferBytes: current.maxTransferBytes } : patch.maxTransferBytes === null ? {} : { maxTransferBytes: patch.maxTransferBytes }),
+      }
+      const stored = await state.saveSettings(merged)
+      const resolved = ceilings(stored)
+      return { settings: stored, effective: resolved.settings, notes: resolved.notes }
     },
   }
 }

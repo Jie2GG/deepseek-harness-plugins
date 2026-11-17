@@ -11,7 +11,10 @@
  * Format history: 1 = targets only; 2 = added `auth`; 3 = added the agent-access
  * fields and the `sessions` table; 4 = the global slot shrank to the three
  * ceilings (the executable is detected now, and the probe deadline is fixed);
- * 5 = added the per-target `pool` switch for connection sharing.
+ * 5 = added the per-target `pool` switch for connection sharing; 6 = the global
+ * slot became a set of *overrides* — every ceiling may now be absent, because a
+ * default and a cap live in the plugin's config and a value over the cap is
+ * capped at use rather than rejected at save.
  * Older records keep opening because every added field is optional, and every
  * retired field is accepted and ignored, so no stored file is refused.
  *
@@ -20,7 +23,7 @@
 
 import { z } from 'zod'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
-import type { ConnectionRecord, SessionTarget, SshSettings } from './types.ts'
+import type { ConnectionRecord, SessionTarget, StoredSettings } from './types.ts'
 
 /** Domain name, and the backend unit name it doubles as (`^[a-z][a-z0-9_]*$`). */
 export const DOMAIN_NAME = 'ssh_targets'
@@ -29,14 +32,16 @@ export const DOMAIN_NAME = 'ssh_targets'
  * Current record format version. 2 added `auth`, 3 added the agent fields and
  * the `sessions` table, 4 shrank the global slot to the three ceilings the page
  * still edits — the executable is detected and the probe deadline is fixed — and
- * 5 added the per-target `pool` switch. The current schemas accept every earlier
- * shape, and a stored record with no `pool` shares by default, so no stored file
- * is rewritten or refused on upgrade.
+ * 5 added the per-target `pool` switch, and 6 turned the global slot's three
+ * ceilings into optional overrides — a default and a cap now live in the plugin's
+ * config, so an absent ceiling means "use what is configured". The current schemas
+ * accept every earlier shape, and a stored record with no `pool` shares by default,
+ * so no stored file is rewritten or refused on upgrade.
  */
-export const DOMAIN_VERSION = 5
+export const DOMAIN_VERSION = 6
 
 /** Older stored records the current schemas still accept. */
-export const COMPATIBLE_VERSIONS = [1, 2, 3, 4]
+export const COMPATIBLE_VERSIONS = [1, 2, 3, 4, 5]
 
 /** Ceiling on how many targets the page may keep. */
 export const MAX_CONNECTIONS = 64
@@ -79,47 +84,21 @@ export const SCP_EXECUTABLE = 'scp'
 export const SCP_FALLBACK_PATHS: readonly string[] = ['/usr/bin/scp', '/usr/local/bin/scp', '/bin/scp', '/opt/homebrew/bin/scp']
 
 /**
- * The deadline one connectivity probe waits to.
+ * How long one backgrounded remote command may run before it is called timed out.
  *
- * Thirty seconds, fixed in code: the page's test is not a request a reader wants
- * to tune, and every deployment that ever had a knob for it left it alone. The
- * budget splits itself — the connect phase takes a third of it (capped at 10 s),
- * so a host nobody answers still fails fast, and what the rest covers is a slow
- * link, a jump host, and a key exchange with an authentication round.
- *
- * What the probe dials for depends on whether the call carries a shared
- * connection: `ssh -N` ends on its own the instant authentication finishes when a
- * master is being left behind in the background, and sits idle until its deadline
- * when nothing will be. `STAT_TIMEOUT_MS` is the separate, shorter budget for the
- * one remote `stat` a download asks first, which used to ride on this constant.
+ * This is the plugin's own bound, not the harness's: a job here lives to its
+ * `job_kill`, its owner's conversation, or the Host going down, and this number is
+ * only the outer safety net for a command that never settles.
  */
-export const PROBE_TIMEOUT_MS = 30_000
-
-/**
- * The deadline for the size and type pre-check one download asks before it
- * copies. The answer is a local file's metadata, so it is not given the probe's
- * thirty seconds: a stalled server should not stall a copy that was about to
- * start.
- */
-export const STAT_TIMEOUT_MS = 10_000
-
-/** How long one backgrounded remote command may run before it is called timed out. */
 export const BACKGROUND_DEADLINE_MS = 1_800_000
 
-/** Remote command deadline bounds, in whole milliseconds. */
-export const DEFAULT_REMOTE_TIMEOUT_MS = 30_000
-export const MIN_REMOTE_TIMEOUT_MS = 1_000
-export const MAX_REMOTE_TIMEOUT_MS = 300_000
-
-/** Per-stream capture bounds for probe and command output, in bytes. */
-export const DEFAULT_MAX_OUTPUT_BYTES = 65_536
-export const MIN_MAX_OUTPUT_BYTES = 1_024
-export const MAX_MAX_OUTPUT_BYTES = 4_194_304
-
-/** File-transfer ceiling bounds, in bytes. */
-export const DEFAULT_MAX_TRANSFER_BYTES = 33_554_432
-export const MIN_MAX_TRANSFER_BYTES = 1_024
-export const MAX_MAX_TRANSFER_BYTES = 536_870_912
+/**
+ * The three ceilings' default-and-cap pair now lives in {@link ./config.ts}, and a
+ * value over the cap is capped and echoed rather than rejected — the shape every
+ * harness tool uses (`bash-local` for a command budget, `tool-jobs` for a wait).
+ * What used to be `MIN_*`/`MAX_*` rejections here is gone on purpose: two-sided
+ * ranges were this plugin's invention, and no shared facility enforced them.
+ */
 
 /** Whole-millisecond UTC instant, the shape `new Date().toISOString()` writes. */
 const instantSchema = z.iso.datetime({ precision: 3 })
@@ -164,6 +143,16 @@ export const authChoiceSchema = z.enum(['key', 'password'])
  */
 export const poolChoiceSchema = z.enum(['on', 'off'])
 
+/**
+ * A whole positive number of milliseconds, with no ceiling in the schema: a value
+ * above the configured cap is capped and echoed at resolution (`bounds.ts`), and
+ * only a value that cannot mean a deadline is refused.
+ */
+const deadlineSchema = z.number().int().positive()
+
+/** A whole positive byte count, capped rather than rejected, for the same reason. */
+const bytesSchema = z.number().int().positive()
+
 /** One classified probe result kept beside a target. */
 export const probeOutcomeSchema = z.object({
   at: instantSchema,
@@ -197,17 +186,31 @@ export const connectionRecordSchema = z.object({
    * command needs an approval, which is what 0.6.0 ships as the safe default.
    */
   allowedCommands: z.array(programSchema).max(MAX_ALLOWED_COMMANDS).default([]),
-  /** Per-target command deadline; absence follows the shared setting. */
-  remoteTimeoutMs: z.number().int().min(MIN_REMOTE_TIMEOUT_MS).max(MAX_REMOTE_TIMEOUT_MS).optional(),
-  /** Per-target output ceiling; absence follows the shared setting. */
-  maxOutputBytes: z.number().int().min(MIN_MAX_OUTPUT_BYTES).max(MAX_MAX_OUTPUT_BYTES).optional(),
+  /** Per-target command deadline; absence falls through to the profile, then to config. */
+  remoteTimeoutMs: deadlineSchema.optional(),
+  /** Per-target output ceiling; the same fall-through. */
+  maxOutputBytes: bytesSchema.optional(),
 }).strict()
 
-/** The domain's global slot: the three ceilings the whole page shares. */
+/**
+ * The three ceilings' default-and-cap pair now lives in {@link ./config.ts}, and a
+ * value over the cap is capped and echoed at resolution (`bounds.ts`) rather than
+ * rejected here. Only a value that cannot mean a deadline or a byte count at all
+ * fails — the same line every harness tool draws.
+ */
+
+/**
+ * The domain's global slot: the three ceilings this profile **overrides**.
+ *
+ * Absent means "use the plugin's configured default" — the defaults and caps live
+ * in `config.ts` now, so a stored slot no longer carries the whole truth, and an
+ * old file whose three numbers were the rule reads on as three overrides. Values
+ * outside the current cap survive on disk and are capped where they are used.
+ */
 export const settingsRecordSchema = z.object({
-  maxOutputBytes: z.number().int().min(MIN_MAX_OUTPUT_BYTES).max(MAX_MAX_OUTPUT_BYTES).default(DEFAULT_MAX_OUTPUT_BYTES),
-  remoteTimeoutMs: z.number().int().min(MIN_REMOTE_TIMEOUT_MS).max(MAX_REMOTE_TIMEOUT_MS).default(DEFAULT_REMOTE_TIMEOUT_MS),
-  maxTransferBytes: z.number().int().min(MIN_MAX_TRANSFER_BYTES).max(MAX_MAX_TRANSFER_BYTES).default(DEFAULT_MAX_TRANSFER_BYTES),
+  maxOutputBytes: bytesSchema.optional(),
+  remoteTimeoutMs: deadlineSchema.optional(),
+  maxTransferBytes: bytesSchema.optional(),
   /**
    * The two fields a pre-0.0.18 page could edit. A stored slot written before
    * then still carries them; the strict schema accepts and ignores them, and
@@ -218,12 +221,8 @@ export const settingsRecordSchema = z.object({
   probeTimeoutMs: z.number().int().min(1_000).max(120_000).optional(),
 }).strict()
 
-/** Initial settings served before the first write; not written as such. */
-export const DEFAULT_SETTINGS: SshSettings = {
-  maxOutputBytes: DEFAULT_MAX_OUTPUT_BYTES,
-  remoteTimeoutMs: DEFAULT_REMOTE_TIMEOUT_MS,
-  maxTransferBytes: DEFAULT_MAX_TRANSFER_BYTES,
-}
+/** Initial settings served before the first write: nothing stored, everything configured. */
+export const DEFAULT_SETTINGS: StoredSettings = {}
 
 /** The conversation's chosen target, keyed by Session id. */
 export const sessionTargetSchema = z.object({
@@ -247,8 +246,8 @@ export const connectionInputSchema = z.object({
   agentAccess: z.enum(['on', 'off']).optional(),
   pool: poolChoiceSchema.optional(),
   allowedCommands: z.array(programSchema).max(MAX_ALLOWED_COMMANDS).optional(),
-  remoteTimeoutMs: z.number().int().min(MIN_REMOTE_TIMEOUT_MS).max(MAX_REMOTE_TIMEOUT_MS).nullable().optional(),
-  maxOutputBytes: z.number().int().min(MIN_MAX_OUTPUT_BYTES).max(MAX_MAX_OUTPUT_BYTES).nullable().optional(),
+  remoteTimeoutMs: deadlineSchema.nullable().optional(),
+  maxOutputBytes: bytesSchema.nullable().optional(),
 }).strict()
 
 /** What a `save` may write into the credential store. */
@@ -277,11 +276,16 @@ export const draftSecretSchema = z.object({
   passphrase: z.string().min(1).max(4096).optional(),
 }).strict()
 
-/** What the page may send for the shared settings; every field is optional. */
+/**
+ * What the page may send for the shared ceilings. Every field is optional, and
+ * `null` clears an override so the configured default applies again — which is the
+ * difference this release makes: the page no longer holds the only number, it holds
+ * this profile's choice against a configured default and cap.
+ */
 export const settingsInputSchema = z.object({
-  maxOutputBytes: z.number().int().min(MIN_MAX_OUTPUT_BYTES).max(MAX_MAX_OUTPUT_BYTES).optional(),
-  remoteTimeoutMs: z.number().int().min(MIN_REMOTE_TIMEOUT_MS).max(MAX_REMOTE_TIMEOUT_MS).optional(),
-  maxTransferBytes: z.number().int().min(MIN_MAX_TRANSFER_BYTES).max(MAX_MAX_TRANSFER_BYTES).optional(),
+  maxOutputBytes: bytesSchema.nullable().optional(),
+  remoteTimeoutMs: deadlineSchema.nullable().optional(),
+  maxTransferBytes: bytesSchema.nullable().optional(),
 }).strict()
 
 /**
@@ -309,8 +313,8 @@ export const transferInputSchema = z.object({
   localDir: z.string().min(1).max(4096).optional(),
   recursive: z.boolean().optional(),
   overwrite: z.boolean().optional(),
-  maxBytes: z.number().int().min(MIN_MAX_TRANSFER_BYTES).max(MAX_MAX_TRANSFER_BYTES).optional(),
-  timeoutMs: z.number().int().min(MIN_REMOTE_TIMEOUT_MS).max(MAX_REMOTE_TIMEOUT_MS).optional(),
+  maxBytes: bytesSchema.optional(),
+  timeoutMs: deadlineSchema.optional(),
 }).strict()
 
 /** What one conversation-target call may send. */
@@ -327,8 +331,8 @@ export const remoteRunSchema = z.object({
   ),
   target: targetRefSchema.optional(),
   sessionId: z.string().min(1).max(256).optional(),
-  timeoutMs: z.number().int().min(MIN_REMOTE_TIMEOUT_MS).max(MAX_REMOTE_TIMEOUT_MS).optional(),
-  maxOutputBytes: z.number().int().min(MIN_MAX_OUTPUT_BYTES).max(MAX_MAX_OUTPUT_BYTES).optional(),
+  timeoutMs: deadlineSchema.optional(),
+  maxOutputBytes: bytesSchema.optional(),
   /** Ask the server for a pseudo-terminal, for a command that needs one. */
   tty: z.boolean().optional(),
   /** Text sent to the command's stdin, for a prompt answer or a piped body. */

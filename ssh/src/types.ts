@@ -174,6 +174,21 @@ export interface ConnectionRecord extends ConnectionInput {
 export interface RemoteRunResult {
   /** Classified outcome of the whole call. */
   status: RemoteStatus
+  /**
+   * The deadline this call actually ran under: the config default, this profile's
+   * stored override, the target's own override, and the call's request resolved in
+   * that order and held to the configured cap. Echoed because a cap that moved a
+   * number a caller asked for is information, not a detail.
+   */
+  timeoutMs?: number
+  /** The per-stream capture ceiling that actually applied, for the same reason. */
+  outputBytes?: number
+  /**
+   * One objective sentence per correction a resolution made — a value capped, a
+   * config cap raised to its default. Advice belongs on the card; this is the
+   * receipt.
+   */
+  notes?: readonly string[]
   /** When it finished, as a canonical UTC instant. */
   at: string
   /** Child exit code; `null` when a signal ended it. */
@@ -195,9 +210,24 @@ export interface RemoteRunResult {
 }
 
 /**
- * Plugin-wide settings, held in the domain's global slot. The three ceilings
- * the page can still change: which executable dials and how long a probe waits
- * are decided in code (`storage.ts`), not stored here.
+ * Plugin-wide settings as they sit in the domain's global slot: this profile's
+ * **overrides** only. A key that is absent falls through to the plugin's configured
+ * default, which is where the default and the cap now live (`config.ts`), so the
+ * stored file is no longer the whole answer about a ceiling.
+ */
+export interface StoredSettings {
+  /** Per-stream capture ceiling in bytes, when this profile overrides it. */
+  readonly maxOutputBytes?: number | undefined
+  /** Foreground command deadline in milliseconds, when this profile overrides it. */
+  readonly remoteTimeoutMs?: number | undefined
+  /** File-transfer ceiling in bytes, when this profile overrides it. */
+  readonly maxTransferBytes?: number | undefined
+}
+
+/**
+ * The three ceilings as one call runs under them: every number present, because
+ * `bounds.ts` has already resolved default, stored override, per-target override,
+ * and per-call request into it and held the result to the configured cap.
  */
 export interface SshSettings {
   /** Per-stream capture ceiling for a probe or a remote command, in bytes. */
@@ -206,6 +236,14 @@ export interface SshSettings {
   remoteTimeoutMs: number
   /** Largest file or tree one transfer may move, in bytes. */
   maxTransferBytes: number
+  /** Deadline one connectivity probe waits to, in whole milliseconds. */
+  probeTimeoutMs: number
+  /** Deadline for the size-and-type pre-check one download asks first. */
+  statTimeoutMs: number
+  /** Cap on the full-stream spill file a capped capture leaves behind; 0 disables spilling. */
+  maxSpillBytes: number
+  /** Grace a child gets between SIGTERM and SIGKILL before it is given up on. */
+  graceMs: number
 }
 
 /** One conversation's chosen target, kept in the plugin's own storage. */
@@ -249,6 +287,12 @@ export interface RemoteTransferResult {
   remotePath: string
   /** Bytes moved, when the transfer reported them. */
   bytes?: number
+  /** The ceiling this copy ran under, after capping; stated because it is the answer to “why did that one refuse”. */
+  bytesLimit?: number
+  /** The deadline this copy ran under, after capping. */
+  timeoutMs?: number
+  /** Objective sentences naming what a resolution corrected. */
+  notes?: readonly string[]
   /** Whether a directory was copied. */
   recursive?: boolean
   /** Whether an existing destination was replaced. */
