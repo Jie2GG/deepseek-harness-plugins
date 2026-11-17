@@ -261,6 +261,8 @@ export interface SshSettings {
   maxTransferTotalBytes: number
   /** How many file transfers may hold an operation slot at once. */
   maxConcurrentTransfers: number
+  /** How many background jobs may hold an operation slot at once. */
+  maxRunningJobs: number
   /** Deadline one connectivity probe waits to, in whole milliseconds. */
   probeTimeoutMs: number
   /** Deadline for the size-and-type pre-check one download asks first. */

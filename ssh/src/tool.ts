@@ -578,7 +578,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
       background: { type: 'boolean', description: 'For `exec`: start the command as a background job and return its id at once instead of waiting for it. Poll it with the `job_output` tool and stop it with `job_kill`; the command also ends when this conversation ends.' },
       maxBytes: { type: 'integer', description: 'For `exec` and `read`: the largest amount of output to bring back.' },
       tty: { type: 'boolean', description: 'For `exec`: run under `ssh -tt`, for a program that inspects its own terminal (it then merges stderr into stdout and ends lines with CRLF).' },
-      input: { type: 'string', description: 'For `exec`: text fed to the command stdin, to answer a prompt or pipe a body.' },
+      input: { type: 'string', description: 'For `exec`: text fed to the command stdin, to answer a prompt or pipe a body. The one stdin is spoken for by elevation: `as` with a stored password, or any `su`, cannot be combined with it — the call is refused up front rather than losing the body or the answer.' },
       oldText: { type: 'string', description: 'For `edit`: the exact text to find, copied from a read; it must match once unless `all` or `replaceFirst` is set.' },
       newText: { type: 'string', description: 'For `edit`: the replacement text; an empty string deletes the match.' },
       all: { type: 'boolean', description: 'For `edit`: replace every occurrence instead of refusing when the text matches more than once.' },

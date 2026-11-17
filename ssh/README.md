@@ -620,8 +620,15 @@ still open:
   (`ssh -tt`, with its stderr-merges-into-stdout and CRLF costs) and `input` feeds
   its stdin; `background: true` hands the command to the harness job registry — the
   call answers with a job id, output streams through `job_output` from the
-  provider's own offsets, `job_kill` stops it, and the job holds one of the four
-  concurrent lanes until it settles. The connection lives in the Host process:
+  provider's own offsets, `job_kill` stops it, and the job holds one of the 16
+  concurrent operation slots until it settles. Explicitly backgrounded jobs are
+  capped at `maxRunningJobs` (default 8) of those slots — a reservation inside
+  the existing lane counter, not a second scheduler — so even eight abandoned
+  long-running commands cannot busy-lock the plugin against foreground work; a
+  start refused by that ceiling names it and points at `job_kill`. A job arms no
+  timer of its own: it ends when it settles, when someone kills it, when its
+  conversation goes away, or when the Host exits — the same bargain the harness's
+  own background shell makes. The connection lives in the Host process:
   stopping the job, ending the conversation, or restarting the Host ends the
   remote command, and `job_kill` interrupts the local client — whether the
   server-side process dies with the session is the server's choice. There is no

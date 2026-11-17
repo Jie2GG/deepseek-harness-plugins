@@ -152,7 +152,7 @@ test('an upload to a fresh destination moves, reports bytes, and rides a transfe
   const exec = state.calls.find(c => c.kind === 'execute')
   assert.equal(exec.timeoutMs, SETTINGS.transferTimeoutMs)
   assert.equal(exec.signal, controller.signal)
-  assert.deepEqual(exec.lane, { kind: 'file transfer', cap: SETTINGS.maxConcurrentTransfers })
+  assert.deepEqual(exec.lane, { kind: 'file transfers', cap: SETTINGS.maxConcurrentTransfers })
   const lease = state.shares.find(entry => entry.target.host === '10.0.0.9')
   assert.equal(lease.ticket.released, 1)
 })

@@ -126,7 +126,7 @@ export function fakeStore ({ records = [], settings, session = null } = {}) {
     get (id) { return rows.get(id) },
     settings () { return settings ?? defaults },
     async saveSettings (next) { store.calls.push(['saveSettings', next]); return next },
-    async create (input) { const record = { ...input, id: 'ssh-new0000001', createdAt: 'c', updatedAt: 'u', auth: 'key', agentAccess: 'on', allowedCommands: [] }; rows.set(record.id, record); store.calls.push(['create', input]); return record },
+    async create (input) { const record = { auth: 'key', agentAccess: 'on', allowedCommands: [], ...input, id: 'ssh-new0000001', createdAt: 'c', updatedAt: 'u' }; rows.set(record.id, record); store.calls.push(['create', input]); return record },
     async edit (id, input) { const record = { ...rows.get(id), ...input, updatedAt: 'u2' }; rows.set(id, record); store.calls.push(['edit', id, input]); return record },
     async remove (id) { return rows.delete(id) },
     async recordProbe (id, outcome) { const row = rows.get(id); if (row === undefined) return undefined; rows.set(id, { ...row, lastProbe: outcome }); store.calls.push(['recordProbe', id, outcome]); return rows.get(id) },

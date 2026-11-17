@@ -34,6 +34,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { chmod, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -61,6 +62,14 @@ export const SOCKET_PATH_LIMIT = 100
  * `ControlPath` we know nothing about.
  */
 export const NO_SHARE_FLAGS: readonly string[] = ['-o', 'ControlPath=none', '-o', 'ControlMaster=no']
+
+/**
+ * How often the expiry sweep may re-stat one idle past-persist master before
+ * believing it gone. Long enough that a busy claim loop does not touch the
+ * filesystem for the same socket, short enough that a master which just
+ * expired is off the UI's count inside half a minute.
+ */
+const SWEEP_RECHECK_MS = 30_000
 
 /**
  * The connection-deciding fields one call carries.
@@ -142,6 +151,8 @@ interface MasterEntry {
   alive: boolean
   /** Millisecond of the last claim or release, for the eviction order. */
   lastUsed: number
+  /** Millisecond the expiry sweep last checked this master's socket. */
+  lastChecked: number
 }
 
 /**
@@ -186,6 +197,16 @@ export class MuxPool implements MuxSource {
   #failure: string | undefined
   readonly #masters = new Map<string, MasterEntry>()
   #exiter: MasterExiter = async () => undefined
+  // The clock, injectable for one reason: the expiry below is a matter of
+  // seconds, and no honest test wants to sleep through ControlPersist.
+  readonly #now: () => number
+
+  /**
+   * @param now - the time source for master expiry; defaults to the wall clock.
+   */
+  constructor(now?: () => number) {
+    this.#now = now ?? Date.now
+  }
 
   /** Whether a call may be pooled at all. */
   get ready(): boolean {
@@ -197,9 +218,47 @@ export class MuxPool implements MuxSource {
     return this.#failure
   }
 
-  /** How many masters the pool is holding open or still dialing. */
+  /**
+   * How many masters the pool is holding open or still dialing.
+   *
+   * Reading this number sweeps first: `ControlPersist` lets OpenSSH close an
+   * idle master and remove its socket long before this ledger notices, and a
+   * reader of `liveMasters` — the settings card, the `list` payload — deserves
+   * the count of what is alive, not of what was once believed.
+   */
   get liveMasters(): number {
+    this.sweep()
     return this.#masters.size
+  }
+
+  /**
+   * Drop ledger entries whose master has expired with its socket gone.
+   *
+   * The rule is deliberate about what it does not claim: an entry idle past
+   * `ControlPersist` is only retired when its socket file no longer exists —
+   * the socket is what OpenSSH leaves behind while the master lives, so its
+   * absence is the proof, and a longer persist policy somebody set elsewhere
+   * keeps the master counted. A dial that has not proved itself yet is left to
+   * its own release path, and in-flight entries are never touched.
+   * @param now - the moment to measure idleness from; defaults to the clock.
+   * @returns how many expired beliefs were dropped.
+   */
+  sweep(now: number = this.#now()): number {
+    let dropped = 0
+    for (const [socketPath, entry] of [...this.#masters]) {
+      if (!entry.alive || entry.inFlight > 0) continue
+      if (now - entry.lastUsed < CONTROL_PERSIST_SECONDS * 1000) continue
+      if (now - entry.lastChecked < SWEEP_RECHECK_MS) continue
+      if (existsSync(socketPath)) {
+        // The master is still answering its socket past the nominal persist —
+        // re-arm the check so the sweep does not stat the same path per call.
+        entry.lastChecked = now
+        continue
+      }
+      this.#masters.delete(socketPath)
+      dropped += 1
+    }
+    return dropped
   }
 
   /** The private socket directory, while the pool is prepared. */
@@ -264,6 +323,10 @@ export class MuxPool implements MuxSource {
   claim(target: ShareableTarget, auth: ShareableAuth): PoolTicket {
     const socketPath = this.socketPathFor(target, auth)
     if (socketPath === undefined) return inertTicket(this.#inertNote(target))
+    // Expired beliefs get dropped before the ceiling is consulted: a ledger full
+    // of masters ControlPersist already closed must not evict — with `-O exit` —
+    // the one live master a ninth call is standing behind.
+    this.sweep()
     if (this.#masters.size >= MAX_LIVE_MASTERS && !this.#masters.has(socketPath)) {
       const evictable = this.#leastUsedIdle()
       if (evictable === undefined) {
@@ -281,13 +344,14 @@ export class MuxPool implements MuxSource {
         authority: authorityOf(target),
         inFlight: 0,
         alive: false,
-        lastUsed: Date.now(),
+        lastUsed: this.#now(),
+        lastChecked: this.#now(),
       }
       this.#masters.set(socketPath, entry)
     }
     const leased = entry
     leased.inFlight += 1
-    leased.lastUsed = Date.now()
+    leased.lastUsed = this.#now()
     let released = false
 
     const ticket: PoolTicket = {
@@ -302,7 +366,7 @@ export class MuxPool implements MuxSource {
         if (released) return
         released = true
         leased.inFlight -= 1
-        leased.lastUsed = Date.now()
+        leased.lastUsed = this.#now()
         // A dial that never proved a master is worth keeping should not hold a slot.
         if (!leased.alive && leased.inFlight <= 0 && this.#masters.get(socketPath) === leased) {
           this.#masters.delete(socketPath)
@@ -310,7 +374,7 @@ export class MuxPool implements MuxSource {
       },
       markLive: (): void => {
         leased.alive = true
-        leased.lastUsed = Date.now()
+        leased.lastUsed = this.#now()
       },
       drop: (): void => {
         if (this.#masters.get(socketPath) !== leased) return

@@ -48,6 +48,7 @@ export function defaultBounds(): Bounds {
     maxTransferFiles: DEFAULTS.maxTransferFiles,
     maxTransferTotalBytes: DEFAULTS.maxTransferTotalBytes,
     maxConcurrentTransfers: DEFAULTS.maxConcurrentTransfers,
+    maxRunningJobs: DEFAULTS.maxRunningJobs,
     probeTimeoutMs: DEFAULTS.probeTimeoutMs,
     statTimeoutMs: DEFAULTS.statTimeoutMs,
     promoteOnTimeout: DEFAULTS.promoteOnTimeout,
@@ -75,6 +76,8 @@ export interface Bounds {
   readonly maxTransferTotalBytes: number
   /** How many file transfers may hold an operation slot at once. */
   readonly maxConcurrentTransfers: number
+  /** How many background jobs may hold an operation slot at once. */
+  readonly maxRunningJobs: number
   readonly probeTimeoutMs: number
   readonly statTimeoutMs: number
   readonly promoteOnTimeout: boolean
@@ -119,6 +122,7 @@ export function readBounds(config: SshConfig): Bounds {
     maxTransferFiles: Math.max(1, config.maxTransferFiles.get()),
     maxTransferTotalBytes: Math.max(1, config.maxTransferTotalBytes.get()),
     maxConcurrentTransfers: Math.min(16, Math.max(1, config.maxConcurrentTransfers.get())),
+    maxRunningJobs: Math.min(16, Math.max(1, config.maxRunningJobs.get())),
     probeTimeoutMs: config.probeTimeoutMs.get(),
     statTimeoutMs: config.statTimeoutMs.get(),
     promoteOnTimeout: config.promoteOnTimeout.get(),
@@ -304,6 +308,7 @@ export function resolveSettings(bounds: Bounds, layers: CeilingLayers = {}): Res
       maxTransferFiles: bounds.maxTransferFiles,
       maxTransferTotalBytes: bounds.maxTransferTotalBytes,
       maxConcurrentTransfers: bounds.maxConcurrentTransfers,
+      maxRunningJobs: bounds.maxRunningJobs,
       probeTimeoutMs: bounds.probeTimeoutMs,
       statTimeoutMs: bounds.statTimeoutMs,
       maxSpillBytes: bounds.maxSpillBytes,

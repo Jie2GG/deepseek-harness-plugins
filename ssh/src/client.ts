@@ -79,6 +79,8 @@ window.__ModuleLoader__.load({
         boundsRemoteTimeout: 'Command timeout accepts',
         boundsTransfer: 'Transfer ceiling accepts',
         poolOff: 'This Host could not prepare a private directory for control sockets, so every call dials its own connection: {reason}',
+        chipAgentOff: 'agent access off',
+        chipAllowlist: '{count} no-approval program(s)',
         listTitle: 'SSH targets',
         listCount: '{count} of {limit} saved',
         listAdd: 'New connection',
@@ -115,6 +117,10 @@ window.__ModuleLoader__.load({
         fNote: 'Note',
         fPool: 'Share this server’s connection',
         fPoolHint: 'Later calls to this server ride on the connection the first one opened, so a conversation stops paying for a fresh handshake and login on every command. Turn it off for a server that behaves differently once several commands share one connection.',
+        fAgent: 'Let the agent use this target',
+        fAgentHint: 'Turned off, every agent call against this target is refused — reads and writes alike, and the call says so in its result. The settings page and your own terminal keep working. This is an emergency stop, not a sandbox: leaving it on means the approval rules decide, not this switch.',
+        fAllowlist: 'Programs that run without asking',
+        fAllowlistHint: 'A no-approval list, not a sandbox and not a limit: a command only runs unasked when its one bare leading program is named here, and every other command — and every pipeline, redirect, or substitution — still asks you first. Listing `git` never restricts which arguments `git` gets.',
         fOptional: 'optional',
         fRequired: 'Required.',
         secretStored: 'Stored — leave empty to keep it',
@@ -206,6 +212,8 @@ window.__ModuleLoader__.load({
         boundsRemoteTimeout: '命令超时可填范围',
         boundsTransfer: '传输上限可填范围',
         poolOff: '这台 Host 没能准备好放控制套接字的私有目录，所以每次调用都自己拨号：{reason}',
+        chipAgentOff: 'agent 访问已关',
+        chipAllowlist: '{count} 个免审批程序',
         listTitle: 'SSH 目标清单',
         listCount: '已保存 {count} / {limit}',
         listAdd: '新建连接',
@@ -242,6 +250,10 @@ window.__ModuleLoader__.load({
         fNote: '备注',
         fPool: '复用这台服务器的连接',
         fPoolHint: '之后连这台服务器的调用会搭第一条命令开好的连接，对话里就不用每条命令重新握手、重新登录。有些服务器在多条命令共用一条连接时行为不一样，那种服务器把这里关掉。',
+        fAgent: '允许 agent 使用这台目标',
+        fAgentHint: '关掉后，agent 对这台目标的每次调用都会被拒绝——读写都算，调用结果里会写明原因。设置页和你自己的终端照常工作。这是急停开关，不是沙箱：开着它就意味着由审批规则来决定每条命令。',
+        fAllowlist: '不经审批直接运行的程序',
+        fAllowlistHint: '这是免审批名单，不是沙箱，也不是限制器：只有命令的第一个裸程序名在这里时才会不打扰你；其它命令、以及一切管道、重定向、替换都照样先问你。列出 `git` 并不限制 `git` 能拿到什么参数。',
         fOptional: '可选',
         fRequired: '此项必填。',
         secretStored: '已保存 · 留空表示不改',
@@ -574,6 +586,8 @@ window.__ModuleLoader__.load({
           extraArgsText: '',
           note: '',
           pool: 'on',
+          agentAccess: 'on',
+          allowedCommandsText: '',
           hadPassphrase: false,
           hadPassword: false,
           hadRoot: false,
@@ -598,6 +612,8 @@ window.__ModuleLoader__.load({
         extraArgsText: (record.extraArgs ?? []).join('\n'),
         note: record.note ?? '',
         pool: record.pool ?? 'on',
+        agentAccess: record.agentAccess ?? 'on',
+        allowedCommandsText: (record.allowedCommands ?? []).join(', '),
         hadPassphrase: record.secrets?.passphrase === true,
         hadPassword: record.secrets?.password === true,
         hadRoot: record.secrets?.root === true,
@@ -636,7 +652,30 @@ window.__ModuleLoader__.load({
         ...(note === undefined ? {} : { note }),
         ...(withAuth ? { auth: draft.auth ?? 'key' } : {}),
         ...(withPool ? { pool: draft.pool === 'off' ? 'off' : 'on' } : {}),
+        // The two policy fields every agent call reads. They predate the capability
+        // gates — the stored schema has carried them since the version this page has
+        // always spoken to — and both are sent explicitly, always: an edit that turns
+        // access back on must write `on`, and an emptied allowlist must actually
+        // empty the stored list instead of leaving the old names behind.
+        agentAccess: draft.agentAccess === 'off' ? 'off' : 'on',
+        allowedCommands: allowlistOf(draft.allowedCommandsText ?? ''),
       }
+    }
+
+    /**
+     * The free-text allowlist field, cut into the bare names the schema validates.
+     * Anything the server will refuse is left for the server to refuse, with its
+     * field error landing on this input; the page only splits words.
+     * @param text - what the reader typed, commas or spaces between names.
+     * @returns the program names, in order, deduplicated.
+     */
+    function allowlistOf(text: string): string[] {
+      const out: string[] = []
+      for (const word of text.split(/[,;\s]+/u)) {
+        const name = word.trim().toLowerCase()
+        if (name !== '' && !out.includes(name)) out.push(name)
+      }
+      return out
     }
 
     /**
@@ -1254,6 +1293,8 @@ window.__ModuleLoader__.load({
         if (record.secrets?.password === true) chips.push(h('span', { class: 'dshssh-chip', 'data-tone': 'secret', key: 'password' }, t('secretSet')))
         if (record.secrets?.root === true) chips.push(h('span', { class: 'dshssh-chip', 'data-tone': 'secret', key: 'root' }, t('rootSet')))
         if (record.proxyJump !== undefined) chips.push(h('span', { class: 'dshssh-chip', key: 'jump' }, `via ${record.proxyJump}`))
+        if (record.agentAccess === 'off') chips.push(h('span', { class: 'dshssh-chip', 'data-tone': 'secret', key: 'agent' }, t('chipAgentOff')))
+        if (record.allowedCommands !== undefined && record.allowedCommands.length > 0) chips.push(h('span', { class: 'dshssh-chip', key: 'allow' }, format(t('chipAllowlist'), { count: String(record.allowedCommands.length) })))
         return h('div', { class: 'dshssh-row', key: record.id },
           h('div', { class: 'dshssh-row-main' },
             h('div', { class: 'dshssh-row-title' }, record.label),
@@ -1523,6 +1564,28 @@ window.__ModuleLoader__.load({
               ),
               h('p', { class: 'dshssh-muted' }, t('fPoolHint')),
             ) : null,
+            // The two switches the tool's own gate reads. No capability gate: the
+            // stored schema has carried both since before this page existed.
+            h('div', { class: 'dshssh-field' },
+              h('label', { class: 'dshssh-check' },
+                h('input', {
+                  type: 'checkbox',
+                  checked: draft.agentAccess !== 'off',
+                  disabled,
+                  onChange: (event: any) => { setDraft((current: any) => ({ ...current, agentAccess: event.target.checked === true ? 'on' : 'off' })) },
+                }),
+                h('span', {}, t('fAgent')),
+              ),
+              h('p', { class: 'dshssh-muted' }, t('fAgentHint')),
+            ),
+            h(TextField, {
+              label: `${t('fAllowlist')} (${t('fOptional')})`,
+              value: draft.allowedCommandsText ?? '',
+              hint: t('fAllowlistHint'),
+              disabled,
+              errorText: fieldError === 'allowedCommands' ? t('hintBadInput') : undefined,
+              onChange: patch('allowedCommandsText'),
+            }),
           ),
           atLimit ? h('span', { class: 'dshssh-error' }, format(t('listCount'), { count: String(connections.length), limit: String(limits.maxConnections) })) : null,
           draftProbe === null ? null : h('div', { class: 'dshssh-field' },

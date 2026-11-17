@@ -17,6 +17,66 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.31
+
+Phase 2B: the permission surface a human can actually reach, and the resource
+reservations the ceiling numbers had been promising.
+
+### Fixed
+
+- **`su` and an `input` body are refused together, up front.** Both want the one
+  stdin, the prompt reads first, and the old assembly silently spent the body's
+  first line as the answer. The pair is now a `bad-input` refusal that says so
+  and names the workarounds. The one combination that genuinely works stays
+  working: `as` with no stored login password runs `sudo -n`, which never
+  prompts — a NOPASSWD host takes the body intact, a prompting one fails fast,
+  and neither path eats a line.
+- **A master past `ControlPersist` stops being believed in.** The ledger kept
+  counting masters OpenSSH had already closed and unlinked, so `liveMasters` —
+  the settings card and the `list` payload — over-reported for as long as the
+  process lived. `claim` and every read of the count now sweep: an entry idle
+  past the persist window whose socket file is gone leaves the ledger silently
+  (there is nobody left to send `-O exit` to), a socket that still answers keeps
+  the entry, and the sweep re-stats at most every 30 s. A full ledger of expired
+  beliefs no longer evicts — with a real teardown — the one live master a ninth
+  call is standing behind.
+- **The concurrent-dial race stopped killing its own winner.** Two first calls
+  to one target used to have the late arrival print `ControlSocket … already
+  exists, disabling multiplexing`, which the session table read as a broken
+  master: the healthy winner was dropped from the ledger and `-O exit`-ed for
+  nothing. That exact sentence is now recognized as the successful downgrade
+  OpenSSH says it is; every other multiplexing complaint, and `already exists`
+  without the fallback phrase (a stale socket), still reads as a fault.
+
+### Added
+
+- **The agent policy has UI.** `agentAccess` gained a checkbox and
+  `allowedCommands` a text field in the target form, both sent explicitly on
+  every save so turning access back on and emptying the list actually take
+  effect; the list rows carry chips for `agent access off` and a non-empty
+  no-approval list. The hints say what the field is — a list of programs that
+  run without asking — and what it is not: not a sandbox, not a limit on
+  arguments, not a check on pipelines. The two fields had been in the stored
+  schema all along with no control reaching them; the docs had been promising a
+  control that did not exist.
+- **Jobs reserve foreground room.** `maxRunningJobs` (default 8, of the 16
+  operation slots) caps how many *explicitly backgrounded* commands hold a slot
+  at once — inside the existing lane counter, no second scheduler — and the
+  refusal names the ceiling and points at `job_kill`. Foreground calls that
+  might later promote are not counted against it, and the README now states the
+  real 16 where it used to say four, alongside the job's lifetime bargain
+  (settle, kill, owner gone, or Host exit).
+
+### Notes
+
+- Jobs keep no wall-clock deadline on purpose: a self-imposed guillotine would
+  only mean a longer build died mid-flight, and the harness's own background
+  shell makes the same bargain. The quota, not a timer, is what bounds their
+  appetite for slots.
+- `MuxPool` accepts an injectable clock so the expiry paths can be tested
+  without sleeping through `ControlPersist`; the default is the wall clock.
+- 155 tests across fifteen suites green; `tsc` clean. Version 0.0.30 → 0.0.31.
+
 ## 0.0.30
 
 Phase 2A of the review follow-up: the reliability fixes the architecture review

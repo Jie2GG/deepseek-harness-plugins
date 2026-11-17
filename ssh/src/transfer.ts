@@ -489,7 +489,7 @@ export async function transfer(
       request.timeoutMs,
       'file transfer',
       request.signal,
-      { kind: 'file transfer', cap: settings.maxConcurrentTransfers },
+      { kind: 'file transfers', cap: settings.maxConcurrentTransfers },
     )
     const text = `${collected.stderr}\n${collected.stdout}`
     // A copy that ended — even one that ended over a missing file — proved the

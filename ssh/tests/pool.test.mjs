@@ -3,7 +3,7 @@
 // closed when the plugin unmounts. No network, no ssh: the exiter is recorded.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
+import { existsSync, unlinkSync, writeFileSync } from 'node:fs'
 import { MuxPool, NO_SHARE_FLAGS, SOCKET_PATH_LIMIT } from '../lib/pool.js'
 import { CONTROL_PERSIST_SECONDS, MAX_LIVE_MASTERS } from '../lib/storage.js'
 
@@ -190,4 +190,83 @@ test('the pool reports why it could not prepare, instead of failing the call', a
   assert.deepEqual([...ticket.flags], [...NO_SHARE_FLAGS])
   assert.equal(typeof ticket.note, 'string')
   await pool.dispose() // disposing an unprepared pool is legal
+})
+
+// ── expiry: ControlPersist closes masters; the ledger has to notice ────────
+test('a master past ControlPersist with no socket leaves the ledger, and a live one survives the sweep', async () => {
+  let now = 1_770_000_000_000
+  const pool = new MuxPool(() => now)
+  const exited = []
+  pool.attach(async (socketPath, authority) => { exited.push({ socketPath, authority }) })
+  await pool.prepare()
+  const ticket = pool.claim(targetOf(), KEY)
+  const path = pathOf(ticket)
+  ticket.markLive()
+  ticket.release() // a finished call: the master stands, the lease does not
+  assert.equal(pool.liveMasters, 1)
+  // Idle but inside the persist window: nothing moves.
+  now += (CONTROL_PERSIST_SECONDS - 5) * 1000
+  assert.equal(pool.liveMasters, 1)
+  // Past it, with no socket on disk: the master closed itself, and so does the
+  // belief — silently, because there is nobody left to send `-O exit` to.
+  now += 10_000
+  assert.equal(pool.sweep(), 1)
+  assert.equal(pool.liveMasters, 0)
+  assert.deepEqual(exited, [])
+  // A master whose socket is still answering stays counted across the sweep's
+  // re-check window, and only leaves when the socket actually goes.
+  const second = pool.claim(targetOf(), KEY)
+  second.markLive()
+  second.release()
+  writeFileSync(pathOf(second), '') // a live master's socket
+  now += (CONTROL_PERSIST_SECONDS + 60) * 1000
+  assert.equal(pool.liveMasters, 1) // stated once, kept
+  unlinkSync(pathOf(second))
+  now += 1_000 // inside the 30 s re-stat window: the kept belief stands
+  assert.equal(pool.liveMasters, 1)
+  now += 31_000 // the window passes, the socket is gone: off the count
+  assert.equal(pool.liveMasters, 0)
+  await pool.dispose()
+})
+
+test('an expired ledger does not evict the live master a full ceiling would', async () => {
+  let now = 1_770_000_000_000
+  const pool = new MuxPool(() => now)
+  const exited = []
+  pool.attach(async (socketPath, authority) => { exited.push({ socketPath, authority }) })
+  await pool.prepare()
+  const tickets = []
+  for (let i = 0; i < MAX_LIVE_MASTERS; i += 1) {
+    const ticket = pool.claim(targetOf({ id: `ssh-old${String(i)}000000` }), KEY)
+    ticket.markLive()
+    ticket.release() // past calls finished; only the masters would remain
+    tickets.push(ticket)
+  }
+  assert.equal(pool.liveMasters, MAX_LIVE_MASTERS)
+  // Every one of those masters has expired and its socket is gone; a ninth call
+  // must not retire any of them with an `-O exit` — it should simply find the
+  // ledger empty and dial into a free slot.
+  now += (CONTROL_PERSIST_SECONDS + 120) * 1000
+  const ninth = pool.claim(targetOf({ id: 'ssh-new0000000' }), KEY)
+  assert.equal(ninth.pooled, true)
+  assert.deepEqual(exited, [])
+  assert.equal(pool.liveMasters, 1)
+  await pool.dispose()
+})
+
+test('an in-flight master is never swept, expired-looking or not', async () => {
+  let now = 1_770_000_000_000
+  const pool = new MuxPool(() => now)
+  await pool.prepare()
+  const held = pool.claim(targetOf(), KEY)
+  held.markLive() // leased and still running: inFlight > 0 until release
+  now += (CONTROL_PERSIST_SECONDS + 60) * 1000
+  assert.equal(pool.sweep(), 0)
+  assert.equal(pool.liveMasters, 1)
+  // Released, past persist, no socket: now it can go. The release re-stamps the
+  // idle clock, so the persist window starts from the release, not the claim.
+  held.release()
+  now += (CONTROL_PERSIST_SECONDS + 60) * 1000
+  assert.equal(pool.sweep(), 1)
+  await pool.dispose()
 })

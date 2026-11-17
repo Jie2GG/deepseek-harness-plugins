@@ -305,11 +305,24 @@ test('as: elevates through sudo, forces a terminal, and answers from the stored 
   await bare.ops.runCommand({ command: 'whoami', as: 'root' })
   assert.equal(bare.state.calls[0].command, 'sudo -n whoami')
   assert.equal(bare.state.calls[0].options.stdin, undefined)
-  // An explicit input is the caller's answer and wins over the stored secret.
+  // Elevation and an input body share one stdin, and the prompt reads first:
+  // with a stored password on hand, the pair is refused before anything runs —
+  // the old behaviour silently spent the body's first line as the answer.
   const chosen = build({ secrets: fakeSecrets({ password: true, passphrase: false, root: false }, { password: 'stored' }) })
-  await chosen.ops.runCommand({ command: 'passwd', as: 'root', input: 'typed\n' })
-  assert.equal(chosen.state.calls[0].command, 'sudo passwd')
-  assert.equal(chosen.state.calls[0].options.stdin, 'typed\n')
+  let conflict
+  try {
+    await chosen.ops.runCommand({ command: 'passwd', as: 'root', input: 'typed\n' })
+  } catch (error) { conflict = error }
+  assert.equal(conflict?.code, 'bad-input')
+  assert.equal(conflict.field, 'input')
+  assert.match(conflict.hint, /without input/)
+  assert.equal(chosen.state.calls.length, 0) // refused before the server was dialed
+  // The one coexistence that is real: no stored password, `sudo -n`, no prompt
+  // to eat anything — a NOPASSWD host takes the body, any other fails fast.
+  const bareBody = build()
+  await bareBody.ops.runCommand({ command: 'tee /tmp/x', as: 'root', input: 'body\n' })
+  assert.equal(bareBody.state.calls[0].command, 'sudo -n tee /tmp/x')
+  assert.equal(bareBody.state.calls[0].options.stdin, 'body\n')
 })
 
 test('su: reaches root through its own stored password, and refuses cleanly without one', async () => {
@@ -328,6 +341,14 @@ test('su: reaches root through its own stored password, and refuses cleanly with
   assert.equal(thrown?.code, 'bad-input')
   assert.equal(thrown.field, 'su')
   assert.match(thrown.hint, /as: "root"/)
+  // su and an input body cannot share the one stdin, stored secret or not.
+  let suConflict
+  try {
+    await withRoot.ops.runCommand({ command: 'id', su: true, input: 'body\n' })
+  } catch (error) { suConflict = error }
+  assert.equal(suConflict?.code, 'bad-input')
+  assert.equal(suConflict.field, 'input')
+  assert.match(suConflict.hint, /printf/)
 })
 
 test('as and su together never reach the server: the schema refuses first', async () => {
@@ -584,6 +605,27 @@ test('a local path outside the declared workspace is refused before the copy', a
 })
 
 // ── bookkeeping and settings ────────────────────────────────────────────────
+test('the policy fields the page now edits ride save into storage unchanged', async () => {
+  // agentAccess and allowedCommands used to be reachable only by hand-editing the
+  // storage file; the form gained controls in 2B, and this pins the path the UI
+  // takes: page payload -> ops.save -> the store's create/edit input.
+  const { ops, store } = build()
+  const out = await ops.save({
+    connection: { label: 'Guarded', host: 'h3', agentAccess: 'off', allowedCommands: ['git', 'uptime'] }
+  })
+  assert.equal(out.connection.agentAccess, 'off')
+  assert.deepEqual(out.connection.allowedCommands, ['git', 'uptime'])
+  const created = store.calls.find(call => call[0] === 'create')
+  assert.deepEqual(created[1].allowedCommands, ['git', 'uptime'])
+  // And an edit that empties the list clears it rather than leaving the old names.
+  const back = await ops.save({
+    id: out.connection.id,
+    connection: { id: out.connection.id, label: 'Guarded', host: 'h3', agentAccess: 'on', allowedCommands: [] }
+  })
+  assert.equal(back.connection.agentAccess, 'on')
+  assert.deepEqual(back.connection.allowedCommands, [])
+})
+
 test('save and remove move secrets and inventory notifications together', async () => {
   const { ops, secrets, changed } = build()
   const saved = await ops.save({ connection: { label: 'New', host: 'h2' }, secrets: { password: 'pw' } })
@@ -775,7 +817,7 @@ test('the call cancellation reaches the transport for each remote action', async
   await xfer.ops.upload({ path: '/srv/x', localPath: local }, controller.signal)
   const execCall = xfer.state.calls.find(c => c.kind === 'execute')
   assert.equal(execCall.signal, controller.signal)
-  assert.deepEqual(execCall.lane, { kind: 'file transfer', cap: DEFAULTS.maxConcurrentTransfers })
+  assert.deepEqual(execCall.lane, { kind: 'file transfers', cap: DEFAULTS.maxConcurrentTransfers })
   const stats = xfer.state.calls.filter(c => c.kind === 'run' && /^stat /.test(c.command ?? ''))
   assert.ok(stats.length >= 1 && stats.every(c => c.options.signal === controller.signal))
 })
@@ -814,5 +856,6 @@ test('a promoted hand-over stays cancellable while the call waits, and the start
   const bgRun = bg.state.calls.find(c => c.kind === 'startRun')
   assert.equal(bgRun.options.signal, undefined)
   assert.equal(bgRun.options.timeoutMs, 0) // a job arms no timer of its own
+  assert.equal(bgRun.options.job, true) // and it counts against the job ceiling
 }
 )

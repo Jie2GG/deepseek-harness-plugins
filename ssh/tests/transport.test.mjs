@@ -104,7 +104,14 @@ test('a multiplexing complaint is told apart from a server refusing the call', (
   assert.equal(bare.sessionBroken('session setup failed: too many sessions'), true)
   assert.equal(bare.sessionBroken('channel open failed: open failed'), true)
   assert.equal(bare.sessionBroken('mux_handler: read error'), true)
-  assert.equal(bare.sessionBroken('ControlSocket /tmp/x already exists, disabling multiplexing'), true)
+  // Two callers dialed the same master at first contact: the late one downgrades
+  // to its own connection and *succeeds*. Reading that sentence as a broken session
+  // used to evict the healthy master the race had just produced.
+  assert.equal(bare.sessionBroken('ControlSocket /tmp/x already exists, disabling multiplexing'), false)
+  // The same complaint with real grief underneath stays broken, and the phrase
+  // without the fallback clause is a stale socket, not a race.
+  assert.equal(bare.sessionBroken('ControlSocket /tmp/x already exists, disabling multiplexing\r\nsession setup failed: overflow'), true)
+  assert.equal(bare.sessionBroken('ControlSocket /tmp/x already exists'), true)
   assert.equal(bare.sessionBroken('Permission denied (publickey).'), false) // the credential, not the channel
   assert.equal(bare.sessionBroken('ssh: connect to host x: Connection refused'), false)
 })
@@ -280,7 +287,7 @@ test('no deadline means no timer: only the caller can end the wait', async () =>
 test('a per-kind lane ceiling refuses the copy over the ceiling, not over the global room', async () => {
   const transport = new SshTransport(hangingProvider())
   const settings = { ...CEILINGS, maxSpillBytes: 0, probeTimeoutMs: 30_000, statTimeoutMs: 10_000, graceMs: 100, maxConcurrentTransfers: 1 }
-  const lane = { kind: 'file transfer', cap: 1 }
+  const lane = { kind: 'file transfers', cap: 1 }
   const firstStop = new AbortController()
   const first = transport.execute('/usr/bin/scp', ['-q', 'a', 'b'], settings, undefined, 0, 'file transfer', firstStop.signal, lane)
   let err
@@ -290,7 +297,7 @@ test('a per-kind lane ceiling refuses the copy over the ceiling, not over the gl
   // The refusal says which ceiling it hit — a full transfer lane, not the plugin's
   // 16 slots, which still had thirteen free — so the reader waits for the right thing.
   assert.equal(err?.code, 'busy')
-  assert.match(err.message, /At most 1 file transfer/)
+  assert.match(err.message, /At most 1 file transfers?/)
   // And the room for a plain command survived the crowded transfer lane:
   const room = await transport.run({ host: '10.0.0.9' }, settings, {}, 'true', { timeoutMs: 1, maxOutputBytes: 64 })
   assert.ok(room.durationMs >= 0)
@@ -301,6 +308,54 @@ test('a per-kind lane ceiling refuses the copy over the ceiling, not over the gl
   const next = transport.execute('/usr/bin/scp', ['-q', 'e', 'f'], settings, undefined, 0, 'file transfer', nextStop.signal, lane)
   nextStop.abort()
   assert.equal((await next).outcome, 'cancelled')
+  assert.equal(transport.inFlight, 0)
+})
+
+test('eight jobs cannot busy-lock the plugin: the job ceiling stops starts, not foreground calls', async () => {
+  // A provider whose child answers to the kill: `job_kill` aborts the lane
+  // controller, and only a fake that honours that signal can show the slot
+  // coming back when a job ends.
+  const transport = new SshTransport({
+    subprocess: {
+      resolveExecutable: async () => '/usr/bin/ssh',
+      spawn (options) {
+        return {
+          done: new Promise(resolve => {
+            options.signal.addEventListener('abort', () => resolve({ exitCode: null, signal: 'SIGTERM' }))
+          }),
+          collected: {
+            stdout: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) },
+            stderr: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) }
+          },
+          terminate () {},
+          waitForExit: async () => true
+        }
+      }
+    }
+  })
+  const settings = { ...CEILINGS, maxSpillBytes: 0, probeTimeoutMs: 30_000, statTimeoutMs: 10_000, graceMs: 100, maxRunningJobs: 1 }
+  const job = await transport.startRun({ host: '10.0.0.9' }, settings, {}, 'make world', { timeoutMs: 0, job: true })
+  assert.ok(job)
+  let err
+  try {
+    await transport.startRun({ host: '10.0.0.9' }, settings, {}, 'sleep 1d', { timeoutMs: 0, job: true })
+  } catch (error) { err = error }
+  assert.equal(err?.code, 'busy')
+  assert.match(err.message, /At most 1 background jobs/)
+  assert.match(err.hint, /job_kill/)
+  // The reservation is against jobs only: a foreground command — even one that
+  // might later promote — still gets a slot while the job lane is full.
+  const plain = await transport.startRun({ host: '10.0.0.9' }, settings, {}, 'uptime', { timeoutMs: 0 })
+  assert.ok(plain)
+  // And the quota reopens the moment a job ends: kill releases the count.
+  job.kill()
+  await job.finished
+  const after = await transport.startRun({ host: '10.0.0.9' }, settings, {}, 'sleep 1d', { timeoutMs: 0, job: true })
+  assert.ok(after)
+  after.kill()
+  await after.finished
+  plain.kill()
+  await plain.finished
   assert.equal(transport.inFlight, 0)
 })
 

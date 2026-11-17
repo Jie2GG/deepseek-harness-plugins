@@ -103,6 +103,17 @@ export interface SshConfig {
    * what keeps two 500 MiB copies from starving every other call.
    */
   maxConcurrentTransfers: Volatile<number>
+  /**
+   * How many background jobs may hold a child slot at once.
+   *
+   * A job arms no timer — it runs until it settles, is killed, or loses its
+   * conversation — so it can hold one of the 16 operation slots indefinitely.
+   * The ceiling reserves the rest for foreground calls: even with the job
+   * allowance full, eight slots always stay open for interactive work. Commands
+   * that merely *might* promote (a foreground run that outlives its window) are
+   * not counted against it; only jobs started with `background: true` are.
+   */
+  maxRunningJobs: Volatile<number>
   /** Deadline for one connectivity probe, in milliseconds. */
   probeTimeoutMs: Volatile<number>
   /** Deadline for the size-and-type pre-check one download asks, in milliseconds. */
@@ -139,8 +150,11 @@ export const DEFAULTS = {
   maxTransferFiles: 500,
   maxTransferTotalBytes: 536_870_912,
   // Two copies at once, so the 16 operation slots keep room for commands even
-  // while big files are moving.
+  // while big files are moving. Half the ceiling for jobs: an explicitly
+  // backgrounded command can hold its slot forever, and eight such jobs must
+  // never be able to busy-lock the plugin.
   maxConcurrentTransfers: 2,
+  maxRunningJobs: 8,
   probeTimeoutMs: 30_000,
   statTimeoutMs: 10_000,
   promoteOnTimeout: true,
@@ -161,6 +175,7 @@ export const Config = z.object({
   maxTransferFiles: files.default(DEFAULTS.maxTransferFiles).volatile(),
   maxTransferTotalBytes: bytes.default(DEFAULTS.maxTransferTotalBytes).volatile(),
   maxConcurrentTransfers: lanes.default(DEFAULTS.maxConcurrentTransfers).volatile(),
+  maxRunningJobs: lanes.default(DEFAULTS.maxRunningJobs).volatile(),
   probeTimeoutMs: ms.default(DEFAULTS.probeTimeoutMs).volatile(),
   statTimeoutMs: ms.default(DEFAULTS.statTimeoutMs).volatile(),
   promoteOnTimeout: z.boolean().default(DEFAULTS.promoteOnTimeout).volatile(),

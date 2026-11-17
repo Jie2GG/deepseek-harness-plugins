@@ -88,6 +88,17 @@ const HOST_KEY_PATTERNS: readonly RegExp[] = [
 ]
 
 /**
+ * The race's own sentence, said by a client that asked to join a master and found
+ * one already listening: OpenSSH downgrades the late caller to a connection of its
+ * own and runs the call on it, *successfully*. The earlier table read that sentence
+ * as a broken session, so one first-contact collision between two concurrent calls
+ * evicted — with a real `ssh -O exit` — the perfectly healthy master that had just
+ * won the race. The downgrade is not a fault; a stale socket that blocks a master
+ * dial says it without the fallback phrase, and stays in the table below.
+ */
+const BENIGN_MULTIPLEX_FALLBACK = /ControlSocket\b[^\n]*already exists, disabling multiplexing/giu
+
+/**
  * stderr text meaning a shared connection stopped being usable: the server refused
  * another channel, or the master hung up under the call. Either way the pool should
  * forget this master and the next call dials its own.
@@ -172,6 +183,7 @@ const CONTROL_SETTINGS: SshSettings = {
   maxTransferFiles: 1,
   maxTransferTotalBytes: 1_024,
   maxConcurrentTransfers: 1,
+  maxRunningJobs: 1,
   probeTimeoutMs: MASTER_EXIT_MS,
   statTimeoutMs: MASTER_EXIT_MS,
   maxSpillBytes: 0,
@@ -566,7 +578,10 @@ export class SshTransport {
    * @returns `true` when a reader is looking at a multiplexing failure.
    */
   sessionBroken(text: string): boolean {
-    return SESSION_SETUP_PATTERNS.some(pattern => pattern.test(text))
+    // The benign concurrent-dial downgrade is edited out before the table runs;
+    // everything else — including `already exists` *without* the fallback phrase,
+    // which is a stale socket — still reads as the fault it is.
+    return SESSION_SETUP_PATTERNS.some(pattern => pattern.test(text.replace(BENIGN_MULTIPLEX_FALLBACK, '')))
   }
 
   /**
@@ -758,7 +773,7 @@ export class SshTransport {
       const used = this.#lanesByKind.get(lane.kind) ?? 0
       if (used >= lane.cap) {
         throw new SshError('busy', `At most ${String(lane.cap)} ${lane.kind} may run at once, and all ${String(lane.cap)} slots are taken.`, {
-          hint: `Wait for one to finish (it also frees room for other calls), or raise the ceiling in the plugin's configuration.`,
+          hint: 'Wait for one to finish (it also frees room for other calls), stop a job with `job_kill`, or raise the ceiling in the plugin\u2019s configuration.',
         })
       }
       this.#lanesByKind.set(lane.kind, used + 1)
@@ -1085,16 +1100,22 @@ export class SshTransport {
        * registry mid-flight must have already been fed.
        */
       readonly stdin?: string | undefined
+      /**
+       * True for a command started *as* a job (`background: true`), which holds its
+       * slot indefinitely and so counts against `maxRunningJobs`; false for a
+       * foreground call that may promote, which keeps the ordinary lane rules.
+       */
+      readonly job?: boolean | undefined
     } = {},
   ): Promise<RemoteJob | undefined> {
     const deadline = options.timeoutMs ?? settings.remoteTimeoutMs
-    const controller = this.#takeLane('background command')
+    const lane = options.job === true ? { kind: 'background jobs', cap: settings.maxRunningJobs } : undefined
+    const controller = this.#takeLane('background command', lane)
     const ticket = this.share(target, auth)
     const program = await this.resolveSsh(controller.signal)
     if (program === undefined) {
       this.unshare(ticket)
-      this.#controllers.delete(controller)
-      this.#inFlight -= 1
+      this.#releaseLane(controller, lane)
       return undefined
     }
     // The same option set a foreground call builds, so a backgrounded command
@@ -1133,8 +1154,7 @@ export class SshTransport {
         })
         .finally(() => {
           this.unshare(ticket)
-          this.#controllers.delete(controller)
-          this.#inFlight -= 1
+          this.#releaseLane(controller, lane)
         })
       job = {
         sources: streamSources(handle),
@@ -1146,8 +1166,7 @@ export class SshTransport {
       }
     } catch (error: unknown) {
       this.unshare(ticket)
-      this.#controllers.delete(controller)
-      this.#inFlight -= 1
+      this.#releaseLane(controller, lane)
       throw error
     }
     return job

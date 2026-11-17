@@ -1076,10 +1076,37 @@ export function createOps(deps: OpsDeps): Ops {
       let stdin = input.input
       let elevated: string | undefined
       const holder = secrets()
+      // sudo and su answer their prompt on the one stdin the command body would
+      // use, and the prompt comes first: under `-tt` the remote pty reads the
+      // password from the same stream the body travels down, so a call that
+      // asked for elevation AND carried an `input` body had its first line eaten
+      // as the answer — silently dropping one of the two. The pair is refused
+      // up front instead of picking a loser. One combination survives, and only
+      // one: `as` with no stored login password runs `sudo -n`, which prompts
+      // never — a NOPASSWD host takes the body intact, a prompting one fails
+      // fast with a real reason, and neither path spends the body's first line.
+      if (input.su === true && input.input !== undefined) {
+        throw new SshError('bad-input', 'su answers its password prompt on the same stdin the command body would use, so a su call cannot also carry input.', {
+          field: 'input',
+          hint: 'Drop input and su will answer with the stored root password, or fold the body into the command itself (printf … | su root -c …) and run it in the foreground.',
+        })
+      }
+      if (input.as !== undefined && input.input !== undefined) {
+        const storedForSudo = holder === undefined ? undefined : await holder.read(record.id, 'password')
+        if (storedForSudo !== undefined) {
+          throw new SshError('bad-input', 'sudo is prompted on the same stdin this call filled with input, and this target stores a login password the prompt would answer with instead.', {
+            field: 'input',
+            hint: 'Run the elevated command without input and let the plugin answer the prompt, or pipe the body inside the command (echo … | sudo tee …).',
+          })
+        }
+      }
       if (input.as !== undefined) {
         elevated = input.as
         const stored = holder === undefined ? undefined : await holder.read(record.id, 'password')
-        const willAnswer = stdin !== undefined || stored !== undefined
+        // Whether *the plugin* can answer the prompt — not merely whether a
+        // stdin exists. `input` was refused above when a password is stored, so
+        // the only body left here travels to a `sudo -n` that never prompts.
+        const willAnswer = stored !== undefined
         // A caller who wrote their own sudo line keeps it verbatim; the prefix
         // only arrives when the command is an ordinary one. Without a password
         // to inject, sudo runs with -n so a NOPASSWD host answers immediately
@@ -1368,6 +1395,10 @@ export function createOps(deps: OpsDeps): Ops {
         start: async () => {
           const live = await runner.startRun(targetOf(record), settings, auth, input.command, {
             timeoutMs: deadline,
+            // A started job holds its slot until it settles, so it counts against
+            // the job ceiling — the reservation that keeps eight foreground slots
+            // open no matter how many jobs someone left running.
+            job: true,
             ...(input.tty === undefined ? {} : { tty: input.tty }),
           })
           if (live === undefined) {
