@@ -17,6 +17,57 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.26
+
+### Changed
+
+- **A foreground command that runs out of time is handed to the job registry
+  instead of killed.** The deadline belongs to the reply, not to the work — that is
+  how the harness's own shell answers a timeout, and this plugin now answers it the
+  same way: the command is started through the same untimed, job-capable path a
+  `background: true` call uses, and the call waits on it. Settle inside the window
+  and nothing changes; still running at the deadline and the call answers
+  `status: 'promoted'` with the `job id`, the output produced so far, and a hint
+  naming `job_output`/`job_kill`. Killing a 25-minute build at 30 seconds because a
+  model asked once and waited used to mean starting that build again from nothing.
+- `ok` is true for a handed-over call, deliberately: it is a call that succeeded at
+  something, and a model reading it as a failure would retry work that is still
+  happening.
+- **A backgrounded command has no deadline of its own.** `BACKGROUND_DEADLINE_MS` is
+  gone: a job lives until it settles, until `job_kill`, until its conversation goes
+  away, or until the Host exits — holding one of the 16 operation slots the whole
+  time, which is the honest version of "no timeout applies". The old 30-minute
+  guillotine was the plugin inventing a bound the harness does not have.
+- When the registry refuses the hand-over — usually that conversation already holds
+  all ten of its jobs — the plugin falls back to what it did before, kills the child,
+  and says the hand-over was refused and why, rather than reporting a plain timeout.
+
+### Added
+
+- `promoteOnTimeout` (default on) is now the config knob it was declared as in
+  0.0.24: a profile that wants the old behaviour, or one with no job registry at
+  all, keeps the plain bounded wait — still one code path rather than a special case.
+- `startRun` accepts `stdin`. That is what makes an **elevated** command promotable:
+  its sudo/su answer is injected at spawn, so the password channel is already closed
+  by the time the deadline arrives — unlike a command *started* in the background,
+  which still can't elevate and still says so.
+- The provider's offset readers are non-consuming, so the partial output that comes
+  with a hand-over does not steal bytes from the job: `job_output` still sees the
+  stream from the beginning.
+
+### Notes
+
+- Two statuses now mean different things and are worded differently on the page and
+  in the transcript: `timeout` (out of time, and no hand-over happened) and
+  `promoted` (out of time for this reply, still running on the server).
+- The `as`/`su` foreground-only rule is narrowed, not removed: what cannot be
+  **started** in the background is an elevated call, because there is nobody to hand
+  the password to; what can be **moved** there is one that already answered.
+- 122 tests across eleven suites are green — five new ones cover the settled path,
+  the hand-over with its attribution to owner and call, the refused fallback, the
+  config opt-out, and a profile with no registry. `tsc` clean, `oxlint` 0 warnings
+  and 0 errors. Version 0.0.25 → 0.0.26 under the three-segment rule.
+
 ## 0.0.25
 
 ### Changed

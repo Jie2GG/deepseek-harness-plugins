@@ -215,6 +215,12 @@ export interface RemoteRunResult {
   stdinBytes?: number | undefined
   /** The account an elevated call ran as: the `as` name, or `su:root`. */
   elevated?: string | undefined
+  /** The job a call that ran out of time was handed to; present with `status: 'promoted'`. */
+  jobId?: string | undefined
+  /** Plain-language reason, set by the layers that know more than an exit code — a handover, or a handover that was refused. */
+  message?: string | undefined
+  /** The next step a reader can take, when the status alone would not say it. */
+  hint?: string | undefined
 }
 
 /**
@@ -267,6 +273,14 @@ export interface SessionTarget {
 /** Outcome of one remote command, classified the same way a probe is. */
 export type RemoteStatus =
   | 'succeeded'
+  /**
+   * The call ran out of its deadline and the command was **handed to the job
+   * registry** rather than killed: the remote process is still running, and
+   * `jobId` says where to read it. The harness's own shell tool answers a timeout
+   * this way, and a plugin that kills a long build just because a reply window
+   * closed was asking the reader to start it again.
+   */
+  | 'promoted'
   | 'exit-nonzero'
   | 'auth-failed'
   | 'unreachable'

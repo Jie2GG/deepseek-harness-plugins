@@ -306,7 +306,16 @@ test('exec: foreground success carries a registry-valid payload and names the ca
   assert.equal(payload.ok, true)
   assert.equal(payload.stdout, 'ok\n')
   assertPayloadValid(definition.output.schema, payload)
-  assert.deepEqual(ops.seen[0], ['runCommand', { command: 'uptime', target: 'Proxy', sessionId: 'session-77' }])
+  assert.deepEqual(ops.seen[0], ['runCommand', {
+    command: 'uptime',
+    target: 'Proxy',
+    sessionId: 'session-77',
+    // 0.0.26: the call ids travel on a foreground run too, because a command that
+    // outlives its deadline is handed to the registry, and that job has to name the
+    // call that started it. `ops` reads them off before validating the strict schema.
+    callId: 'c1',
+    rootCallId: 'r1'
+  }])
   // An explicitly named target is remembered for the conversation.
   assert.deepEqual(ops.seen[1], ['setSessionTarget', { sessionId: 'session-77', targetId: 'ssh-a1b2c3d4e5' }])
   const rendered = definition.output.render({ action: 'exec', command: 'uptime' }, payload)[0].text
@@ -455,4 +464,36 @@ test('every action keeps its schema honest when a producer forgets a field', () 
   // registry rejects one when the call settles.
   const { definition } = toolHarness(fakeOps())
   assert.ok(validateJsonSchemaValue(definition.output.schema, { action: 'read', status: 'succeeded', path: '/x', target: { id: 'i', label: 'l', host: 'h' } }).length > 0)
+})
+
+test('a promoted exec renders as a hand-over, not as a failure, and validates', async () => {
+  const ops = fakeOps()
+  ops.runCommand = async () => ({
+    run: {
+      status: 'promoted',
+      at: new Date().toISOString(),
+      durationMs: 30_000,
+      jobId: 'ssh-j7',
+      stdout: 'make: Entering directory\n',
+      truncated: true,
+      timeoutMs: 30_000,
+      outputBytes: 65_536,
+      message: 'The command is still running on the server: it outlived the 30000 ms this call was willing to wait.',
+      hint: 'Read it with `job_output` (job ssh-j7) and stop it with `job_kill`.'
+    },
+    connection: { id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9' },
+    connections: []
+  })
+  const { definition, exec } = toolHarness(ops)
+  const payload = await definition.execute({ action: 'exec', command: 'make world' }, exec)
+  // ok:true is the load-bearing part: a handed-over command is not a failed call,
+  // and a model that reads it as one would start the build again from nothing.
+  assert.equal(payload.ok, true)
+  assert.equal(payload.status, 'promoted')
+  assert.equal(payload.jobId, 'ssh-j7')
+  assertPayloadValid(definition.output.schema, payload)
+  const rendered = definition.output.render({ action: 'exec', command: 'make world' }, payload)[0].text
+  assert.match(rendered, /Still running past this call's deadline, so it was left going as job ssh-j7/)
+  assert.match(rendered, /job_output/)
+  assert.match(rendered, /status=promoted/)
 })

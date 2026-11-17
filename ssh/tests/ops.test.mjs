@@ -6,8 +6,9 @@ import assert from 'node:assert/strict'
 import { createOps } from '../lib/ops.js'
 import { SshError } from '../lib/types.js'
 import { fakeRunner, fakeStore, fakeSecrets, record } from './helpers.mjs'
+import { defaultBounds } from '../lib/bounds.js'
 
-function build ({ records = [record()], store, secrets, askpassReady = true, localExists = false, jobs, options } = {}) {
+function build ({ records = [record()], store, secrets, askpassReady = true, localExists = false, jobs, options, bounds } = {}) {
   const { runner, state } = fakeRunner()
   const storeObj = store ?? fakeStore({ records })
   const sec = secrets ?? fakeSecrets({ password: true, passphrase: false })
@@ -20,6 +21,7 @@ function build ({ records = [record()], store, secrets, askpassReady = true, loc
     localExists: async () => localExists,
     ...(jobs === undefined ? {} : { jobs }),
     ...(options === undefined ? {} : { options }),
+    ...(bounds === undefined ? {} : { bounds }),
     onInventoryChanged: () => { changed.count += 1 }
   })
   return { ops, runner, state, store: storeObj, secrets: sec, changed }
@@ -575,4 +577,98 @@ test('the session target writes only when a real row is named, and the settings 
     await ops.configUpdate({ settings: { probeTimeoutMs: 10_000 } })
   } catch (error) { stale = error }
   assert.equal(stale?.code, 'bad-input')
+})
+
+// ── promoting a call that outlives its own deadline ─────────────────────────
+/** A live job whose output is already partly there, and either settles or does not. */
+function liveJob ({ settle, text = 'half-done' } = {}) {
+  const killed = { count: 0 }
+  return {
+    killed,
+    job: {
+      sources: [
+        { channel: 'stdout', read: () => ({ text, nextOffset: text.length, lossy: false }) },
+        { channel: 'stderr', read: () => ({ text: '', nextOffset: 0, lossy: false }) }
+      ],
+      kill () { killed.count += 1 },
+      finished: settle === undefined ? new Promise(() => {}) : Promise.resolve(settle)
+    }
+  }
+}
+
+/** A registry that takes the hand-over, or refuses it. */
+function registry (refuse = false) {
+  const seen = []
+  return {
+    seen,
+    start (spec) {
+      if (refuse) throw new Error('background job limit reached for this owner (limit: 10); use job_kill to stop an unneeded job')
+      seen.push(spec)
+      spec.run()
+      return 'ssh-j1'
+    },
+    async read () { return undefined },
+    async kill () { return undefined }
+  }
+}
+
+test('a call that settles in time answers as a normal foreground run, through the job-capable path', async () => {
+  const { ops, state } = build({ jobs: registry() })
+  const { job } = liveJob({ settle: { outcome: 'exit', exitCode: 0, stdout: 'done\n', stderr: '', durationMs: 12, truncated: false } })
+  state.startRunOut = job
+  const out = await ops.runCommand({ command: 'uptime' })
+  assert.equal(out.run.status, 'succeeded')
+  assert.equal(out.run.stdout, 'done\n')
+  assert.equal(state.calls.some(c => c.kind === 'startRun'), true) // no deadline of its own
+  assert.equal(state.calls.find(c => c.kind === 'startRun').options.timeoutMs, 2_147_483_647)
+  assert.equal(state.calls.some(c => c.kind === 'run'), false)
+})
+
+test('a call that outlives its deadline is handed over, with the output it already produced', async () => {
+  const jobs = registry()
+  const { ops, state } = build({ records: [record({ remoteTimeoutMs: 5 })], jobs })
+  state.startRunOut = liveJob().job // never settles
+  const out = await ops.runCommand({ command: 'make world', sessionId: 's-1', callId: 'c-1', rootCallId: 'r-1' })
+  assert.equal(out.run.status, 'promoted')
+  assert.equal(out.run.ok ?? true, true)
+  assert.equal(out.run.jobId, 'ssh-j1')
+  assert.equal(out.run.stdout, 'half-done') // what it said before the window closed
+  assert.match(out.run.message ?? '', /outlived the 5 ms/)
+  assert.match(out.run.hint ?? '', /job_output/)
+  assert.match(out.run.hint ?? '', /timeoutMs/)
+  assert.equal(out.run.timeoutMs, 5) // the deadline that was in force is echoed
+  // The job the registry received is attributed like one started with `background`:
+  // same owner, same call, so `job_output` and the trajectory land in the right place.
+  const spec = jobs.seen[0]
+  assert.equal(spec.kind, 'ssh')
+  assert.equal(spec.owner, 's-1')
+  assert.deepEqual(spec.toolCall, { callId: 'c-1', rootCallId: 'r-1' })
+  assert.match(spec.label, /Proxy: make world/)
+  assert.equal(spec.output.length, 2) // both channels keep streaming after the hand-over
+})
+
+test('a refused hand-over falls back to the old kill and says which happened', async () => {
+  const { ops, state } = build({ records: [record({ remoteTimeoutMs: 5 })], jobs: registry(true) })
+  const { job, killed } = liveJob()
+  state.startRunOut = job
+  const out = await ops.runCommand({ command: 'sleep 100' })
+  assert.equal(out.run.status, 'timeout')
+  assert.equal(killed.count, 1) // the child is stopped, as before 0.0.26
+  assert.match(out.run.message ?? '', /could not be left running/)
+  assert.match(out.run.hint ?? '', /job_kill/)
+})
+
+test('a profile that turns promotion off keeps the plain bounded wait', async () => {
+  const { ops, state } = build({ jobs: registry(), bounds: () => ({ ...defaultBounds(), promoteOnTimeout: false }) })
+  const out = await ops.runCommand({ command: 'uptime' })
+  assert.equal(out.run.status, 'succeeded')
+  assert.equal(state.calls.some(c => c.kind === 'run'), true)
+  assert.equal(state.calls.some(c => c.kind === 'startRun'), false)
+})
+
+test('a profile with no job registry never attempts a hand-over', async () => {
+  const { ops, state } = build()
+  await ops.runCommand({ command: 'uptime' })
+  assert.equal(state.calls.some(c => c.kind === 'run'), true)
+  assert.equal(state.calls.some(c => c.kind === 'startRun'), false)
 })

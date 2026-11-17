@@ -662,10 +662,17 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           if (call.input !== undefined) params.input = call.input
           if (call.as !== undefined) params.as = call.as
           if (call.su === true) params.su = true
+          // A foreground call may still end up as a job: when it outlives its
+          // deadline the plugin hands the running command to the registry rather
+          // than killing it, and that job has to name the conversation and the call
+          // that produced it, exactly like one started with `background`. The run
+          // schema is strict, so `ops` reads these three off before validating.
+          if (sessionId !== undefined) params.sessionId = sessionId
+          if (execCallId !== undefined) params.callId = execCallId
+          if (execRootCallId !== undefined) params.rootCallId = execRootCallId
           if (call.background === true) {
             // Handed to the job registry: the call answers with an id, and the
             // conversation reads and stops it with the harness's own job tools.
-            if (sessionId !== undefined) params.sessionId = sessionId
             if (execCallId !== undefined) params.callId = execCallId
             if (execRootCallId !== undefined) params.rootCallId = execRootCallId
             const job = await operations.execBackground(params)
@@ -857,20 +864,30 @@ function listedResult(
 function runResult(result: Awaited<ReturnType<Ops['runCommand']>>): Record<string, unknown> {
   const run = result.run
   const target = result.connection === undefined ? undefined : { id: result.connection.id, label: result.connection.label, host: result.connection.host }
-  const failed = run.status !== 'succeeded'
+  // A promoted call is not a failed one: the command is alive on the server and this
+  // call did the right thing with it. Treating it as a failure would tell the model
+  // to give up on work that is still happening.
+  const promoted = run.status === 'promoted'
+  const failed = run.status !== 'succeeded' && !promoted
   return {
     action: 'exec',
     ok: !failed,
     status: run.status,
     ...(target === undefined ? {} : { target }),
     ...(run.exitCode === undefined ? {} : { exitCode: run.exitCode }),
+    ...(run.jobId === undefined ? {} : { jobId: run.jobId }),
     ...(run.stdout === undefined ? {} : { stdout: run.stdout }),
     ...(run.stderr === undefined ? {} : { stderr: run.stderr }),
     ...(run.truncated === undefined ? {} : { truncated: run.truncated }),
     ...(run.stdoutSpillPath === undefined ? {} : { stdoutSpillPath: run.stdoutSpillPath }),
     ...(run.stderrSpillPath === undefined ? {} : { stderrSpillPath: run.stderrSpillPath }),
+    ...(run.timeoutMs === undefined ? {} : { timeoutMs: run.timeoutMs }),
+    ...(run.outputBytes === undefined ? {} : { outputBytes: run.outputBytes }),
+    ...(run.notes === undefined ? {} : { notes: run.notes }),
     ...(run.elevated === undefined ? {} : { elevated: run.elevated }),
     ...(run.durationMs === undefined ? {} : { durationMs: run.durationMs }),
+    ...(run.message === undefined ? {} : { message: run.message }),
+    ...(run.hint === undefined ? {} : { hint: run.hint }),
     ...(failed ? { message: runHint(run.status, run.stderr) } : {}),
     ...(failed && run.status === 'auth-failed'
       ? {
@@ -953,7 +970,9 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
       const command = typeof args.command === 'string' ? args.command : ''
       lines.push(`${where}$ ${command}`)
       if (typeof value.jobId === 'string') {
-        lines.push(`Left running in the background as job ${String(value.jobId)}. Read it with \`job_output\` and stop it with \`job_kill\`.`)
+        lines.push(value.status === 'promoted'
+          ? `Still running past this call's deadline, so it was left going as job ${String(value.jobId)}. Read it with \`job_output\` and stop it with \`job_kill\`.`
+          : `Left running in the background as job ${String(value.jobId)}. Read it with \`job_output\` and stop it with \`job_kill\`.`)
       }
       const stdout = typeof value.stdout === 'string' ? value.stdout : ''
       const stderr = typeof value.stderr === 'string' ? value.stderr : ''

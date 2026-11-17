@@ -172,10 +172,12 @@ Bounds split in two since 0.0.24. The structural ones still live in
 `src/storage.ts`: 64 targets, 16 concurrent remote operations shared by probes and
 commands, 8 servers that may each hold one shared connection (`MAX_LIVE_MASTERS`)
 before the idle longest-quiet one is retired, a five-minute idle timeout on a
-master (`CONTROL_PERSIST_SECONDS`), 12 per `probeAll` round, a 30-minute outer
-deadline on a backgrounded command (`BACKGROUND_DEADLINE_MS`), text fed to a
+master (`CONTROL_PERSIST_SECONDS`), 12 per `probeAll` round, text fed to a
 command's stdin capped at 1,000,000 characters, a remote command line at 8,192,
-and at most 32 allowlisted program names of 64 characters each. The three
+and at most 32 allowlisted program names of 64 characters each. A backgrounded
+command has no deadline of its own since 0.0.26 — `BACKGROUND_DEADLINE_MS` is
+gone, and the job lives until it settles, is killed, loses its owner, or the Host
+exits, holding one of the 16 operation slots the while. The three
 *ceilings* a reader or a call can move — command timeout, per-stream output,
 transfer size — plus the probe and pre-check deadlines, the spill cap, the kill
 grace, and whether a timed-out command is promoted, now live in `src/config.ts`
@@ -309,6 +311,35 @@ it decides, and why:
   helper. A master is a process OpenSSH left in the background, not a child this
   Host still watches, so a Host killed outright leaves each master on its server
   until `CONTROL_PERSIST_SECONDS` (300) runs out.
+
+### Promotion: a deadline that belongs to the reply
+
+`ops.runPromoted` is the 0.0.26 shape of a foreground `exec`, and it copies the
+harness's own answer rather than inventing one: the command is started through the
+same untimed job-capable path a background call uses, and the plugin then **waits
+on it** for `settings.remoteTimeoutMs` (`packages/shell/tool-bash/src/index.ts:508`
+resolves with `onExpiry: 'none'` for exactly this reason, and `:297-353` waits the
+registry out).
+
+- Settled inside the window → classified normally, the way it always was.
+- Still running at the deadline → `startRemoteJob` attaches the live child and the
+  call answers `status: 'promoted'` with the `jobId`, the partial output, and a hint
+  naming `job_output`. `ok` is true: the call succeeded at handing over, and a model
+  that read it as a failure would restart a build that is still going.
+- Refused by the registry (the per-owner job cap) → the child is killed and the
+  result says the hand-over was refused and why, rather than pretending the timeout
+  was the whole story.
+
+Two details are load-bearing. The provider's offset readers are **non-consuming**,
+so the partial read that comes with the hand-over does not steal bytes from the job
+— `job_output` still sees the stream from the start. And `startRun` gained `stdin`,
+because an elevated command's password is injected at spawn: a promoted call has
+already answered its prompt, so handing it over is safe in a way that *starting* a
+call in the background never is (`background: true` with `as`/`su` stays refused).
+
+`promoteOnTimeout: false` in config, or a profile with no job registry, keeps the
+plain bounded wait — the behaviour this plugin shipped with, still one code path
+rather than a special case.
 
 ### Tool (`src/tool.ts`)
 
@@ -525,7 +556,7 @@ still open:
    remote call keeps rendering in the harness's generic tool row — see the note
    under **Verified contracts**.
 
-## Limits of 0.0.23
+## Limits of 0.0.26
 
 - The settings page is inventory, probes, resolve, and ceilings only: running
   commands, editing files, and moving bytes reach the server through the

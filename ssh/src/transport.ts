@@ -216,6 +216,49 @@ export function classifyProbe(exitCode: number | null, detail: string): ProbeSta
 }
 
 /**
+ * Turn one finished child into the classified result a reader of `exec` sees.
+ *
+ * Exported because two paths reach the same answer now: a foreground call that
+ * settled inside its deadline, and one that settled after being handed to the job
+ * registry. Both must read the server's output the same way, or a promoted command
+ * would answer the model's question with different words than one that finished on
+ * time.
+ * @param collected - what the bounded child produced.
+ * @param facts - what the call asked for, echoed back the way `run` echoes it.
+ * @returns the classified run result.
+ */
+export function classifyCollectedRun(
+  collected: Collected,
+  facts: { tty?: boolean | undefined; stdinBytes?: number | undefined } = {},
+): RemoteRunResult {
+  const text = `${collected.stdout}\n${collected.stderr}`
+  const status: RemoteStatus = collected.outcome === 'cancelled'
+    ? 'cancelled'
+    : collected.outcome === 'timeout'
+      ? 'timeout'
+      : collected.outcome === 'error'
+        ? 'failed'
+        : classifyRun(collected.exitCode, text)
+  return {
+    at: new Date().toISOString(),
+    status,
+    durationMs: collected.durationMs,
+    ...(facts.tty === true ? { tty: true } : {}),
+    ...(facts.stdinBytes === undefined ? {} : { stdinBytes: facts.stdinBytes }),
+    ...(collected.exitCode === null && collected.outcome !== 'exit' ? {} : { exitCode: collected.exitCode }),
+    ...(collected.stdout === '' ? {} : { stdout: collected.stdout }),
+    ...(collected.stderr === '' && collected.error === undefined ? {} : {
+      stderr: [collected.stderr, collected.error === undefined ? '' : `The ssh client could not start: ${collected.error}`]
+        .filter(value => value !== '')
+        .join('\n'),
+    }),
+    ...(collected.truncated ? { truncated: true } : {}),
+    ...(collected.stdoutSpillPath === undefined ? {} : { stdoutSpillPath: collected.stdoutSpillPath }),
+    ...(collected.stderrSpillPath === undefined ? {} : { stderrSpillPath: collected.stderrSpillPath }),
+  }
+}
+
+/**
  * The argv tail one probe runs with.
  *
  * Two shapes, because what ends the child depends on what the call leaves behind:
@@ -979,6 +1022,13 @@ export class SshTransport {
       readonly timeoutMs?: number | undefined
       readonly signal?: AbortSignal | undefined
       readonly tty?: boolean | undefined
+      /**
+       * Bytes written to the command's stdin before it closes. A backgrounded
+       * command needs it for the same reason a foreground one does: an elevated
+       * call injects the answer to a sudo or su prompt, and a command handed to the
+       * registry mid-flight must have already been fed.
+       */
+      readonly stdin?: string | undefined
     } = {},
   ): Promise<RemoteJob | undefined> {
     const deadline = options.timeoutMs ?? settings.remoteTimeoutMs
@@ -1002,7 +1052,7 @@ export class SshTransport {
       const { flags, env } = this.sshOptions(target, settings, auth, deadline, { poolFlags: ticket?.flags })
       const ttyFlags = options.tty === true ? ['-tt'] : []
       const startedAt = Date.now()
-      const { handle, detach } = this.#spawn(program, [...flags, ...ttyFlags, this.authority(target), command], settings, env, controller, options.signal, undefined)
+      const { handle, detach } = this.#spawn(program, [...flags, ...ttyFlags, this.authority(target), command], settings, env, controller, options.signal, options.stdin)
       // A backgrounded command holds its lease for its whole life, the same way it
       // holds an operation slot: the channel over the master is open until it ends.
       const finished = this.#settleAndDrain(handle, controller, deadline, options.signal, startedAt)
@@ -1113,23 +1163,10 @@ export class SshTransport {
       // A command that ran, even badly, proved the connection is worth reusing. One
       // that timed out or came apart mid-stream did not, and the next call dials.
       this.noteShared(ticket, (status === 'succeeded' || status === 'exit-nonzero') && !this.sessionBroken(text))
-      const result: RemoteRunResult = {
-        at: new Date().toISOString(),
-        status,
-        durationMs: collected.durationMs,
+      const result: RemoteRunResult = classifyCollectedRun(collected, {
         ...(options.tty === true ? { tty: true } : {}),
         ...(options.stdin === undefined ? {} : { stdinBytes: Buffer.byteLength(options.stdin, 'utf8') }),
-        ...(collected.exitCode === null && collected.outcome !== 'exit' ? {} : { exitCode: collected.exitCode }),
-        ...(collected.stdout === '' ? {} : { stdout: collected.stdout }),
-        ...(collected.stderr === '' && collected.error === undefined ? {} : {
-          stderr: [collected.stderr, collected.error === undefined ? '' : `The ssh client could not start: ${collected.error}`]
-            .filter(value => value !== '')
-            .join('\n'),
-        }),
-        ...(collected.truncated ? { truncated: true } : {}),
-        ...(collected.stdoutSpillPath === undefined ? {} : { stdoutSpillPath: collected.stdoutSpillPath }),
-        ...(collected.stderrSpillPath === undefined ? {} : { stderrSpillPath: collected.stderrSpillPath }),
-      }
+      })
       return withRunNote(result, ticket)
     } finally {
       this.unshare(ticket)

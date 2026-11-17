@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import {
   DOMAIN_NAME, DOMAIN_VERSION, COMPATIBLE_VERSIONS, MAX_CONNECTIONS, MAX_CONCURRENT_OPS,
   MAX_LIVE_MASTERS, CONTROL_PERSIST_SECONDS, poolChoiceSchema,
-  MAX_ALLOWED_COMMANDS, BACKGROUND_DEADLINE_MS, DEFAULT_SETTINGS,
+  MAX_ALLOWED_COMMANDS, DEFAULT_SETTINGS,
   SSH_EXECUTABLE, SSH_FALLBACK_PATHS,
   connectionRecordSchema, connectionInputSchema, settingsRecordSchema, remotePathSchema,
   remoteRunSchema, transferInputSchema, secretPatchSchema, probeDraftSchema,
@@ -75,7 +75,6 @@ test('settings hold overrides, and every one of them may be absent', () => {
   assert.throws(() => settingsRecordSchema.parse({ remoteTimeoutMs: 0 }))
   assert.throws(() => settingsRecordSchema.parse({ maxOutputBytes: -1 }))
   assert.throws(() => settingsRecordSchema.parse({ oops: 1 }))
-  assert.equal(BACKGROUND_DEADLINE_MS, 1_800_000)
   assert.equal(MAX_CONNECTIONS, 64)
   // The lane count is no longer "probes": it counts every remote operation, page
   // and conversation alike, because sharing moved the connection ceiling elsewhere.

@@ -281,14 +281,21 @@ classified result.
   A command that needs a terminal can be given one
   (`tty: true`) and handed its answer (`input: "…"`). A command that will outlive one
   reply can be left running with `background: true`, which returns a job id to poll with
-  `job_output` and stop with `job_kill`; it runs to a deadline of its own (thirty
-  minutes or more) and holds one of the plugin's sixteen concurrent remote operations
-  until it settles. What is still missing is a terminal you type
+  `job_output` and stop with `job_kill`. Such a job has **no deadline of its own**:
+  it lives until it settles, until `job_kill`, until its conversation goes away, or
+  until the Host exits — holding one of the plugin's sixteen concurrent operation
+  slots the whole while. And a foreground call that runs out of time is no longer
+  killed: by default it is **handed to the job registry** mid-flight, answering
+  `status=promoted` with the job id and whatever the command had already produced
+  (an elevated call can be handed over too — its password was injected at spawn,
+  not at the deadline). If that conversation already holds every background slot,
+  the hand-over is refused and the plugin falls back to killing, saying which of the
+  two happened. What is still missing is a terminal you type
   into live, and a command that keeps running on the server after this conversation
   ends — that one wants `nohup` or a systemd unit, which `exec` can set up.
-  Elevation (`as`/`su`) is a foreground thing — a backgrounded job has no channel
-  to receive the password — but a NOPASSWD server still works in the background
-  when the command itself starts with `sudo`.
+  Elevation (`as`/`su`) still can't be **started** in the background — a command
+  launched that way has no channel to receive its password — but a NOPASSWD server
+  works in the background when the command itself starts with `sudo`.
 - After the plugin package is replaced, the running Host keeps its previous module
   until it restarts: before that, the agent has no `ssh` tool and new ceilings
   are not in effect. The settings page follows the browser bundle and updates on its

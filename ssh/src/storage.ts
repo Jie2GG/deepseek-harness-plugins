@@ -84,13 +84,12 @@ export const SCP_EXECUTABLE = 'scp'
 export const SCP_FALLBACK_PATHS: readonly string[] = ['/usr/bin/scp', '/usr/local/bin/scp', '/bin/scp', '/opt/homebrew/bin/scp']
 
 /**
- * How long one backgrounded remote command may run before it is called timed out.
- *
- * This is the plugin's own bound, not the harness's: a job here lives to its
- * `job_kill`, its owner's conversation, or the Host going down, and this number is
- * only the outer safety net for a command that never settles.
+ * A backgrounded remote command has no deadline of its own since 0.0.26 — it lives
+ * until it settles, until `job_kill`, until its conversation goes away, or until the
+ * Host exits, which is the bargain the harness's own background shell strikes. What
+ * it does hold for that whole time is one of the `MAX_CONCURRENT_OPS` slots, because
+ * the child process is real for all of it.
  */
-export const BACKGROUND_DEADLINE_MS = 1_800_000
 
 /**
  * The three ceilings' default-and-cap pair now lives in {@link ./config.ts}, and a

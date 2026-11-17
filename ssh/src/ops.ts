@@ -10,7 +10,7 @@
  * @module @jie2gg/dsh-plugin-ssh/ops
  */
 
-import { connectionInputSchema, draftSecretSchema, remotePathSchema, transferInputSchema, sessionTargetInputSchema, BACKGROUND_DEADLINE_MS, CONTROL_PERSIST_SECONDS, MAX_CONCURRENT_OPS, MAX_CONNECTIONS, MAX_LIVE_MASTERS, probeDraftSchema, remoteRunSchema, secretPatchSchema, settingsInputSchema } from './storage.ts'
+import { connectionInputSchema, draftSecretSchema, remotePathSchema, transferInputSchema, sessionTargetInputSchema, CONTROL_PERSIST_SECONDS, MAX_CONCURRENT_OPS, MAX_CONNECTIONS, MAX_LIVE_MASTERS, probeDraftSchema, remoteRunSchema, secretPatchSchema, settingsInputSchema } from './storage.ts'
 import { defaultBounds, resolveSettings } from './bounds.ts'
 import type { Bounds, CeilingLayers, ResolvedSettings } from './bounds.ts'
 import { SshError } from './types.ts'
@@ -19,7 +19,8 @@ import { transfer } from './transfer.ts'
 import { applyEdit } from './edit.ts'
 import { startRemoteJob } from './jobs.ts'
 import type { JobRegistry } from './jobs.ts'
-import { shellQuote, leadingProgram } from './transport.ts'
+import { shellQuote, leadingProgram, classifyCollectedRun } from './transport.ts'
+import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import type { RemoteAuth, RemoteTarget, SshTransport } from './transport.ts'
 import type { TargetStore } from './store.ts'
 import type { TargetSecrets } from './secrets.ts'
@@ -411,6 +412,132 @@ export function createOps(deps: OpsDeps): Ops {
     run.outputBytes = settings.maxOutputBytes
     if (notes.length > 0) run.notes = notes
     return run
+  }
+
+  /**
+   * A wait that can be called off, so a settled command does not leave a timer
+   * behind holding the event loop.
+   * @param ms - how long to wait before reporting the call still alive.
+   * @returns the promise to race, and the way to stand the wait down.
+   */
+  function wakeAfter(ms: number): { readonly alive: Promise<'alive'>; cancel(): void } {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const alive = new Promise<'alive'>((resolve) => {
+      timer = setTimeout(() => { resolve('alive') }, ms)
+    })
+    return {
+      alive,
+      cancel: (): void => {
+        if (timer !== undefined) clearTimeout(timer)
+      },
+    }
+  }
+
+  /**
+   * Run one command, and if it outlives its deadline, hand it to the job registry
+   * instead of killing it.
+   *
+   * The deadline belongs to the reply, not to the work — that is how the harness's
+   * own shell answers a timeout, and the difference is visible: a long build killed
+   * at thirty seconds because a model asked once and waited has to be started again
+   * from nothing, while a call that hands over keeps the process running on the
+   * server and returns the id that reads it. Registration can still be refused (the
+   * registry caps how many jobs one conversation holds), and then this falls back to
+   * what the plugin used to do, saying why rather than losing the work quietly.
+   * @param record - the target the call resolved to.
+   * @param settings - the ceilings this call runs under.
+   * @param auth - the credentials for this target.
+   * @param command - the assembled remote command line.
+   * @param facts - tty, stdin, cancellation, and the job bookkeeping to attach.
+   * @returns the run result: settled, promoted with a job id, or a refusal that says
+   *   which of the three it is.
+   */
+  async function runPromoted(
+    record: ConnectionRecord,
+    settings: SshSettings,
+    auth: RemoteAuth,
+    command: string,
+    facts: {
+      readonly tty?: boolean | undefined
+      readonly stdin?: string | undefined
+      readonly signal?: AbortSignal | undefined
+      readonly owner?: string | undefined
+      readonly label: string
+      readonly toolCall?: { callId: string; rootCallId: string } | undefined
+    },
+  ): Promise<RemoteRunResult> {
+    const startedAt = Date.now()
+    const registry = jobs
+    if (registry === undefined) throw new SshError('internal', 'A promoted run needs a job registry.')
+    const job = await runner.startRun(targetOf(record), settings, auth, command, {
+      ...(facts.tty === true ? { tty: true } : {}),
+      ...(facts.stdin === undefined ? {} : { stdin: facts.stdin }),
+      // No deadline of its own: the wait below is bounded, the command is not. That
+      // is the whole difference between a promoted call and a killed one.
+      timeoutMs: MAX_TIMER_DELAY_MS,
+      ...(facts.signal === undefined ? {} : { signal: facts.signal }),
+    })
+    if (job === undefined) {
+      return {
+        at: new Date().toISOString(),
+        status: 'ssh-missing',
+        durationMs: 0,
+        stderr: 'No ssh program was found: PATH and the usual install locations were tried.',
+      }
+    }
+    const wait = wakeAfter(settings.remoteTimeoutMs)
+    const outcome = await Promise.race([
+      job.finished.then(result => ({ kind: 'settled' as const, result })),
+      wait.alive.then(() => ({ kind: 'alive' as const })),
+    ])
+    wait.cancel()
+    if (outcome.kind === 'settled') {
+      return classifyCollectedRun(outcome.result, {
+        ...(facts.tty === true ? { tty: true } : {}),
+        ...(facts.stdin === undefined ? {} : { stdinBytes: Buffer.byteLength(facts.stdin, 'utf8') }),
+      })
+    }
+    // What the command produced so far travels with the hand-over, so the reader is
+    // not choosing between "still running" and "here is the output". The provider's
+    // offset readers are non-consuming, so the job still reads the whole stream from
+    // the beginning afterwards.
+    const partial = { stdout: '', stderr: '' }
+    for (const source of job.sources) {
+      const read = source.read(0)
+      if (read.text !== '') partial[source.channel === 'stdout' ? 'stdout' : 'stderr'] = read.text
+    }
+    const at = new Date().toISOString()
+    const durationMs = Date.now() - startedAt
+    try {
+      const jobId = startRemoteJob(registry, {
+        label: facts.label,
+        ...(facts.owner === undefined ? {} : { owner: facts.owner }),
+        ...(facts.toolCall === undefined ? {} : { toolCall: facts.toolCall }),
+        start: async () => job,
+      })
+      return {
+        at,
+        status: 'promoted',
+        durationMs,
+        jobId,
+        ...(partial.stdout === '' ? {} : { stdout: partial.stdout, truncated: true }),
+        ...(partial.stderr === '' ? {} : { stderr: partial.stderr, truncated: true }),
+        message: `The command is still running on the server: it outlived the ${String(settings.remoteTimeoutMs)} ms this call was willing to wait.`,
+        hint: `Read it with \`job_output\` (job ${jobId}) and stop it with \`job_kill\`; ask for a longer wait with \`timeoutMs\` if you expected it to finish.`,
+      }
+    } catch (error: unknown) {
+      // The registry said no — usually every job slot this conversation holds is
+      // taken. Killing is the old behaviour, and it is still better than a call that
+      // reports success over a process nobody can read.
+      job.kill()
+      return {
+        at,
+        status: 'timeout',
+        durationMs,
+        message: `The command ran out of its ${String(settings.remoteTimeoutMs)} ms deadline, and it could not be left running: ${messageOf(error).slice(0, 240)}`,
+        hint: 'Stop a job with `job_kill` and run the command again, or raise the ceiling with `timeoutMs`.',
+      }
+    }
   }
 
   /** One stored record as the page sees it. */
@@ -873,9 +1000,17 @@ export function createOps(deps: OpsDeps): Ops {
     async runCommand(params: Params) {
       const state = await store()
       const globalSettings = state.settings()
+      // The registry's own bookkeeping travels with the call so a command that gets
+      // promoted names the conversation and the call that started it — and the run
+      // schema is strict, so it is read off first.
+      const { callId, rootCallId, ...runParams } = params
+      const toolCall = typeof callId === 'string' && typeof rootCallId === 'string'
+        ? { callId, rootCallId }
+        : undefined
+      const owner = typeof runParams.sessionId === 'string' ? runParams.sessionId : undefined
       let input: ReturnType<typeof remoteRunSchema.parse>
       try {
-        input = remoteRunSchema.parse(params.command !== undefined ? params : { command: params })
+        input = remoteRunSchema.parse(runParams.command !== undefined ? runParams : { command: runParams })
       } catch (error: unknown) {
         throw new SshError('bad-input', messageOf(error), { field: fieldOf(error) ?? 'command', hint: 'Fix the reported value and try again.' })
       }
@@ -926,10 +1061,22 @@ export function createOps(deps: OpsDeps): Ops {
         tty = true
         if (stdin === undefined && rootPassword !== undefined) stdin = `${rootPassword}\n`
       }
-      const run = await runner.run(targetOf(record), settings, auth, command, {
-        ...(tty === undefined ? {} : { tty }),
-        ...(stdin === undefined ? {} : { stdin }),
-      })
+      // Promoting is the default because a deadline that belongs to the reply
+      // should not be allowed to destroy the work. A profile without a job registry,
+      // or one that sets `promoteOnTimeout: false`, keeps the old bounded wait.
+      const promotable = liveBounds().promoteOnTimeout && jobs !== undefined
+      const run = promotable
+        ? await runPromoted(record, settings, auth, command, {
+          ...(tty === true ? { tty: true } : {}),
+          ...(stdin === undefined ? {} : { stdin }),
+          label: `${record.label}: ${command}`,
+          ...(owner === undefined ? {} : { owner }),
+          ...(toolCall === undefined ? {} : { toolCall }),
+        })
+        : await runner.run(targetOf(record), settings, auth, command, {
+          ...(tty === undefined ? {} : { tty }),
+          ...(stdin === undefined ? {} : { stdin }),
+        })
       if (elevated !== undefined) run.elevated = elevated
       // What applied, and whether a cap had to move it: only this layer knows.
       stampCeilings(run, settings, resolved.notes)
@@ -1153,10 +1300,12 @@ export function createOps(deps: OpsDeps): Ops {
       const settings = resolved.settings
       const auth = await authFor(record.id, record.auth)
       const owner = typeof input.sessionId === 'string' ? input.sessionId : undefined
-      // A backgrounded command is not bounded by the foreground deadline: the whole
-      // point is to outlive one reply. It still ends when the reader stops it, when
-      // the conversation that owns it goes away, or when the Host process exits.
-      const deadline = Math.max(BACKGROUND_DEADLINE_MS, settings.remoteTimeoutMs)
+      // A backgrounded command has no deadline of its own: it lives until it
+      // settles, until `job_kill`, until its conversation goes away, or until the
+      // Host exits — the same bargain the harness's own background shell makes, and
+      // a self-imposed 30-minute guillotine would only have meant a longer build died
+      // mid-flight. What it does keep holding is one of the plugin's operation slots.
+      const deadline = MAX_TIMER_DELAY_MS
       const label = `${record.label}: ${input.command}`
       const jobId = startRemoteJob(jobs, {
         label,
