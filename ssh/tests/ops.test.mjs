@@ -637,6 +637,11 @@ test('a call that outlives its deadline is handed over, with the output it alrea
   assert.equal(out.run.ok ?? true, true)
   assert.equal(out.run.jobId, 'ssh-j1')
   assert.equal(out.run.stdout, 'half-done') // what it said before the window closed
+  // `truncated` belongs to a clipped stream, not to a command that is still writing
+  // one: claiming it here made the transcript report a missing spill file that was
+  // never needed.
+  assert.equal(out.run.truncated, undefined)
+  assert.match(out.run.message ?? '', /how far it had got/)
   assert.match(out.run.message ?? '', /outlived the 5 ms/)
   assert.match(out.run.hint ?? '', /job_output/)
   assert.match(out.run.hint ?? '', /timeoutMs/)

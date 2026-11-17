@@ -993,6 +993,13 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
           ? `[output truncated; full output — ${spills.join(', ')}]`
           : '[output truncated; full output: (no spill file configured — raise maxSpillBytes, or ask for more with `maxBytes`)]')
       }
+      // A ceiling the plugin moved is told the same way: the structured field carries
+      // the effective number, but a model reads this text, and "I asked for 900000ms
+      // and got 300000ms" is the difference between retrying with a bigger number and
+      // assuming the server was too slow.
+      if (Array.isArray(value.notes)) {
+        for (const note of value.notes) if (typeof note === 'string' && note !== '') lines.push(`[${note}]`)
+      }
       const bits = [`status=${String(value.status)}`]
       if (typeof value.elevated === 'string') bits.push(`elevated=${String(value.elevated)}`)
       // A command left running has no exit code yet, and saying `exit=null` reads

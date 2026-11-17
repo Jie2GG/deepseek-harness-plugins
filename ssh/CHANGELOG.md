@@ -17,6 +17,44 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.28
+
+### Fixed
+
+- **A handed-over command no longer claims its output was truncated.** The promoted
+  result carried `truncated: true` to mean "the text you got is a part", and that
+  collided with the word's actual meaning — a ceiling clipped a finished stream, and
+  here the stream was still being *written*. Live check after the Host restart:
+  a 600 ms call on a 3-second command answered
+  `[output truncated; full output: (no spill file configured — …)]` over a spill
+  budget that was happily configured and never needed, because the truncation
+  sentence keys off that flag. The hand-over sentence now says what is true ("this is
+  how far it had got; the job carries the whole stream from the beginning"), and the
+  claim about a missing file is gone.
+- **A cap that moved a number now reaches the text a model reads.** The effective
+  ceiling and the correction travelled only as structured payload fields, so a call
+  that asked for 900 000 ms and ran on 300 000 ms looked identical to one that got
+  what it asked for — and the natural wrong move is to assume the *server* was the
+  slow part. Each receipt is rendered as its own bracketed line
+  (`[command timeout asked for 900000 and was capped to 300000]`).
+
+### Notes
+
+- The live round that found this also confirmed the rest of the plan against a real
+  server, on OpenSSH with the plugin's own credentials: a promoted call returned
+  `status=promoted · 622 ms` with the partial output, and `job_output` then delivered
+  the whole stream (`first-line`, `second-line`) ending `exit=0 · 3377 ms` — the
+  non-consuming offset readers mean the preview costs the job nothing. A 40 000-line
+  command capped at 64 bytes kept only its tail in the answer while the provider wrote
+  the complete stream to a `0600` file (228 894 bytes, `first=1`, `last=40000`), whose
+  path the transcript named. And the ceilings line reads
+  `command 30000–300000 ms, in force 30000 ms; … A number past the cap is capped to it,
+  not refused.`
+- 124 tests across eleven suites are green, including the two new assertions that a
+  promoted answer makes no truncation claim and that a cap receipt is visible in the
+  rendered text. `tsc` clean, `oxlint` 0 warnings and 0 errors. Version 0.0.27 →
+  0.0.28 under the three-segment rule.
+
 ## 0.0.27
 
 ### Changed

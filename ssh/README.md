@@ -332,10 +332,15 @@ registry out).
 
 Two details are load-bearing. The provider's offset readers are **non-consuming**,
 so the partial read that comes with the hand-over does not steal bytes from the job
-— `job_output` still sees the stream from the start. And `startRun` gained `stdin`,
-because an elevated command's password is injected at spawn: a promoted call has
-already answered its prompt, so handing it over is safe in a way that *starting* a
-call in the background never is (`background: true` with `as`/`su` stays refused).
+— verified live: the hand-over preview carried `first-line`, and `job_output`
+afterwards carried `first-line`, `second-line`, and `exit=0 · 3377 ms`. A promoted
+result therefore sets **no** `truncated` flag either: that word means a ceiling
+clipped a finished stream, and here the stream is still being written — 0.0.26
+claimed otherwise and the renderer went on to report a spill file that had never
+been needed. And `startRun` gained `stdin`, because an elevated command's password
+is injected at spawn: a promoted call has already answered its prompt, so handing it
+over is safe in a way that *starting* a call in the background never is
+(`background: true` with `as`/`su` stays refused).
 
 `promoteOnTimeout: false` in config, or a profile with no job registry, keeps the
 plain bounded wait — the behaviour this plugin shipped with, still one code path

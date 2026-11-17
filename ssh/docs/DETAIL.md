@@ -287,7 +287,9 @@ classified result.
   slots the whole while. And a foreground call that runs out of time is no longer
   killed: by default it is **handed to the job registry** mid-flight, answering
   `status=promoted` with the job id and whatever the command had already produced
-  (an elevated call can be handed over too — its password was injected at spawn,
+  (that preview is not "truncated" — the stream is still being written, and
+  `job_output` reads it from the beginning); an elevated call can be handed over too
+  — its password was injected at spawn,
   not at the deadline). If that conversation already holds every background slot,
   the hand-over is refused and the plugin falls back to killing, saying which of the
   two happened. What is still missing is a terminal you type

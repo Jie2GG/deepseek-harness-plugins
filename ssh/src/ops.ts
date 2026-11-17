@@ -521,10 +521,15 @@ export function createOps(deps: OpsDeps): Ops {
         status: 'promoted',
         durationMs,
         jobId,
-        ...(partial.stdout === '' ? {} : { stdout: partial.stdout, truncated: true }),
-        ...(partial.stderr === '' ? {} : { stderr: partial.stderr, truncated: true }),
-        message: `The command is still running on the server: it outlived the ${String(settings.remoteTimeoutMs)} ms this call was willing to wait.`,
-        hint: `Read it with \`job_output\` (job ${jobId}) and stop it with \`job_kill\`; ask for a longer wait with \`timeoutMs\` if you expected it to finish.`,
+        // Not `truncated`: that word belongs to a ceiling that clipped a stream, and
+        // this stream is still being written. What is true is that the text below is
+        // only as far as the command had got, and the job carries the whole thing
+        // from the beginning — the provider's offset readers are non-consuming, so
+        // showing it here costs the reader nothing.
+        ...(partial.stdout === '' ? {} : { stdout: partial.stdout }),
+        ...(partial.stderr === '' ? {} : { stderr: partial.stderr }),
+        message: `The command is still running on the server: it outlived the ${String(settings.remoteTimeoutMs)} ms this call was willing to wait. The text below is only how far it had got by then.`,
+        hint: `Read the whole stream with \`job_output\` (job ${jobId}) — it starts from the beginning — and stop it with \`job_kill\`; ask for a longer wait with \`timeoutMs\` if you expected it to finish.`,
       }
     } catch (error: unknown) {
       // The registry said no — usually every job slot this conversation holds is

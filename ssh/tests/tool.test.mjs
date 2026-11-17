@@ -475,11 +475,10 @@ test('a promoted exec renders as a hand-over, not as a failure, and validates', 
       durationMs: 30_000,
       jobId: 'ssh-j7',
       stdout: 'make: Entering directory\n',
-      truncated: true,
       timeoutMs: 30_000,
       outputBytes: 65_536,
-      message: 'The command is still running on the server: it outlived the 30000 ms this call was willing to wait.',
-      hint: 'Read it with `job_output` (job ssh-j7) and stop it with `job_kill`.'
+      message: 'The command is still running on the server: it outlived the 30000 ms this call was willing to wait. The text below is only how far it had got by then.',
+      hint: 'Read the whole stream with `job_output` (job ssh-j7) — it starts from the beginning — and stop it with `job_kill`.'
     },
     connection: { id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9' },
     connections: []
@@ -496,4 +495,21 @@ test('a promoted exec renders as a hand-over, not as a failure, and validates', 
   assert.match(rendered, /Still running past this call's deadline, so it was left going as job ssh-j7/)
   assert.match(rendered, /job_output/)
   assert.match(rendered, /status=promoted/)
+  // A hand-over is not a clipped stream: no truncation sentence, and no claim about
+  // a spill file that was never in play.
+  assert.doesNotMatch(rendered, /no spill file configured/)
+  // A cap that moved a number the model asked for is stated in the text the model
+  // reads, not only in the structured fields.
+  const capped = await (async () => {
+    const ops2 = fakeOps()
+    ops2.runCommand = async () => ({
+      run: { status: 'succeeded', at: new Date().toISOString(), exitCode: 0, stdout: 'ok\n', durationMs: 31_000, timeoutMs: 300_000, outputBytes: 65_536, notes: ['command timeout asked for 900000 and was capped to 300000'] },
+      connection: { id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9' },
+      connections: []
+    })
+    const harness = toolHarness(ops2)
+    const body = await harness.definition.execute({ action: 'exec', command: 'sleep 1' }, harness.exec)
+    return harness.definition.output.render({ action: 'exec', command: 'sleep 1' }, body)[0].text
+  })()
+  assert.match(capped, /\[command timeout asked for 900000 and was capped to 300000\]/)
 })
