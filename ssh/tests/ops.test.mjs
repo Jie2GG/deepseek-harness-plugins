@@ -427,7 +427,9 @@ test('a backgrounded run hands the registry a label, an owner, and a late-killin
   await new Promise(resolve => setImmediate(resolve))
   // callId/rootCallId went to the job record, not into the strict run schema.
   const startRunCall = state.calls.find(c => c.kind === 'startRun')
-  assert.equal(startRunCall.options.timeoutMs >= 1_800_000, true)
+  // 0.0.26: a started job carries no deadline of its own — `0` means the timeout
+  // library arms no timer, and only the child, `job_kill`, or teardown ends it.
+  assert.equal(startRunCall.options.timeoutMs, 0)
 })
 
 test('backgrounding is refused, with a hint, when the profile has no registry', async () => {
@@ -620,7 +622,9 @@ test('a call that settles in time answers as a normal foreground run, through th
   assert.equal(out.run.status, 'succeeded')
   assert.equal(out.run.stdout, 'done\n')
   assert.equal(state.calls.some(c => c.kind === 'startRun'), true) // no deadline of its own
-  assert.equal(state.calls.find(c => c.kind === 'startRun').options.timeoutMs, 2_147_483_647)
+  // Zero means "arm no timer": the command outlives the reply window by design, and
+  // only the child settling or the caller cancelling can end it.
+  assert.equal(state.calls.find(c => c.kind === 'startRun').options.timeoutMs, 0)
   assert.equal(state.calls.some(c => c.kind === 'run'), false)
 })
 

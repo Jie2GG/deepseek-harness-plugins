@@ -17,6 +17,34 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.27
+
+### Changed
+
+- **One interrupted child, one cause.** The wait inside a call is now built from
+  `deadline(caller signal, timeoutMs, SSH_TIMEOUT)` and read back with
+  `timeoutOf`, both from `@deepseek-ai/dsh-timeout` — the same fused-deadline the
+  harness's own shell uses, where `AbortSignal.any` adopts the reason of whichever
+  side aborted **first**. The hand-rolled version it replaces decided between
+  timeout and cancellation by checking the caller's signal inside its own timer
+  callback, so a child stopped in the same instant as its deadline came back as
+  whichever branch the code tried first. Now `timeout` means the server was too
+  slow, and `cancelled` means the reader stopped it.
+- A job arms **no timer at all**: `timeoutMs: 0` is the timeout library's own
+  "no deadline" sentinel, so a backgrounded or promoted command waits on the child,
+  the caller's signal, or teardown — not on a number this plugin made up. 0.0.26
+  removed the 30-minute lifetime; this removes the timer that pretended to.
+
+### Notes
+
+- The `SSH_TIMEOUT` code is capability-owned, mirroring `BASH_TIMEOUT`: a nested
+  deadline that fires first still reads as an upstream cancellation rather than as
+  this plugin's own timeout.
+- 124 tests across eleven suites are green, including two new ones: the
+  timeout-versus-cancellation split on a child that never settles, and proof that a
+  zero deadline really arms nothing. `tsc` clean, `oxlint` 0 warnings and 0 errors.
+  Version 0.0.26 → 0.0.27 under the three-segment rule.
+
 ## 0.0.26
 
 ### Changed

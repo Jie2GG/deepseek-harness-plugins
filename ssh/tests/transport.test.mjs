@@ -221,3 +221,57 @@ test('a spill budget of zero means no file is asked for, and nothing is promised
   assert.equal(out.truncated, true)
   assert.equal(out.stdoutSpillPath, undefined) // the renderer's "(no spill file configured)" branch
 })
+
+// ── the first cause of an interrupted child ────────────────────────────────
+/** A provider whose child never settles on its own, so only a deadline can end it. */
+function hangingProvider () {
+  return {
+    subprocess: {
+      resolveExecutable: async () => '/usr/bin/ssh',
+      spawn () {
+        return {
+          done: new Promise(() => {}),
+          collected: {
+            stdout: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) },
+            stderr: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) }
+          },
+          terminate () {},
+          waitForExit: async () => true
+        }
+      }
+    }
+  }
+}
+
+test('a child that runs past its deadline is a timeout, and one the caller stopped is a cancellation', async () => {
+  const transport = new SshTransport(hangingProvider())
+  const settings = { ...CEILINGS, maxSpillBytes: 0, probeTimeoutMs: 30_000, statTimeoutMs: 10_000, graceMs: 100 }
+  const timedOut = await transport.execute('/usr/bin/ssh', ['true'], settings, undefined, 30, 'test call')
+  assert.equal(timedOut.outcome, 'timeout')
+
+  const stopped = new AbortController()
+  stopped.abort(new Error('the reader pressed stop'))
+  const cancelled = await transport.execute('/usr/bin/ssh', ['true'], settings, undefined, 5_000, 'test call', stopped.signal)
+  assert.equal(cancelled.outcome, 'cancelled') // not a timeout: nobody should go blame the server
+
+  // A caller who hands over an already-dead signal and a short deadline together is
+  // still a cancellation, whichever timer was armed first: the fused deadline keeps
+  // one cause, which is the whole reason this replaced a guess.
+  const both = new AbortController()
+  both.abort()
+  const bothOut = await transport.execute('/usr/bin/ssh', ['true'], settings, undefined, 1, 'test call', both.signal)
+  assert.equal(bothOut.outcome, 'cancelled')
+})
+
+test('no deadline means no timer: only the caller can end the wait', async () => {
+  const transport = new SshTransport(hangingProvider())
+  const settings = { ...CEILINGS, maxSpillBytes: 0, probeTimeoutMs: 30_000, statTimeoutMs: 10_000, graceMs: 100 }
+  const controller = new AbortController()
+  const running = transport.execute('/usr/bin/ssh', ['true'], settings, undefined, 0, 'background command', controller.signal)
+  let settled = false
+  void running.then(() => { settled = true })
+  await new Promise(resolve => setTimeout(resolve, 60))
+  assert.equal(settled, false) // 0 arms no timer at all, which is how a job outlives its reply
+  controller.abort()
+  assert.equal((await running).outcome, 'cancelled')
+})

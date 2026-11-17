@@ -20,7 +20,6 @@ import { applyEdit } from './edit.ts'
 import { startRemoteJob } from './jobs.ts'
 import type { JobRegistry } from './jobs.ts'
 import { shellQuote, leadingProgram, classifyCollectedRun } from './transport.ts'
-import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import type { RemoteAuth, RemoteTarget, SshTransport } from './transport.ts'
 import type { TargetStore } from './store.ts'
 import type { TargetSecrets } from './secrets.ts'
@@ -473,8 +472,10 @@ export function createOps(deps: OpsDeps): Ops {
       ...(facts.tty === true ? { tty: true } : {}),
       ...(facts.stdin === undefined ? {} : { stdin: facts.stdin }),
       // No deadline of its own: the wait below is bounded, the command is not. That
-      // is the whole difference between a promoted call and a killed one.
-      timeoutMs: MAX_TIMER_DELAY_MS,
+      // is the whole difference between a promoted call and a killed one, and
+      // `deadline(…, 0, …)` means exactly that to the timeout library — arm no
+      // timer, forward only the caller's cancellation.
+      timeoutMs: 0,
       ...(facts.signal === undefined ? {} : { signal: facts.signal }),
     })
     if (job === undefined) {
@@ -1305,7 +1306,7 @@ export function createOps(deps: OpsDeps): Ops {
       // Host exits — the same bargain the harness's own background shell makes, and
       // a self-imposed 30-minute guillotine would only have meant a longer build died
       // mid-flight. What it does keep holding is one of the plugin's operation slots.
-      const deadline = MAX_TIMER_DELAY_MS
+      const deadline = 0 // `deadline(…, 0, …)` arms no timer at all
       const label = `${record.label}: ${input.command}`
       const jobId = startRemoteJob(jobs, {
         label,

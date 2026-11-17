@@ -530,6 +530,17 @@ next round does not have to re-derive them:
   child and drained them, so a probe that hits its deadline waits up to 400 ms
   for `waitForExit` before reading them; without that drain a timeout carries no
   reason at all.
+- One interrupted child, one cause. `#settleAndDrain` builds its wait with
+  `deadline(external, timeoutMs, SSH_TIMEOUT)` from `@deepseek-ai/dsh-timeout`,
+  which fuses the caller's signal and the plugin's timer through
+  `AbortSignal.any` — the first aborter's reason is the one that survives, and
+  `timeoutOf(signal, SSH_TIMEOUT)` reads ours only when the timer won. The
+  hand-rolled version resolved `external?.aborted` inside the timer callback, so a
+  child killed in the same instant as its deadline was reported as whichever branch
+  the code happened to test first. A `timeout` now means the server was too slow,
+  and a `cancelled` means the reader stopped it — never a coin toss between them.
+  `timeoutMs: 0` means arm no timer, which is how a backgrounded or promoted job
+  outlives the reply that started it.
 - A probe reads that account's `~/.ssh`, not the terminal user's. `list` used to
   report `runsAs` (`uid`, `user`, `home`) so a settings card could name the
   account; the card was cut in 0.0.21 — the name settled nothing the probe

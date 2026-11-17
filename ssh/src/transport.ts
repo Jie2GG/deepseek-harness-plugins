@@ -22,6 +22,15 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-subprocess'
 import { MAX_CONCURRENT_OPS, SCP_EXECUTABLE, SCP_FALLBACK_PATHS, SSH_EXECUTABLE, SSH_FALLBACK_PATHS } from './storage.ts'
+import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
+
+/**
+ * The timeout code this module stamps on its own deadline, so `timeoutOf` can tell
+ * a timeout of ours apart from a caller's cancellation even when both were fused
+ * into one signal. The harness names this per capability (`BASH_TIMEOUT`); the
+ * symmetry is the point.
+ */
+export const SSH_TIMEOUT = 'SSH_TIMEOUT'
 import { NO_SHARE_FLAGS, type MuxSource, type PoolTicket } from './pool.ts'
 import { SshError } from './types.ts'
 import type { AuthMode, ProbeOutcome, ProbeStatus, RemoteRunResult, RemoteStatus, SshSettings } from './types.ts'
@@ -823,7 +832,14 @@ export class SshTransport {
       | { kind: 'timeout' }
       | { kind: 'cancelled' }
       | { kind: 'error'; message: string }
-    let timer: ReturnType<typeof setTimeout> | undefined
+    // One fused deadline carries both this plugin's own timeout and the caller's
+    // cancellation, so whichever fires first is the recorded cause: `AbortSignal.any`
+    // adopts the reason of the first aborter, and `timeoutOf` reads our code only
+    // when the timeout won. The hand-rolled version this replaces had to guess when
+    // a child died in the same instant its timer fired, and a guessed `timeout` on a
+    // call the reader had already cancelled sends them off to fix a server that was
+    // answering normally.
+    const d = deadline(external, deadlineMs, SSH_TIMEOUT)
     let settled: Settled
     try {
       settled = await new Promise<Settled>(resolve => {
@@ -832,13 +848,15 @@ export class SshTransport {
           .catch((error: unknown) => {
             resolve({ kind: 'error', message: error instanceof Error ? error.message : String(error) })
           })
-        timer = setTimeout(() => {
+        const onDeadline = (): void => {
           controller.abort()
-          resolve(external?.aborted === true ? { kind: 'cancelled' } : { kind: 'timeout' })
-        }, deadlineMs)
+          resolve(timeoutOf(d.signal, SSH_TIMEOUT) === undefined ? { kind: 'cancelled' } : { kind: 'timeout' })
+        }
+        if (d.signal.aborted) onDeadline()
+        else d.signal.addEventListener('abort', onDeadline, { once: true })
       })
     } finally {
-      if (timer !== undefined) clearTimeout(timer)
+      d[Symbol.dispose]()
     }
 
     if (settled.kind !== 'exit') {
