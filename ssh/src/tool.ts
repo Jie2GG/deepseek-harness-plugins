@@ -566,12 +566,12 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           {
             type: 'object',
             additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'edit', required: true }, path: { type: 'string' }, type: { type: 'string', enum: ['file', 'directory', 'other', 'missing'] }, replaced: { type: 'integer' }, matches: { type: 'integer' }, bytesBefore: { type: 'integer' }, bytesAfter: { type: 'integer' }, backup: { type: 'string' }, size: { type: 'integer' }, durationMs: { type: 'integer' } },
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'edit', required: true }, path: { type: 'string' }, type: { type: 'string', enum: ['file', 'directory', 'other', 'missing'] }, replaced: { type: 'integer' }, matches: { type: 'integer' }, bytesBefore: { type: 'integer' }, bytesAfter: { type: 'integer' }, backup: { type: 'string' }, size: { type: 'integer' }, durationMs: { type: 'integer' }, timeoutMs: { type: 'integer' }, outputBytes: { type: 'integer' }, notes: { type: 'array', items: { type: 'string' } }, stdoutSpillPath: { type: 'string' }, stderrSpillPath: { type: 'string' }, },
           },
           {
             type: 'object',
             additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', enum: ['upload', 'download'], required: true }, localPath: { type: 'string' }, remotePath: { type: 'string' }, bytes: { type: 'integer' }, recursive: { type: 'boolean' }, overwrote: { type: 'boolean' } },
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', enum: ['upload', 'download'], required: true }, localPath: { type: 'string' }, remotePath: { type: 'string' }, bytes: { type: 'integer' }, recursive: { type: 'boolean' }, overwrote: { type: 'boolean' }, bytesLimit: { type: 'integer' }, timeoutMs: { type: 'integer' }, notes: { type: 'array', items: { type: 'string' } } },
           },
           {
             type: 'object',
@@ -586,12 +586,12 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           {
             type: 'object',
             additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'read', required: true }, path: { type: 'string' }, type: { type: 'string', enum: ['file', 'directory', 'other', 'missing'] }, size: { type: 'integer' }, content: { type: 'string' }, entriesText: { type: 'string' }, bytes: { type: 'integer' }, lines: { type: 'integer' }, truncated: { type: 'boolean' }, stdoutSpillPath: { type: 'string' }, timeoutMs: { type: 'integer' }, outputBytes: { type: 'integer' }, notes: { type: 'array', items: { type: 'string' } }, durationMs: { type: 'integer' } },
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'read', required: true }, path: { type: 'string' }, type: { type: 'string', enum: ['file', 'directory', 'other', 'missing'] }, size: { type: 'integer' }, content: { type: 'string' }, entriesText: { type: 'string' }, bytes: { type: 'integer' }, lines: { type: 'integer' }, truncated: { type: 'boolean' }, stdoutSpillPath: { type: 'string' }, stderrSpillPath: { type: 'string' }, timeoutMs: { type: 'integer' }, outputBytes: { type: 'integer' }, notes: { type: 'array', items: { type: 'string' } }, durationMs: { type: 'integer' } },
           },
           {
             type: 'object',
             additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'write', required: true }, path: { type: 'string' }, bytes: { type: 'integer' }, overwrote: { type: 'boolean' }, durationMs: { type: 'integer' } },
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'write', required: true }, path: { type: 'string' }, bytes: { type: 'integer' }, overwrote: { type: 'boolean' }, durationMs: { type: 'integer' }, timeoutMs: { type: 'integer' }, outputBytes: { type: 'integer' }, notes: { type: 'array', items: { type: 'string' } }, stdoutSpillPath: { type: 'string' }, stderrSpillPath: { type: 'string' }, },
           },
         ],
       },

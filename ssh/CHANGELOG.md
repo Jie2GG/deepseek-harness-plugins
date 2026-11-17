@@ -17,6 +17,41 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.29
+
+### Fixed
+
+- **`upload`, `download`, `write`, and `edit` were rejected by the plugin's own
+  output schema** — since 0.0.24. The bounds round stamped the numbers that actually
+  applied (`bytesLimit`, `timeoutMs`, `notes`, and for file calls `outputBytes` plus
+  the spill paths) onto results, the tool spreads the result into the payload, and
+  the payload branches for those four actions still declared
+  `additionalProperties: false` without the new fields. The registry therefore
+  matched the payload against **no branch at all**: `value must match exactly one
+  oneOf branch (matched 0)`.
+- The damage was worse than an error message because of the ordering: the work had
+  already been done before the payload was checked. A download copied the file, a
+  `write` created it on the server, and *then* the reader was told the call returned
+  invalid output — so the model could not see that its own action had succeeded, and
+  the sensible retry duplicates a file write.
+- `read` and `exec` were unaffected because their branches had been updated when
+  those fields were introduced, which is how the failure looked partial and
+  arbitrary.
+
+### Notes
+
+- Why the suite missed it, and what changed so it cannot again: the tool suite's fake
+  `ops` returns hand-written results, and those fakes never carried the stamped
+  fields — so the tests validated a payload shape production was not producing. The
+  fakes for `upload`/`download` now return exactly what `ops` returns (echoed
+  ceilings present, and an empty `notes` list omitted, because `ops` omits it), and
+  the transfer case carries a real capping receipt so the declared field is exercised
+  rather than merely allowed.
+- Found by running it, not by reading it: this is the first live pass over the four
+  file/transfer actions after the bounds change.
+- 124 tests across eleven suites are green; `tsc` clean, `oxlint` 0 warnings and 0
+  errors. Version 0.0.28 → 0.0.29 under the three-segment rule.
+
 ## 0.0.28
 
 ### Fixed

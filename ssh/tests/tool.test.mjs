@@ -277,11 +277,13 @@ function fakeOps () {
     },
     async upload (params) {
       this.seen.push(['upload', params])
-      return { action: 'upload', ok: true, status: 'moved', target: { id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9' }, localPath: params.localPath, remotePath: params.path, bytes: 5, durationMs: 7 }
+      // Mirrors what ops really hands back, stamped fields included: a branch schema
+      // that forgets one of them fails here, not against a live server.
+      return { action: 'upload', ok: true, status: 'moved', target: { id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9' }, localPath: params.localPath, remotePath: params.path, bytes: 5, durationMs: 7, bytesLimit: 33_554_432, timeoutMs: 30_000 } // ops omits an empty notes list entirely
     },
     async download (params) {
       this.seen.push(['download', params])
-      return { action: 'download', ok: true, status: 'moved', target: { id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9' }, localPath: params.localPath, remotePath: params.path, bytes: 5, durationMs: 7 }
+      return { action: 'download', ok: true, status: 'moved', target: { id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9' }, localPath: params.localPath, remotePath: params.path, bytes: 5, durationMs: 7, bytesLimit: 33_554_432, timeoutMs: 30_000, notes: ['transfer ceiling asked for 999999999 and was capped to 536870912'] }
     },
     async setSessionTarget (params) { this.seen.push(['setSessionTarget', params]); return { sessionId: params.sessionId, targetId: params.targetId, setAt: 'x' } }
   }
