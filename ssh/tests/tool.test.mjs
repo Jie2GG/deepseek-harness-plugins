@@ -17,8 +17,9 @@ import {
 } from '../lib/tool.js'
 import { defaultBounds } from '../lib/bounds.js'
 import { DRAIN_MS } from '../lib/transport.js'
+import { createOps } from '../lib/ops.js'
 import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
-import { assertPayloadValid } from './helpers.mjs'
+import { assertPayloadValid, fakeRunner, fakeStore, fakeSecrets, record } from './helpers.mjs'
 
 const snapshot = (over = {}) => ({
   id: 'ssh-a1b2c3d4e5',
@@ -620,4 +621,144 @@ test('a promoted exec renders as a hand-over, not as a failure, and validates', 
     return harness.definition.output.render({ action: 'exec', command: 'sleep 1' }, body)[0].text
   })()
   assert.match(capped, /\[command timeout asked for 900000 and was capped to 300000\]/)
+})
+
+// ── ⑤ the edit assembly wired to the real ops, on a server that keeps score ─
+// The 0.0.32 defect, in one sentence: the parameter schema declared `dryRun`,
+// the model sent it, and the edit case quietly never handed it to ops — so the
+// "preview" really wrote the file and left a `.dsh-bak` behind. The `fakeOps`
+// above cannot catch that class of bug: it answers from its own copy of the
+// params either way, and a field the executor forgot to set looks identical to
+// a field nobody sent. These tests run the shipped `execute` against the real
+// `ops.editRemote` on a fake transport that plays the server — the file's
+// contents, the backup, and the write count are assertable facts — and capture
+// the params at the tool-to-ops seam, where the boolean was being dropped.
+function remoteEditHarness (initial, path = '/srv/x') {
+  const { runner, state } = fakeRunner()
+  const store = fakeStore({ records: [record()] })
+  const server = { files: new Map([[path, initial]]), writes: 0, backups: [] }
+  const at = () => new Date().toISOString()
+  state.nextRun = (command, options) => {
+    if (command.startsWith('if [ ! -f')) {
+      return server.files.has(path)
+        ? { status: 'succeeded', at: at(), exitCode: 0, stdout: server.files.get(path), stderr: '', durationMs: 2 }
+        : { status: 'exit-nonzero', at: at(), exitCode: 20, stdout: '', stderr: '', durationMs: 1 }
+    }
+    // The real write round trip is an optional `cp -p` chained to an in-place
+    // `cat >`; playing both is what lets a test check the promise instead of
+    // trusting it.
+    if (command.includes('cp -p')) server.backups.push({ backupPath: `${path}.dsh-bak`, content: server.files.get(path) })
+    if (command.includes('cat >')) {
+      server.writes += 1
+      server.files.set(path, options.stdin ?? '')
+    }
+    return { status: 'succeeded', at: at(), exitCode: 0, stdout: '', stderr: '', durationMs: 3 }
+  }
+  const real = createOps({
+    runner,
+    store: async () => store,
+    secrets: () => fakeSecrets({ password: true, passphrase: false }),
+    askpass: () => ({ ready: true, path: '/tmp/h/askpass.sh' }),
+    onInventoryChanged: () => {}
+  })
+  const seen = []
+  const ops = {
+    ...real,
+    async editRemote (params, signal) {
+      seen.push(params)
+      return real.editRemote(params, signal)
+    }
+  }
+  const { definition, exec } = toolHarness(ops)
+  return { definition, exec, seen, server, state, path }
+}
+
+test('edit dryRun reaches ops through the executor and previews without touching the server', async () => {
+  const h = remoteEditHarness('one\nbeta two\n')
+  const payload = await h.definition.execute({ action: 'edit', path: h.path, oldText: 'beta', newText: 'BETA', dryRun: true }, h.exec)
+  // ① The seam that was broken: ops must receive the flag the model sent.
+  assert.equal(h.seen.length, 1)
+  assert.equal(h.seen[0].dryRun, true, 'the executor must forward dryRun to ops')
+  // ② The ops preview branch ran: a preview result with the diff, registry-valid.
+  assert.equal(payload.ok, true)
+  assert.equal(payload.dryRun, true)
+  assert.match(payload.diff, /-beta/)
+  assert.match(payload.diff, /\+BETA/)
+  assert.equal(payload.backup, undefined)
+  assertPayloadValid(h.definition.output.schema, payload)
+  // ③ And the server says the preview was real: no write child, no backup file,
+  // the bytes exactly as they were, and only the one read the check needed.
+  assert.equal(h.server.writes, 0)
+  assert.deepEqual(h.server.backups, [])
+  assert.equal(h.server.files.get(h.path), 'one\nbeta two\n')
+  assert.equal(h.state.calls.filter(c => c.kind === 'run').length, 1)
+  // The reader-facing text names the preview too.
+  const rendered = h.definition.output.render({ action: 'edit', path: h.path }, payload)[0].text
+  assert.match(rendered, /\(dry run\)/)
+  assert.match(rendered, /would replace/)
+})
+
+test('an ambiguous dry run refuses at the match check, before any write, like the real edit would', async () => {
+  const h = remoteEditHarness('beta\nbeta')
+  const payload = await h.definition.execute({ action: 'edit', path: h.path, oldText: 'beta', newText: 'BETA', dryRun: true }, h.exec)
+  assert.equal(payload.ok, false)
+  assert.equal(payload.matches, 2)
+  assert.equal(payload.dryRun, undefined) // a refusal is not a preview result
+  assertPayloadValid(h.definition.output.schema, payload)
+  assert.equal(h.server.writes, 0)
+  assert.deepEqual(h.server.backups, [])
+})
+
+test('an edit without dryRun still writes through and keeps its backup', async () => {
+  const h = remoteEditHarness('one\nbeta two\n')
+  const payload = await h.definition.execute({ action: 'edit', path: h.path, oldText: 'beta', newText: 'BETA' }, h.exec)
+  assert.equal(h.seen[0].dryRun, undefined) // absent means write, the old default
+  assert.equal(payload.dryRun, undefined)
+  assert.equal(payload.ok, true)
+  assert.equal(payload.backup, `${h.path}.dsh-bak`)
+  assertPayloadValid(h.definition.output.schema, payload)
+  assert.equal(h.server.writes, 1)
+  assert.equal(h.server.files.get(h.path), 'one\nBETA two\n')
+  assert.deepEqual(h.server.backups, [{ backupPath: `${h.path}.dsh-bak`, content: 'one\nbeta two\n' }])
+})
+
+test('dryRun false is a real edit, exactly like dryRun absent', async () => {
+  const h = remoteEditHarness('alpha\nbeta\ngamma')
+  const payload = await h.definition.execute({ action: 'edit', path: h.path, oldText: 'beta', newText: 'BETA', dryRun: false }, h.exec)
+  assert.equal(h.seen[0].dryRun, undefined) // an explicit false never enters the preview branch
+  assert.equal(payload.dryRun, undefined)
+  assert.equal(payload.ok, true)
+  assertPayloadValid(h.definition.output.schema, payload)
+  assert.equal(h.server.writes, 1)
+  assert.equal(h.server.files.get(h.path), 'alpha\nBETA\ngamma')
+  assert.equal(h.server.backups.length, 1) // the default backup stands
+})
+
+test('backup false, all, and replaceFirst ride the same path unbroken', async () => {
+  // The three edit booleans that worked before must keep working after: a fix
+  // that added dryRun by rebuilding the assembly would regress exactly here.
+  const noBackup = remoteEditHarness('abc')
+  const skipped = await noBackup.definition.execute({ action: 'edit', path: noBackup.path, oldText: 'b', newText: 'z', backup: false }, noBackup.exec)
+  assert.equal(noBackup.seen[0].backup, false)
+  assert.equal(noBackup.seen[0].dryRun, undefined)
+  assert.equal(skipped.backup, undefined)
+  assert.equal(noBackup.server.backups.length, 0)
+  assert.equal(noBackup.server.writes, 1)
+  assert.equal(noBackup.server.files.get(noBackup.path), 'azc')
+  const many = remoteEditHarness('x x x')
+  const every = await many.definition.execute({ action: 'edit', path: many.path, oldText: 'x', newText: 'y', all: true }, many.exec)
+  assert.equal(many.seen[0].all, true)
+  assert.equal(every.replaced, 3)
+  assert.equal(many.server.files.get(many.path), 'y y y')
+  const once = remoteEditHarness('x x x')
+  const first = await once.definition.execute({ action: 'edit', path: once.path, oldText: 'x', newText: 'y', replaceFirst: true }, once.exec)
+  assert.equal(once.seen[0].replaceFirst, true)
+  assert.equal(first.replaced, 1)
+  assert.equal(once.server.files.get(once.path), 'y x x')
+})
+
+test('readArgs maps dryRun like every other field the interface declares', () => {
+  assert.equal(readArgs({ name: 'ssh_client', arguments: { action: 'edit', dryRun: true } }).dryRun, true)
+  assert.equal(readArgs({ name: 'ssh_client', arguments: { action: 'edit', dryRun: false } }).dryRun, false)
+  assert.equal(readArgs({ name: 'ssh_client', arguments: { action: 'edit', dryRun: 'yes' } }).dryRun, undefined) // a string is not a boolean
 })

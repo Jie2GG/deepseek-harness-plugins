@@ -163,6 +163,8 @@ export interface RemoteCallArgs {
   all?: boolean | undefined
   replaceFirst?: boolean | undefined
   backup?: boolean | undefined
+  /** For `edit`: preview the change without writing or backing up; the match rules are the real ones. */
+  dryRun?: boolean | undefined
   overwrite?: boolean | undefined
   append?: boolean | undefined
   mkdir?: boolean | undefined
@@ -222,6 +224,7 @@ export function readArgs(exec: Readonly<PendingCall>): RemoteCallArgs {
     all: typeof raw.all === 'boolean' ? raw.all : undefined,
     replaceFirst: typeof raw.replaceFirst === 'boolean' ? raw.replaceFirst : undefined,
     backup: typeof raw.backup === 'boolean' ? raw.backup : undefined,
+    dryRun: typeof raw.dryRun === 'boolean' ? raw.dryRun : undefined,
     tty: typeof raw.tty === 'boolean' ? raw.tty : undefined,
     input: typeof raw.input === 'string' ? raw.input : undefined,
     background: typeof raw.background === 'boolean' ? raw.background : undefined,
@@ -823,6 +826,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           if (call.all === true) params.all = true
           if (call.replaceFirst === true) params.replaceFirst = true
           if (call.backup === false) params.backup = false
+          if (call.dryRun === true) params.dryRun = true
           const edited = await operations.editRemote(params, signal)
           await rememberSessionTarget(operations, sessionId, call, edited)
           return { ...edited } as never

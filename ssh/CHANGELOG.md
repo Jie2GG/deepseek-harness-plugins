@@ -17,6 +17,40 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.33
+
+Phase 2D: the one defect the deployed 0.0.32 showed in the field — the `edit`
+preview previewed everything except the server. Reproduced twice against a live
+Host: an `ssh_client` call with `dryRun: true` came back having written the
+file and left a `.dsh-bak` behind, because the tool layer never handed the flag
+down.
+
+### Fixed
+
+- **`dryRun: true` now reaches the operations layer.** 0.0.32 shipped the whole
+  preview branch in `ops.editRemote` and declared the parameter in the schema,
+  but the edit case in `tool.ts` assembled its params without the field:
+  `RemoteCallArgs` never declared `dryRun`, so the line that would have
+  forwarded it failed the type check and simply was not there, and the missing
+  declaration is how a dropped boolean survived review. The fix is the
+  interface field, the one forwarded flag at the seam, and the `readArgs`
+  mapping the interface's own comment has always demanded. Absent and an
+  explicit `false` keep the plain write path exactly as it was, and `all`,
+  `replaceFirst`, and `backup` ride through unchanged.
+
+### Notes
+
+- The regression now lives where the defect was: the executor's edit case, the
+  real `ops.editRemote`, and a fake transport that plays the server — the
+  file's bytes, the backups taken, and the write count are asserted as facts,
+  not inferred from the payload. Pulling the forward line out of the built
+  module makes the preview tests fail; leaving it broken made every ops-level
+  suite stay green, which is the gap that let 0.0.32 ship a preview that wrote.
+- 169 tests across the shipped suites green; `tsc` clean; no schema, no
+  wording, and no other action's behaviour moved — the texts already promised
+  "no write, no backup", and from here they tell the truth. Version
+  0.0.32 → 0.0.33, pending its own re-verification on a real Host.
+
 ## 0.0.32
 
 Phase 2C: the preview the plan asked for, the concurrency promise made true (or
