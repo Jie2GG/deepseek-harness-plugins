@@ -11,8 +11,17 @@
 /** Absolute path of the plugin's route on the shared `/api` channel. */
 export const RPC_ROUTE_PATH = '/api/ssh/rpc'
 
-/** RPC names the page may invoke; every other name is refused before dispatch. */
-export const RPC_METHODS = ['list', 'save', 'remove', 'probe', 'probeAll', 'run', 'resolve', 'upload', 'download', 'setSessionTarget', 'clearSessionTarget', 'configUpdate'] as const
+/**
+ * RPC names the page may invoke; every other name is refused before dispatch.
+ *
+ * This is the page's surface, not the operations surface: `runCommand`, the two
+ * transfers, and the session-target setters live on the same `ops` object the
+ * agent tool drives directly, and five entries had simply been mirrored here
+ * without any caller. The list states what the settings page actually sends, so
+ * a method appearing here means a control exists to invoke it — and the one
+ * GET-reachable name stays `list`.
+ */
+export const RPC_METHODS = ['list', 'save', 'remove', 'probe', 'probeAll', 'resolve', 'configUpdate'] as const
 
 /** One RPC name as it travels on the wire. */
 export type RpcMethod = (typeof RPC_METHODS)[number]

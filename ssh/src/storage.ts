@@ -176,7 +176,12 @@ export const connectionRecordSchema = z.object({
   updatedAt: instantSchema,
   lastProbe: probeOutcomeSchema.optional(),
   auth: authModeSchema.default('key'),
-  /** Whether the agent may reach this target at all; `off` hides it from tools. */
+  /**
+   * Whether the agent may reach this target at all. `off` does **not** hide the
+   * target from the tool's list — it stays visible — and instead refuses every
+   * call addressed to it, with the refusal naming the setting. Hiding and
+   * refusing read the same in a comment and behave nothing alike.
+   */
   agentAccess: z.enum(['on', 'off']).default('on'),
   /** Whether later calls to this target ride on this call's connection. */
   pool: poolChoiceSchema.default('on'),

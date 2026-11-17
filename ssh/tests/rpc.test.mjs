@@ -63,8 +63,9 @@ test('SshError codes map onto the documented statuses, field and hint included',
 })
 
 test('an unexpected throw becomes a prefixed internal, never a stack dump', async () => {
-  const ops = { ...spyOps(), runCommand: async () => { throw new Error('boom of the store') } }
-  const { response, body } = await call(createRpcHandler(ops), { method: 'POST', body: JSON.stringify({ method: 'run', params: { command: 'x' } }) })
+  // `probeAll` takes no params, so the throw — not the input — is what answers.
+  const ops = { ...spyOps(), probeAll: async () => { throw new Error('boom of the store') } }
+  const { response, body } = await call(createRpcHandler(ops), { method: 'POST', body: JSON.stringify({ method: 'probeAll' }) })
   assert.equal(response.status, 500)
   assert.equal(body.error.code, 'internal')
   assert.ok(body.error.message.startsWith('ssh: boom'))

@@ -49,16 +49,14 @@ const SCRIPT = [
   '',
 ].join('\n')
 
-/** A ready askpass path, or the reason one is unavailable. */
-export interface AskPassFace {
-  /** Absolute path of the helper, once prepared. */
-  readonly path: string | undefined
-  /** Why preparation failed, when it did. */
-  readonly failure: string | undefined
-}
-
-/** Owns the private directory and the helper script for one activation. */
-export class AskPassHelper implements AskPassFace {
+/**
+ * Owns the private directory and the helper script for one activation.
+ *
+ * It structurally satisfies the transport's `AskPassSource` — one contract,
+ * declared where it is consumed; the duplicate face this class used to
+ * implement added a name without adding a check.
+ */
+export class AskPassHelper {
   #directory: string | undefined
   #script: string | undefined
   #failure: string | undefined

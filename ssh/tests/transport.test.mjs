@@ -386,3 +386,46 @@ test('sixteen children fill the global ceiling and the seventeenth is refused', 
   after.abort()
   assert.equal((await ok).outcome, 'cancelled')
 })
+
+// ── a named identity pins the authentication order ─────────────────────────
+test('a named identityFile arrives with IdentitiesOnly, and only when one is named', () => {
+  const plain = bare.sshOptions({ host: '10.0.0.9' }, CEILINGS, { mode: 'key' }, 10_000).flags
+  assert.ok(!plain.includes('IdentitiesOnly=yes')) // no named key: the client's own defaults stand
+  assert.ok(!plain.includes('-i'))
+  const named = bare.sshOptions({ host: '10.0.0.9', identityFile: '/home/deploy/.ssh/id_ed25519' }, CEILINGS, { mode: 'key' }, 10_000).flags
+  const at = named.indexOf('-i')
+  assert.ok(at >= 0)
+  assert.equal(named[at + 1], '/home/deploy/.ssh/id_ed25519')
+  // The option rides right behind the key it belongs to, and before the user's
+  // own extra arguments, so `-o IdentitiesOnly=no` there still wins.
+  assert.equal(named[at + 2], '-o')
+  assert.equal(named[at + 3], 'IdentitiesOnly=yes')
+  const overridden = bare.sshOptions({ host: '10.0.0.9', identityFile: '/k', extraArgs: ['-o', 'IdentitiesOnly=no'] }, CEILINGS, { mode: 'key' }, 10_000).flags
+  assert.ok(overridden.indexOf('IdentitiesOnly=yes') < overridden.indexOf('IdentitiesOnly=no'))
+})
+
+test('the ssh -G view carries the same IdentitiesOnly a real child gets', async () => {
+  const seen = []
+  const transport = new SshTransport({
+    subprocess: {
+      resolveExecutable: async () => '/usr/bin/ssh',
+      spawn (options) {
+        seen.push(options.argv)
+        return {
+          done: Promise.resolve({ exitCode: 0, signal: null }),
+          collected: {
+            stdout: { readFrom: () => ({ text: 'hostname 10.0.0.9\n', nextOffset: 18, lossy: false }) },
+            stderr: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) }
+          },
+          terminate () {},
+          waitForExit: async () => true
+        }
+      }
+    }
+  })
+  await transport.resolve({ host: '10.0.0.9', identityFile: '/home/deploy/.ssh/id_ed25519' }, CEILINGS)
+  const argv = seen[0].join(' ')
+  // A resolve card that showed a different configuration than the children run
+  // would manufacture drift out of nothing.
+  assert.match(argv, /-i \/home\/deploy\/\.ssh\/id_ed25519 -o IdentitiesOnly=yes/u)
+})

@@ -79,8 +79,12 @@ keeps running while you edit values on the second.
   remaining lines are this Host's fixed rules — how many remote operations run at
   once, how many servers may each hold one shared connection, how long an idle
   connection stays open, how many targets one **Test all** round covers, and how
-  long a probe waits (thirty seconds, with the download's size pre-check keeping
-  its own ten).
+  long a probe waits (thirty seconds, with the copy's size pre-check keeping its
+  own ten and the copy itself keeping its own five minutes), and how many copies
+  and jobs may hold a slot at once. The ceilings the page and a call can move —
+  command deadline, output capture, transfer size and transfer deadline — are
+  resolved from the same defaults-and-caps table above, and a number that comes
+  down to a cap is echoed back as what actually ran.
 
 ## Using it from the chat
 
@@ -91,9 +95,15 @@ download, and hand a long-running command to the background to read its output i
 pieces or stop it later. Commands can also be run elevated: as another account
 through sudo (the plugin answers sudo with that target's stored login password),
 or — where sudo is missing — as root through su (answered with a third secret
-slot, root's own password, which you save on the target form). Either way the
+slot, root's own password, which you save on the target form). A target that
+names a private key gets `-o IdentitiesOnly=yes` alongside it, so an agent full
+of other keys cannot burn the server's authentication attempts before the named
+key is tried; name no key and the client's own defaults stand. Either way the
 password is injected into the command behind the scenes: it never appears in the
-conversation. Once it
+conversation. The prompt and an `input` body speak the same one stdin, and the
+prompt reads first, so elevation and input refuse each other up front — `su`
+always, and `as` whenever a login password is stored; the `sudo -n` shape (no
+stored password) is the one combination where the body arrives intact. Once it
 names a server, that conversation keeps using it, so a follow-up like "now the disk
 usage" does not repeat the host. Add or remove a target and the choices the agent
 sees follow on the next turn, with no conversation restart.
@@ -104,7 +114,11 @@ you are asked at all. A conversation set to *never ask* answers every request as
 rejection, decided before anyone can weigh in — so in that kind of conversation the
 plugin runs the asking calls rather than refusing them on your behalf. Turning a
 target's **agent access** off is still a hard no, and a conversation that does ask
-you still gets the confirmation.
+you still gets the confirmation. The opposite case — a profile with no approval
+service mounted at all, or a call with no conversation to route a question
+through — is *not* treated as that standing decision: the ask goes to the core,
+and the core refuses it with a reason naming what is missing. Full-access mode is
+consent somebody stated; an unreachable approver is nobody saying yes.
 
 What runs without interrupting you:
 
@@ -119,9 +133,13 @@ What runs without interrupting you:
 | anything against a target with **agent access** turned off | refused |
 
 A fresh target has an **empty allowlist**, and that asks about every command on
-it; list the programs you trust if those should run unattended. An allowlisted
-program is a bare name (`git`, `systemctl`); a pipeline, a redirect, or a
-substitution is never treated as one program, so it is always shown to you. A
+it; both switches — agent access and the no-approval list — are edited on the
+target form, and the row shows an `agent access off` chip and a count chip for a
+non-empty list. The list is a no-approval list, not a sandbox and not a limit:
+listing `git` lets a bare `git …` run without asking, and constrains nothing
+else about it. An allowlisted program is a bare name (`git`, `systemctl`); a
+pipeline, a redirect, or a substitution is never treated as one program, so it
+is always shown to you. A
 conversation that will not ask at all — its approval policy is *never ask* — runs
 those calls instead of refusing them, because in that conversation an ask is settled
 as a rejection before anyone can weigh in; turning a target's **agent access** off is
@@ -229,11 +247,16 @@ call rather than the next restart:
 | --- | --- | --- | --- |
 | `timeoutMs` / `maxTimeoutMs` | 30 s | 300 s | One foreground remote command, and the most any layer (page, target, one call) may ask for |
 | `outputBytes` / `maxOutputBytes` | 64 KiB | 4 MiB | Per-stream in-memory capture — stdout and stderr each get their own |
-| `transferBytes` / `maxTransferBytes` | 32 MiB | 512 MiB | One copy |
+| `transferBytes` / `maxTransferBytes` | 32 MiB | 512 MiB | One copy — the single-file ceiling a pre-check measures against |
+| `transferTimeoutMs` / `maxTransferTimeoutMs` | 5 min | 30 min | The whole budget of one copy, on its own clock: a transfer never borrows the command's 30 s, and a call's `timeoutMs` on the transfer actions reads as "how long to wait for the copy" |
+| `maxTransferFiles` | 500 | — | Pre-check cap on how many files one recursive upload may carry, counted at walk time |
+| `maxTransferTotalBytes` | 512 MiB | — | Pre-check cap on the cumulative bytes of one recursive upload, also at walk time |
+| `maxConcurrentTransfers` | 2 | 16 | How many copies may hold one of the 16 operation slots at once, so transfers cannot starve commands |
+| `maxRunningJobs` | 8 | 16 | How many explicitly backgrounded jobs may hold a slot at once; the rest stay reserved for foreground calls |
 | `probeTimeoutMs` | 30 s | — | How long a connectivity test waits; the page has no field for it |
-| `statTimeoutMs` | 10 s | — | The size-and-type pre-check one download asks first |
+| `statTimeoutMs` | 10 s | — | The size-and-type pre-check a copy asks before moving bytes |
 | `maxSpillBytes` | 64 MiB | — | How large a spill file may grow; `0` writes none, and the result says there is no file to look for |
-| `promoteOnTimeout` | on | — | Hand a command that runs out of time to the job registry instead of killing it (**declared this round, not wired yet**) |
+| `promoteOnTimeout` | on | — | Hand a command that runs out of time to the job registry instead of killing it |
 | `graceMs` | 2 s | — | SIGTERM to SIGKILL grace for a child |
 
 Two things follow from that, and both are worth knowing before you reach for the
@@ -308,4 +331,13 @@ classified result.
   working-directory services; a profile missing any of them keeps the plugin
   inactive rather than failing. `write` and `upload` replace files in place: nothing
   on the server is versioned or rolled back, and a directory download must be asked
-  for recursively.
+  for recursively. An upload is guarded at both ends before `scp` runs — the local
+  file's existence, readability and size (for a tree, the count and cumulative bytes
+  too), and the remote destination, which survives unless `overwrite` says otherwise;
+  a download lands in a temporary sibling and is renamed into place only on a clean
+  finish, so a cancelled, timed-out or failed copy leaves no half file. All of those
+  are pre-checks against what `stat` said at that moment — not gates on the bytes
+  that move: a file growing during a copy can still push more through. An `edit` is
+  read → compute → `cat >`, in place: a server-side change between the read and the
+  write is overwritten without a version check, and `dryRun: true` previews the
+  match count and the diff without writing or backing anything up.

@@ -57,3 +57,34 @@ test('whitespace and indentation are part of the needle', () => {
   const indented = applyEdit({ content: '  beta\n', oldText: '  beta', newText: 'x' })
   assert.equal(indented.ok, true)
 })
+
+// ── previewEdit: what a dry run shows, and what it admits it cut ───────────
+import { previewEdit } from '../lib/edit.js'
+
+test('previewEdit trims the unchanged ends and shows only the change with context', () => {
+  const before = ['one', 'two', 'three', 'four', 'five'].join('\n')
+  const after = ['one', 'two', 'TWO', 'four', 'five'].join('\n')
+  const out = previewEdit(before, after)
+  assert.equal(out.text, after)
+  assert.deepEqual(out.diff.split('\n'), [' one', ' two', '-three', '+TWO', ' four', ' five'])
+  assert.equal(out.truncated, false)
+  assert.equal(out.bytesBefore, Buffer.byteLength(before))
+  assert.equal(out.bytesAfter, Buffer.byteLength(after))
+})
+
+test('previewEdit caps a long change and says so instead of drowning the reader', () => {
+  const before = Array.from({ length: 100 }, (_, i) => `old ${String(i)}`).join('\n')
+  const after = Array.from({ length: 100 }, (_, i) => `new ${String(i)}`).join('\n')
+  const out = previewEdit(before, after, 10)
+  const lines = out.diff.split('\n')
+  assert.equal(lines.length, 11)
+  assert.match(lines[10], /90 more line\(s\) not shown/)
+  assert.equal(out.truncated, true)
+})
+
+test('previewEdit of an identical text is an empty diff, not a fake hunk', () => {
+  const same = 'x\ny\n'
+  const out = previewEdit(same, same)
+  assert.equal(out.diff, '')
+  assert.equal(out.truncated, false)
+})

@@ -30,7 +30,10 @@ import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
  * into one signal. The harness names this per capability (`BASH_TIMEOUT`); the
  * symmetry is the point.
  */
-export const SSH_TIMEOUT = 'SSH_TIMEOUT'
+const SSH_TIMEOUT = 'SSH_TIMEOUT'
+
+/** The local-only budget for one `ssh -G` print; see {@link SshTransport.resolve}. */
+const RESOLVE_BUDGET_MS = 5_000
 import { NO_SHARE_FLAGS, type MuxSource, type PoolTicket } from './pool.ts'
 import { SshError } from './types.ts'
 import type { AuthMode, ProbeOutcome, ProbeStatus, RemoteRunResult, RemoteStatus, SshSettings } from './types.ts'
@@ -730,7 +733,15 @@ export class SshTransport {
     }
     // scp names the port -P; only ssh takes -p.
     if (target.port !== undefined) flags.push(options.portFlag ?? '-p', String(target.port))
-    if (target.identityFile !== undefined) flags.push('-i', target.identityFile)
+    // A named identity comes with its authentication order pinned: without
+    // `IdentitiesOnly`, an ssh-agent holding several keys tries them *first* and
+    // a server with the usual three-attempt limit locks the caller out before the
+    // named key is ever offered (`too many authentication failures` is in the
+    // classification table for exactly that reason). The flag only lands when the
+    // reader named a key themselves — omit it and the client's own defaults,
+    // agent included, stay in charge. `extraArgs` lands after these, so a target
+    // that wants the old behavior can still write `-o IdentitiesOnly=no`.
+    if (target.identityFile !== undefined) flags.push('-i', target.identityFile, '-o', 'IdentitiesOnly=yes')
     if (target.proxyJump !== undefined) flags.push('-J', target.proxyJump)
     if (target.extraArgs !== undefined) flags.push(...target.extraArgs)
     const env: NodeJS.ProcessEnv | undefined = needsSecret && helper !== undefined
@@ -799,17 +810,6 @@ export class SshTransport {
     }
   }
 
-  /**
-   * Start one child, wait for its bounded outcome, and read the drained streams.
-   * @param program - resolved executable to run.
-   * @param argvTail - arguments after the program, never shell-interpreted.
-   * @param settings - the capture ceiling to honour.
-   * @param env - the explicit child environment additions.
-   * @param deadlineMs - the whole budget for this child.
-   * @param controller - the lane's cancellation controller.
-   * @param external - an optional caller signal (a tool call's own cancellation).
-   * @returns the outcome class, exit facts, drained streams, and duration.
-   */
   /**
    * Start one child through the provider and wire the cancellation edges.
    * @param program - the resolved executable.
@@ -1023,8 +1023,7 @@ export class SshTransport {
       return withPoolNote(outcome, ticket)
     } finally {
       this.unshare(ticket)
-      this.#controllers.delete(controller)
-      this.#inFlight -= 1
+      this.#releaseLane(controller)
     }
   }
 
@@ -1058,13 +1057,18 @@ export class SshTransport {
       }
       const flags: string[] = []
       if (target.port !== undefined) flags.push('-p', String(target.port))
-      if (target.identityFile !== undefined) flags.push('-i', target.identityFile)
+      // The `ssh -G` view has to carry the same flag the real children get, or the
+      // resolve card would show a configuration drift that does not exist.
+      if (target.identityFile !== undefined) flags.push('-i', target.identityFile, '-o', 'IdentitiesOnly=yes')
       if (target.proxyJump !== undefined) flags.push('-J', target.proxyJump)
       if (target.extraArgs !== undefined) flags.push(...target.extraArgs)
-      return await this.#collect(program, ['-G', ...flags, this.authority(target)], settings, undefined, 5_000, controller)
+      // The five seconds here is not a caller-facing ceiling and deliberately does
+      // not join the bounds layer: `ssh -G` dials nothing, so this is only the
+      // patience of a local config print. A profile's command or transfer budget
+      // has no bearing on it, and it has no claim on theirs.
+      return await this.#collect(program, ['-G', ...flags, this.authority(target)], settings, undefined, RESOLVE_BUDGET_MS, controller)
     } finally {
-      this.#controllers.delete(controller)
-      this.#inFlight -= 1
+      this.#releaseLane(controller)
     }
   }
 
@@ -1245,8 +1249,7 @@ export class SshTransport {
       return withRunNote(result, ticket)
     } finally {
       this.unshare(ticket)
-      this.#controllers.delete(controller)
-      this.#inFlight -= 1
+      this.#releaseLane(controller)
     }
   }
 }

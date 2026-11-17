@@ -12,7 +12,7 @@ import { SshError } from '../lib/types.js'
 import { fakeRunner, fakeStore, fakeSecrets, record } from './helpers.mjs'
 import { defaultBounds } from '../lib/bounds.js'
 
-function build ({ records = [record()], store, secrets, askpassReady = true, localExists = false, jobs, options, bounds } = {}) {
+function build ({ records = [record()], store, secrets, askpassReady = true, localExists = false, jobs, bounds } = {}) {
   const { runner, state } = fakeRunner()
   const storeObj = store ?? fakeStore({ records })
   const sec = secrets ?? fakeSecrets({ password: true, passphrase: false })
@@ -24,7 +24,6 @@ function build ({ records = [record()], store, secrets, askpassReady = true, loc
     askpass: () => (askpassReady ? { ready: true, path: '/tmp/h/askpass.sh' } : { ready: false, failure: 'no tmp dir' }),
     localExists: async () => localExists,
     ...(jobs === undefined ? {} : { jobs }),
-    ...(options === undefined ? {} : { options }),
     ...(bounds === undefined ? {} : { bounds }),
     onInventoryChanged: () => { changed.count += 1 }
   })
@@ -788,6 +787,27 @@ test('a profile with no job registry never attempts a hand-over', async () => {
   await ops.runCommand({ command: 'uptime' })
   assert.equal(state.calls.some(c => c.kind === 'run'), true)
   assert.equal(state.calls.some(c => c.kind === 'startRun'), false)
+})
+
+test('edit dryRun previews the change without writing, backing up, or re-reading more', async () => {
+  const { ops, state } = build()
+  state.nextRun = () => ({ status: 'succeeded', at: iso, exitCode: 0, stdout: 'alpha\nbeta\ngamma', stderr: '', durationMs: 3, truncated: false })
+  const out = await ops.editRemote({ path: '/srv/x', oldText: 'beta', newText: 'BETA', dryRun: true })
+  assert.equal(out.dryRun, true)
+  assert.equal(out.replaced, 1)
+  assert.match(out.diff, /-beta/)
+  assert.match(out.diff, /\+BETA/)
+  assert.equal(out.backup, undefined) // no backup: nothing was written
+  assert.equal(state.calls.filter(c => c.kind === 'run').length, 1) // only the read it needed
+  // The match rules are the real rules: an ambiguous dry run refuses exactly as
+  // the write would, and counts the matches.
+  const twice = build()
+  twice.state.nextRun = () => ({ status: 'succeeded', at: iso, exitCode: 0, stdout: 'beta\nbeta', stderr: '', durationMs: 3, truncated: false })
+  const amb = await twice.ops.editRemote({ path: '/srv/x', oldText: 'beta', newText: 'BETA', dryRun: true })
+  assert.equal(amb.ok, false)
+  assert.equal(amb.matches, 2)
+  assert.equal(amb.dryRun, undefined)
+  assert.equal(twice.state.calls.filter(c => c.kind === 'run').length, 1)
 })
 
 // ── cancellation: the caller's signal rides every child this layer starts ──

@@ -17,6 +17,81 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.32
+
+Phase 2C: the preview the plan asked for, the concurrency promise made true (or
+told), and the dead code the review had already located in the source.
+
+### Added
+
+- **`edit` takes `dryRun: true`.** The match is found and counted under exactly
+  the real rules — an ambiguous match refuses a preview as it refuses a write —
+  the before/after byte sizes and a line diff come back, and nothing else
+  happens: no write, no backup, no child beyond the read the preview needs
+  anyway. `previewEdit` (in `edit.ts`, pure and tested) trims the unchanged ends
+  and caps the diff at 80 lines, saying out loud when it cut short — a preview
+  that dumps the whole file has stopped being a preview. No new insert/delete
+  actions: an anchor-plus-empty-`newText` edit already says both, and the
+  parameter now states that too.
+- **A named `identityFile` now brings `-o IdentitiesOnly=yes`.** Without it, an
+  ssh-agent holding several keys offers them first, and a server counting
+  authentication attempts locks the named key out before it is tried —
+  `too many authentication failures` has been in the classification table since
+  the start, and this is the fix for its most common cause. No key named,
+  nothing added; `extraArgs` land after and still override; the `ssh -G` view
+  carries the same pair, so the resolve card shows what the children run.
+- **The tool declares `isConcurrencySafe` — for the two reads only.**
+  `get_connection` and `read` may join a parallel batch; every mutating action
+  stays exclusive, because the harness contract asks whether parallel dispatch
+  is safe and no remote filesystem here makes read-modify-write transactional.
+  The model-facing sentence that used to promise "several can run at once" now
+  states which ones, and a test pins the description and the classifier to the
+  same claim.
+
+### Changed
+
+- **The RPC allowlist is the page's surface now.** `run`, `upload`, `download`,
+  `setSessionTarget`, and `clearSessionTarget` had been mirrored into the route
+  without any control ever invoking them; they are refused at the gate like any
+  unknown name, and the `ops` methods behind them stay (the agent tool drives
+  those directly). The README's route table matches what the page sends.
+
+### Removed
+
+- Dead weight the source could confirm dead, each with the check that found it:
+  the `@deepseek-ai/dsh-output-retention` dependency (zero imports; spill has
+  always come from the subprocess provider), `OpsDeps.options` and
+  `FileCallOptions` (never passed by any assembly; the fallback they fed was a
+  constant `undefined`), `resolveProbeTimeout` and `listSessionTargets` (no
+  callers), `AskPassFace` (the transport's `AskPassSource` is the same contract
+  in one place), the exported name `SSH_TIMEOUT` (internal since the fused
+  deadline replaced hand-rolled guessing), an orphaned JSDoc block documenting
+  a replaced `#collect` signature, the field-by-field job-source remap (both
+  shapes were structurally identical; the map rebuilt the same object), and the
+  five manual lane-release copies collapsed into the one `#releaseLane`.
+- Stale wording: the `ls`/`run`/`targets` action names in model-facing and
+  module comments (0.0.12-era verbs), and the storage comment claiming
+  `agentAccess: off` "hides it from tools" — it never did, and does not: the
+  target stays listed and every call addressed to it is refused, in words.
+
+### Notes
+
+- The edit write stays in-place `cat >`: the review's own §6 keeps the
+  inode/owner/mode-preserving direction, and temp-plus-rename would trade that
+  for atomicity the remote cannot guarantee anyway (a server-side change between
+  the read and the write has no version check either way). The limitation is now
+  stated in the tool, the README, and both DETAIL languages instead of being a
+  silent property; `dryRun` carries the confirmation duty.
+- The per-target ceiling layer (`remoteTimeoutMs` / `maxOutputBytes` on a
+  record) stays, contrary to the review's R3 suggestion to drop it: it is
+  reachable through a documented `save` payload, an existing test pins the
+  layering through it, and Phase 2 promised no schema surgery. What it needs is
+  a page control, which is a new-feature conversation, not a cleanup.
+- 163 tests across fifteen suites green; `tsc` clean; the plugin's own check and
+  test commands are `pnpm run check` and `pnpm test` (build plus the node
+  suites); there is no separate lint configured in this package. Version
+  0.0.31 → 0.0.32.
+
 ## 0.0.31
 
 Phase 2B: the permission surface a human can actually reach, and the resource

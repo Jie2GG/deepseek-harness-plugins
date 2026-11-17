@@ -43,11 +43,11 @@ ssh/
     ├── secrets.ts            # password and passphrase records in the credential store
     ├── askpass.ts            # the private helper that answers an ssh prompt
     ├── tool.ts               # the agent-facing `ssh_client` tool and its policy gate
-    ├── transfer.ts           # scp moves, with a remote size and type pre-check
+    ├── transfer.ts           # scp moves, pre-checked at both ends; downloads land by rename
     ├── local-path.ts         # the workspace boundary a local transfer path obeys
     ├── edit.ts               # the pure match-and-replace rules behind `edit`
     ├── jobs.ts               # a backgrounded remote command on the harness job registry
-    ├── ops.ts                # one method per RPC name, transport-agnostic
+    ├── ops.ts                # every capability in one transport-agnostic object; the page and the tool share it
     ├── rpc.ts                # Request → Response, failure code → HTTP status
     ├── client.ts             # browser half: the page, its tabs, and its icon
     └── client-globals.d.ts   # ambient window/navigator; never emitted to lib/
@@ -118,12 +118,15 @@ Body `{ method, params? }`, result `{ ok: true, result }` or
 | `save` | `{ connection, secrets? }` (no `id` = create) | `{ connection, connections }` |
 | `remove` | `{ id }` | `{ removed, orphanSecrets, connections }` |
 | `probe` | `{ id }` or `{ draft, secrets? }` | `{ connection?, probe?, connections }` |
-| `run` | `{ command, target?, sessionId?, timeoutMs?, maxOutputBytes?, tty?, input?, as?, su? }` | `{ run, connection?, connections }` |
 | `resolve` | `{ target?, sessionId? }` | `{ action: 'resolve', ok, target, resolved, stored, differs, text? }` |
-| `upload` / `download` | `{ path, localPath, localDir?, target?, sessionId?, recursive?, overwrite?, maxBytes?, timeoutMs? }` | the transfer result |
-| `setSessionTarget` / `clearSessionTarget` | `{ sessionId, targetId? }` | `{ sessionTarget }` |
 | `probeAll` | – | `{ connections, probed, skipped, failures }` |
 | `configUpdate` | `{ settings }` | `{ settings }` |
+
+The allowlist is the page's surface, not the operations surface: `runCommand`,
+`upload`, `download`, and the session-target setters live on the same `ops`
+object the agent tool drives directly, and since 0.0.32 the five entries no
+control ever invokes are refused at the gate like any unknown name (the
+`ops` methods themselves remain).
 
 `GET` reaches only `list`; the route rides the shared `/api` channel, so only the
 owner peer of the served page is admitted and every other principal is refused.
@@ -366,7 +369,7 @@ bundle is the live proof of that).
 
 | Field | Shape |
 | --- | --- |
-| `action` | `get_connection` \| `exec` \| `read` \| `write` \| `edit` \| `upload` \| `download` — `exec` also takes `background: true` — `read` answers a directory listing, a file's text, or a refusal, depending on what the path is |
+| `action` | `get_connection` \| `exec` \| `read` \| `write` \| `edit` \| `upload` \| `download` — `exec` also takes `background: true` — `read` answers a directory listing, a file's text, or a refusal, depending on what the path is — `edit` also takes `dryRun: true` to preview the change and its diff without writing or backing anything up |
 | `localPath`, `recursive` | the local side of a transfer; relative paths resolve inside the conversation workspace |
 | `target` | id, display name (any case), `host`, or `user@host`; omitted means this conversation's chosen target, then a lone saved target |
 | `command` / `path` / `content` | the remote command line, an absolute remote path, and the exact text to write |
@@ -386,10 +389,17 @@ Two notes on that field table, both pinned by `tests/tool.test.mjs`:
   conversation's choice (`rememberSessionTarget` writes the `sessions` row only
   for a call that succeeded and named a server on purpose), so the next call can
   leave `target` out.
-- The `parameters` schema now declares all twenty-two fields the body reads; until
+- The `parameters` schema now declares all twenty-three fields the body reads; until
   0.0.16 the seven the `edit` and prompt-answering calls use (`oldText`, `newText`,
   `all`, `replaceFirst`, `backup`, `tty`, `input`) arrived undeclared and survived
-  only the defensive reader, and 0.0.20 added `as`/`su` alongside them.
+  only the defensive reader, 0.0.20 added `as`/`su` alongside them, and 0.0.32
+  added `dryRun` for the `edit` preview.
+- The tool declares `isConcurrencySafe` for the two reads only — `get_connection`
+  and `read` — so the harness may run several of those in one parallel batch.
+  Every action that changes something stays exclusive: the transport *could* run
+  mutations concurrently, but no remote filesystem here makes read-modify-write
+  transactional, and the declaration is about what is safe to interleave, not
+  about what the plumbing survives.
 
 Policy is decided in `tools/pre-execute`, not inside the tool, which is what the
 tool-authoring docs prescribe for deployment policy:
@@ -400,7 +410,8 @@ tool-authoring docs prescribe for deployment policy:
 | `exec` carrying `as` or `su` | **ask, always** — sudo is a master key, and an allowlist hit on the inner program never consented to another account; the prompt names the account and which stored secret it will spend |
 | `exec`, its one bare leading program is on a **non-empty** `allowedCommands` | allow — the same verdict applies to a backgrounded command |
 | `exec`, any other command: an unlisted program, an **empty allowlist** (what a fresh target has, so every command is asked), or a pipeline / redirection / substitution (no single leading program) | **ask** |
-| any `ask`, in a conversation whose approval policy is `never` | **allow** — the core rejects unanswered asks by policy, so asking there is a self-inflicted refusal |
+| any `ask`, in a conversation whose approval policy is `never` (full-access mode) | **allow** — the core rejects unanswered asks by policy, so asking there is a self-inflicted refusal; this is consent the deployment stated on purpose |
+| any `ask` whose approval surface is unreachable — no `approval` service mounted, or no session to route through (`unavailable`) | **ask**, and the core answers with its fail-closed denial that names the missing piece. Since 0.0.30 `unavailable` is no longer merged with `never`: the absence of anyone who could consent is not itself consent, and a remote write in a profile with no approval surface is refused rather than silently run |
 | `write`, `edit`, `upload` | **ask** |
 | `download` | allow (it reads the server and writes inside the session workspace, which the file pipeline already governs) |
 | any action on a target with `agentAccess: off` | deny, naming the settings page |
@@ -413,6 +424,13 @@ allowlist, and the `get_connection` render line prints `allowlist=none(ask
 every command)` — both pinned by `tests/tool.test.mjs`, which asserts the
 description and the gate agree on the same call. (`0.10.0` intended this; the
 strings drifted at 3786005 and the gate never moved.)
+
+Both switches are edited in the target form since 0.0.31: an **agent access**
+checkbox (off shows an `agent access off` chip on the row) and a **no-approval
+programs** field. The field is a no-approval list, not a sandbox and not a
+limit: it only decides which single-program commands skip the asking, it does
+not restrict what arguments a listed program receives, and it cannot make a
+write safe. The page's own hint states the same.
 
 An `ask` is resolved by the harness approval UI (`ctx.approval`, answered through
 the standard tool-approval surface) with `displayReason` supplied in English and
@@ -602,7 +620,7 @@ still open:
    remote call keeps rendering in the harness's generic tool row — see the note
    under **Verified contracts**.
 
-## Limits of 0.0.26
+## Limits of 0.0.32
 
 - The settings page is inventory, probes, resolve, and ceilings only: running
   commands, editing files, and moving bytes reach the server through the
@@ -639,6 +657,31 @@ still open:
 - `edit` refuses a file larger than the read ceiling rather than replacing text it
   never saw, and `write` / `edit` / `upload` change the server in place: nothing
   there is versioned beyond the optional `<path>.dsh-bak` copy an `edit` takes.
+  This is a preview-and-confirm flow, not a transaction: between an `edit`'s read
+  and its `cat >` write a server-side change is overwritten without a version
+  check, and a child killed mid-write leaves the file cut short — the undo is the
+  backup, not a rollback. Since 0.0.32 `edit` takes `dryRun: true`: the match is
+  counted and a line diff comes back, and nothing is written, backed up, or
+  dialed beyond the read the preview needs anyway.
+- The elevation prompt and an `input` body share the one stdin, and the prompt
+  reads first: `su` with input is refused up front, and so is `as` with input
+  whenever a login password is stored. The single coexistence that is real —
+  `as` with no stored password, which runs `sudo -n` and so never prompts —
+  keeps working: the body arrives intact on a NOPASSWD host and fails fast,
+  with a reason, anywhere else.
+- A named `identityFile` arrives with `-o IdentitiesOnly=yes`: without it, an
+  ssh-agent holding several keys offers them first, and a server that counts
+  attempts locks out the one key the reader named before it is ever tried. Name
+  no key and nothing is added — the client's own defaults, agent included, stand
+  — and `-o IdentitiesOnly=no` in the target's extra arguments still wins,
+  because those land after the plugin's flags. The `ssh -G` resolve view carries
+  the same pair, so the card shows what the children actually run.
+- The local edge of a transfer is lexical: `localPath` is matched against the
+  conversation's workspace directory by prefix, without resolving symlinks — a
+  choice `src/local-path.ts` states out loud. A symlink planted inside the
+  workspace therefore sends a download wherever that link points; the check
+  keeps a model from typing arbitrary absolute paths, and it does not claim to
+  confine inodes.
 - A download dispatches `fs/write-intent` before `scp` runs, with the tool
   execution as the actor, which is how the external write still lands in the
   conversation's change summary (the recorder reads the before-image from that

@@ -230,14 +230,6 @@ export class TargetStore {
   }
 
   /**
-   * Every conversation choice, for the page's picker.
-   * @returns the stored rows.
-   */
-  listSessionTargets(): SessionTarget[] {
-    return Array.from(this.#sessions().entries(), ([, row]) => row)
-  }
-
-  /**
    * Forget one conversation's choice.
    * @param sessionId - the DSH Session id.
    * @returns `true` when a row was removed.

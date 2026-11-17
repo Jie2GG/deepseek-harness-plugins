@@ -234,16 +234,6 @@ export function resolveTransferDeadline(bounds: Bounds, requested?: number): Res
 }
 
 /**
- * The probe deadline, which has no stored layer: the page never edited it and the
- * plan is that it stays a rule rather than becoming a fourth field.
- * @param bounds - the live bounds.
- * @returns the deadline one probe waits to.
- */
-export function resolveProbeTimeout(bounds: Bounds): number {
-  return bounds.probeTimeoutMs
-}
-
-/**
  * One short sentence naming what a resolution corrected, for the tail of a result
  * a reader is already looking at. Kept objective — the value and the cap, no
  * advice — because advice belongs in the card and the tool description.

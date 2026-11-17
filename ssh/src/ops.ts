@@ -16,7 +16,7 @@ import type { Bounds, CeilingLayers, ResolvedSettings } from './bounds.ts'
 import { SshError } from './types.ts'
 import type { AuthMode, ConnectionRecord, ConnectionView, ProbeOutcome, ResolvedConfig, RemoteRunResult, RemoteTransferResult, SshSettings, StoredSettings } from './types.ts'
 import { transfer } from './transfer.ts'
-import { applyEdit } from './edit.ts'
+import { applyEdit, previewEdit } from './edit.ts'
 import { startRemoteJob } from './jobs.ts'
 import type { JobRegistry } from './jobs.ts'
 import { shellQuote, leadingProgram, classifyCollectedRun } from './transport.ts'
@@ -113,6 +113,12 @@ export interface RemoteFileResult {
   bytesAfter?: number
   /** For `edit`: the backup copy left behind, when one was taken. */
   backup?: string
+  /** For `edit`: true when the call previewed the change instead of writing it. */
+  dryRun?: boolean
+  /** For a `dryRun` edit: the line view of what would change, possibly cut short. */
+  diff?: string
+  /** For a `dryRun` edit: true when `diff` was cut short. */
+  diffTruncated?: boolean
   /** Exit code of the remote command. */
   exitCode?: number | null
   /** Duration of the whole call. */
@@ -251,8 +257,6 @@ export interface OpsDeps {
    * holder of the registration decides whether to re-register.
    */
   onInventoryChanged?: (() => void) | undefined
-  /** Optional per-call overrides the tool layer passes down. */
-  options?: FileCallOptions
   /** The harness job registry, when the profile mounts one. */
   jobs?: JobRegistry | undefined
   /**
@@ -378,12 +382,6 @@ function pickTarget(state: TargetStore, params: Params): ConnectionRecord {
   })
 }
 
-/** Options one remote file call may override. */
-export interface FileCallOptions {
-  /** Output ceiling for this call. */
-  maxOutputBytes?: number
-}
-
 /**
  * Build the operations over one runner, one storage handle and one credential face.
  * @param deps - the assembled dependencies.
@@ -392,7 +390,6 @@ export interface FileCallOptions {
 export function createOps(deps: OpsDeps): Ops {
   const { runner, store, secrets, askpass } = deps
   const liveBounds = deps.bounds ?? defaultBounds
-  const options = deps.options ?? {}
   const localExists = deps.localExists
   const inventoryChanged = deps.onInventoryChanged
   const jobs = deps.jobs
@@ -625,7 +622,7 @@ export function createOps(deps: OpsDeps): Ops {
     const asked = typeof params.maxOutputBytes === 'number' ? params.maxOutputBytes : undefined
     const resolved = ceilings(globalSettings, record, {
       ...call,
-      maxOutputBytes: asked ?? call.maxOutputBytes ?? options.maxOutputBytes,
+      maxOutputBytes: asked ?? call.maxOutputBytes,
     })
     const settings = resolved.settings
     const auth = await authFor(record.id, record.auth)
@@ -1255,10 +1252,39 @@ export function createOps(deps: OpsDeps): Ops {
           ...(outcome.reason === 'ambiguous' ? { matches: outcome.found } : {}),
         }
       }
+      if (params.dryRun === true) {
+        // The preview path: the match was found and the replacement text
+        // computed, and the server keeps its file. Nothing is written, no
+        // backup is taken, and the only thing dialed was the read this call
+        // needed anyway. `matches` semantics on refusal are unchanged: a dry
+        // run refuses an ambiguous match exactly like the real edit would.
+        const preview = previewEdit(read.stdout ?? '', outcome.text)
+        return {
+          action: 'edit',
+          ok: true,
+          status: 'succeeded',
+          target,
+          path,
+          type: 'file',
+          dryRun: true,
+          replaced: outcome.count,
+          bytesBefore: preview.bytesBefore,
+          bytesAfter: preview.bytesAfter,
+          ...(preview.diff === '' ? {} : { diff: preview.diff }),
+          ...(preview.truncated ? { diffTruncated: true } : {}),
+          ...(read.durationMs === undefined ? {} : { durationMs: read.durationMs }),
+          hint: 'Dry run: nothing was written and no backup was taken. The same call without dryRun applies this change.',
+        }
+      }
       // Written back through the same inode with `cat >`, so the file keeps its
       // owner and mode; a `cp` of a temp file over it would not. The optional
       // backup is a `cp -p` first, which is cheap next to a remote round trip and
       // is the only undo available on a server this plugin does not version.
+      // The trade, stated rather than hidden: the write is in place, not atomic.
+      // A child killed between truncation and the last byte leaves the file cut
+      // short — the backup is the undo — and a server-side change between the
+      // read and this write is overwritten without a version check. This is a
+      // preview-and-confirm flow, not a transaction.
       const backupPath = `${path}.dsh-bak`
       const prepare = params.backup === false ? '' : `cp -p -- ${quoted} ${shellQuote(backupPath)} && `
       const wrote = await runner.run(targetOf(record), settings, auth, `${prepare}cat > ${quoted}`, {
@@ -1405,13 +1431,10 @@ export function createOps(deps: OpsDeps): Ops {
             return { message: 'No ssh program was found: PATH and the usual install locations were tried.' }
           }
           return {
-            sources: live.sources.map(source => ({
-              channel: source.channel,
-              read: (fromByte: number) => {
-                const read = source.read(fromByte)
-                return { text: read.text, nextOffset: read.nextOffset, lossy: read.lossy, ...(read.spillPath === undefined ? {} : { spillPath: read.spillPath }) }
-              },
-            })),
+            // Structural all the way down: the transport's source shape and the
+            // registry adapter's are the same fields, so this used to remap field
+            // by field into an identical object. One copy of the shape, passed.
+            sources: live.sources,
             kill: live.kill,
             finished: live.finished,
           }

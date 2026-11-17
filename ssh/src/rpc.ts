@@ -129,18 +129,8 @@ async function dispatch(ops: Ops, method: RpcMethod, params: Params): Promise<un
       return await ops.probe(params)
     case 'probeAll':
       return await ops.probeAll()
-    case 'run':
-      return await ops.runCommand(params)
     case 'resolve':
       return await ops.resolveRemote(params)
-    case 'upload':
-      return await ops.upload(params)
-    case 'download':
-      return await ops.download(params)
-    case 'setSessionTarget':
-      return await ops.setSessionTarget(params)
-    case 'clearSessionTarget':
-      return await ops.clearSessionTarget(params)
     case 'configUpdate':
       return await ops.configUpdate(params)
   }

@@ -257,9 +257,10 @@ export function findTarget(catalog: readonly TargetSnapshot[], args: RemoteCallA
 /**
  * Decide whether one call may run as it is, must ask a human, or is refused.
  *
- * The rule the settings page documents: `ls`, `read`, and `targets` are reads;
- * `write` changes the server; `run` is free only for a program the target
- * allowlists, and an empty allowlist means every command is asked about.
+ * The rule the settings page documents: `get_connection`, `read`, and `download`
+ * are reads; `write`, `edit`, and `upload` change the server; `exec` runs unasked
+ * only for a program the target's no-approval list names, and an empty list means
+ * every command is asked about.
  * @param target - the resolved target, or `undefined` when it is unresolved.
  * @param args - the call arguments.
  * @returns the verdict and the text to show a human.
@@ -479,7 +480,7 @@ export function describeRemote(targets: TargetBrief[]): string {
     : `Choose the server this conversation means and pass it as \`target\`. Available aliases: ${targets
       .map(target => `\`${target.label}\` (${target.user === undefined || target.user === '' ? '' : `${target.user}@`}${target.host})`)
       .join(', ')}.`
-  return `Runs commands and moves files on a stored SSH server, with the credentials the plugin holds. ${list} A call addresses one server: leave \`target\` out to reuse the one this conversation last used. Nothing is interpreted by a local shell; the command string is executed by the login shell on the server. \`get_connection\`, \`read\`, and \`download\` are reads; \`read\` answers with a directory listing when the path is a directory and with the file's text when it is a file; \`exec\`, \`write\`, \`edit\`, and \`upload\` may be refused by the user, and an \`exec\` runs unasked only when its one bare leading program is named by that target's command allowlist — a fresh target names no programs there, so every command on it is asked about first. Pass \`as: "root"\` (or another account) to elevate through sudo, or \`su: true\` to reach root with the stored root password: either way the plugin injects the secret into the command's own stdin, so no password ever appears in the conversation. Add \`background: true\` to leave a long command running, then poll it with the harness's \`job_output\` and \`job_kill\` tools. Calls to one server share the connection the first of them opened, which is why several can run at once; a target shown as \`pool off\` dials a fresh connection every time.`
+  return `Runs commands and moves files on a stored SSH server, with the credentials the plugin holds. ${list} A call addresses one server: leave \`target\` out to reuse the one this conversation last used. Nothing is interpreted by a local shell; the command string is executed by the login shell on the server. \`get_connection\`, \`read\`, and \`download\` are reads; \`read\` answers with a directory listing when the path is a directory and with the file's text when it is a file; \`exec\`, \`write\`, \`edit\`, and \`upload\` may be refused by the user, and an \`exec\` runs unasked only when its one bare leading program is named by that target's command allowlist — a fresh target names no programs there, so every command on it is asked about first. Pass \`as: "root"\` (or another account) to elevate through sudo, or \`su: true\` to reach root with the stored root password: either way the plugin injects the secret into the command's own stdin, so no password ever appears in the conversation. Add \`background: true\` to leave a long command running, then poll it with the harness's \`job_output\` and \`job_kill\` tools. Several \`get_connection\` or \`read\` calls may run at once; everything that changes something runs one at a time. Calls to one server share the connection the first of them opened, so consecutive calls skip the handshake even when they run in turn; a target shown as \`pool off\` dials a fresh connection every time.`
 }
 
 /**
@@ -567,7 +568,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
       },
       target: { type: 'string', description: targetParamHint(deps.targetsOf?.() ?? []) },
       command: { type: 'string', description: 'For `exec`: the command line to execute on the server, as one string. Quote anything that must survive the remote shell.' },
-      path: { type: 'string', description: 'For `ls`, `read`, `write`: an absolute remote path, or one starting with `~/`. Shell metacharacters are refused.' },
+      path: { type: 'string', description: 'For `read`, `write`, `edit`, `upload`, `download`: an absolute remote path, or one starting with `~/`. Shell metacharacters are refused.' },
       content: { type: 'string', description: 'For `write`: the exact text to put in the remote file; it is sent on stdin, never as an argument.' },
       overwrite: { type: 'boolean', description: 'For `write`: replace an existing remote file instead of refusing.' },
       append: { type: 'boolean', description: 'For `write`: append to the remote file instead of replacing it.' },
@@ -584,6 +585,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
       all: { type: 'boolean', description: 'For `edit`: replace every occurrence instead of refusing when the text matches more than once.' },
       replaceFirst: { type: 'boolean', description: 'For `edit`: replace only the first occurrence when the text matches more than once.' },
       backup: { type: 'boolean', description: 'For `edit`: defaults to true, leaving a `<path>.dsh-bak` copy; pass false to skip it.' },
+      dryRun: { type: 'boolean', description: 'For `edit`: preview the change without writing. The match is checked and counted exactly as a real edit, the diff comes back, and the server keeps its file — no write, no backup. An ambiguous match is refused here just as it would be on a real write.' },
       as: { type: 'string', description: 'For `exec`: run the command as another account through sudo (`root` for the plain elevation). The plugin forces a terminal and answers sudo with the target\u2019s stored login password; the password never appears in the conversation.' },
       su: { type: 'boolean', description: 'For `exec`: switch to root through su, answered with the target\u2019s stored root password (a third secret slot, set in the target form). Use when sudo is unavailable and root\u2019s password differs from the login password. Cannot be combined with `as`, and not available for backgrounded commands.' },
     },
@@ -593,7 +595,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           {
             type: 'object',
             additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'edit', required: true }, path: { type: 'string' }, type: { type: 'string', enum: ['file', 'directory', 'other', 'missing'] }, replaced: { type: 'integer' }, matches: { type: 'integer' }, bytesBefore: { type: 'integer' }, bytesAfter: { type: 'integer' }, backup: { type: 'string' }, size: { type: 'integer' }, durationMs: { type: 'integer' }, timeoutMs: { type: 'integer' }, outputBytes: { type: 'integer' }, notes: { type: 'array', items: { type: 'string' } }, stdoutSpillPath: { type: 'string' }, stderrSpillPath: { type: 'string' }, },
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'edit', required: true }, path: { type: 'string' }, type: { type: 'string', enum: ['file', 'directory', 'other', 'missing'] }, replaced: { type: 'integer' }, matches: { type: 'integer' }, bytesBefore: { type: 'integer' }, bytesAfter: { type: 'integer' }, backup: { type: 'string' }, dryRun: { type: 'boolean' }, diff: { type: 'string' }, diffTruncated: { type: 'boolean' }, size: { type: 'integer' }, durationMs: { type: 'integer' }, timeoutMs: { type: 'integer' }, outputBytes: { type: 'integer' }, notes: { type: 'array', items: { type: 'string' } }, stdoutSpillPath: { type: 'string' }, stderrSpillPath: { type: 'string' }, },
           },
           {
             type: 'object',
@@ -637,6 +639,20 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
       },
     },
     timeoutMs: callBudgetMs,
+    // The harness parallelizes only what this classifier vouches for, so the
+    // vouch is narrow on purpose: `get_connection` reads the plugin's own
+    // inventory, and `read` runs `ls`/`cat` on the server without changing
+    // anything. The shared local state they touch — lane counters, the pool
+    // ledger, session memory — is maintained by synchronous, commuting updates.
+    // Everything else mutates a remote filesystem this plugin cannot make
+    // transactional (no version or mtime check exists between a read and a
+    // write), so it stays exclusive even though the transport *could* run it
+    // concurrently: the question the contract asks is whether parallel dispatch
+    // is safe, not whether the plumbing survives it.
+    isConcurrencySafe: (args: unknown): boolean => {
+      const action = typeof args === 'object' && args !== null ? (args as { action?: unknown }).action : undefined
+      return action === 'get_connection' || action === 'read'
+    },
     presentCall: (args) => {
       const call = args as RemoteCallArgs
       const label = call.command !== undefined ? call.command : call.path ?? call.action
@@ -839,8 +855,8 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
 }
 
 /**
- * Shape the `targets` result: presence of secrets and the last probe status, and
- * never a value.
+ * Shape the `get_connection` result: presence of secrets and the last probe
+ * status, and never a value.
  * @param connections - the stored rows with their secret presence.
  * @param settings - the shared ceilings, echoed for the reader.
  * @returns the canonical payload.
@@ -1089,12 +1105,19 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
       return lines.join('\n')
     }
     case 'edit': {
-      lines.push(`${where}: edit ${String(value.path)}`)
+      lines.push(`${where}: edit ${String(value.path)}${value.dryRun === true ? ' (dry run)' : ''}`)
       if (value.ok === true && typeof value.replaced === 'number') {
         const places = value.replaced === 1 ? '1 place' : `${String(value.replaced)} places`
+        const verb = value.dryRun === true ? 'would replace' : 'replaced'
         lines.push(typeof value.bytesBefore === 'number' && typeof value.bytesAfter === 'number'
-          ? `replaced ${places}, ${String(value.bytesBefore)} -> ${String(value.bytesAfter)} bytes${typeof value.backup === 'string' ? ` (backup: ${String(value.backup)})` : ''}`
-          : `replaced ${places}`)
+          ? `${verb} ${places}, ${String(value.bytesBefore)} -> ${String(value.bytesAfter)} bytes${typeof value.backup === 'string' ? ` (backup: ${String(value.backup)})` : ''}`
+          : `${verb} ${places}`)
+        // The preview text belongs in the transcript line by line: a reader
+        // comparing a dry run against the file needs the +/- shape, not a blob.
+        if (typeof value.diff === 'string' && value.diff !== '') {
+          for (const row of value.diff.split('\n')) lines.push(`| ${row}`)
+          if (value.diffTruncated === true) lines.push('| (the diff above is cut short; the counts and byte sizes are complete)')
+        }
       } else if (typeof value.matches === 'number') {
         // A refusal counts matches, not changes: nothing was written.
         lines.push(`matched ${String(value.matches)} times, so nothing was written`)

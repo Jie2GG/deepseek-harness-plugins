@@ -76,17 +76,17 @@ test('the rendered inventory line tells the model an empty allowlist asks', () =
 })
 
 // ── ② every field the body consumes is now declared in parameters ──────────
-test('parameters declare all twenty fields the body reads', () => {
+test('parameters declare all twenty-three fields the body reads', () => {
   const definition = buildRemoteTool({ ops: async () => ({}), catalog: async () => [] })
   // defineTool compiles the parameter DSL into a JSON schema object.
   assert.equal(definition.parameters.type, 'object')
   const declared = Object.keys(definition.parameters.properties)
   for (const field of ['action', 'target', 'command', 'path', 'content', 'overwrite', 'append', 'mkdir',
     'localPath', 'recursive', 'timeoutMs', 'background', 'maxBytes', 'tty', 'input',
-    'oldText', 'newText', 'all', 'replaceFirst', 'backup', 'as', 'su']) {
+    'oldText', 'newText', 'all', 'replaceFirst', 'backup', 'dryRun', 'as', 'su']) {
     assert.ok(declared.includes(field), `parameters schema is missing "${field}"`)
   }
-  assert.equal(declared.length, 22)
+  assert.equal(declared.length, 23)
   // The action enum and the required action field keep the shape honest.
   assert.deepEqual([...definition.parameters.properties.action.enum], [...REMOTE_TOOL_ACTIONS])
   assert.ok(definition.parameters.required.includes('action'))
@@ -510,6 +510,61 @@ test('presentationMeta and presentCall read only the canonical value', () => {
   assert.ok(definition.timeoutMs > longestTransfer + bounds.graceMs + DRAIN_MS)
   const expected = Math.max(bounds.maxTimeoutMs, longestTransfer) + bounds.graceMs + DRAIN_MS + 5_000
   assert.equal(definition.timeoutMs, expected)
+})
+
+test('only the reads are declared concurrency-safe, and the description says so too', () => {
+  const { definition } = toolHarness(fakeOps())
+  const safe = definition.isConcurrencySafe
+  assert.ok(safe, 'the classifier must be declared, not left to the exclusive default')
+  for (const args of [{ action: 'get_connection' }, { action: 'read', path: '/x' }]) {
+    assert.equal(safe(args), true, JSON.stringify(args))
+  }
+  // Every mutating action — and anything the classifier cannot read — stays
+  // exclusive. The transport could run them at once; the remote filesystem
+  // cannot promise what happens when two do.
+  for (const args of [
+    { action: 'exec', command: 'ls' },
+    { action: 'write', path: '/x', content: 'c' },
+    { action: 'edit', path: '/x', oldText: 'a', newText: 'b' },
+    { action: 'upload', path: '/x', localPath: '/y' },
+    { action: 'download', path: '/x', localPath: '/y' },
+    { action: 'teleport' },
+    {},
+    null
+  ]) {
+    assert.equal(safe(args), false, JSON.stringify(args))
+  }
+  // The sentence the model reads matches the classifier: reads may parallelize,
+  // changes run one at a time — no more promising what the declaration refuses.
+  const text = describeRemote([{ label: 'Proxy', host: '10.0.0.9' }])
+  assert.match(text, /Several `get_connection` or `read` calls may run at once/)
+  assert.match(text, /everything that changes something runs one at a time/)
+  assert.doesNotMatch(text, /which is why several can run at once/)
+})
+
+test('an edit dry run renders as a preview and validates against its branch', () => {
+  const { definition } = toolHarness(fakeOps())
+  const payload = {
+    action: 'edit',
+    ok: true,
+    status: 'succeeded',
+    target: { id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9' },
+    path: '/srv/x',
+    type: 'file',
+    dryRun: true,
+    replaced: 1,
+    bytesBefore: 17,
+    bytesAfter: 17,
+    diff: ' one\n-two\n+TWO\n five',
+    hint: 'Dry run: nothing was written and no backup was taken.'
+  }
+  assertPayloadValid(definition.output.schema, payload)
+  const lines = definition.output.render({ action: 'edit', path: '/srv/x' }, payload)
+  const text = lines.map(entry => entry.text).join('\n')
+  assert.match(text, /edit \/srv\/x \(dry run\)/)
+  assert.match(text, /would replace 1 place, 17 -> 17 bytes/)
+  assert.match(text, /\| -two/)
+  assert.ok(!text.includes('backup:')) // a preview takes none
 })
 
 test('every action keeps its schema honest when a producer forgets a field', () => {
