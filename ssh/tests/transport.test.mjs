@@ -171,3 +171,53 @@ test('a background call refused before its child started hands back the slot and
   assert.equal(transport.inFlight, 0)
   assert.equal(claims[0].released, 1)
 })
+
+// ── the spill file the provider can write, and the path it reports ─────────
+/**
+ * A subprocess provider that records what it was asked for and answers with a
+ * clipped stream whose full text lives at a path.
+ */
+function spillProvider (paths) {
+  const seen = []
+  return {
+    seen,
+    subprocess: {
+      resolveExecutable: async () => '/usr/bin/ssh',
+      spawn (spec) {
+        seen.push(spec)
+        return {
+          done: Promise.resolve({ exitCode: 0, signal: null }),
+          collected: {
+            stdout: { readFrom: () => ({ text: 'the tail', nextOffset: 8, lossy: true, ...(paths.stdout === undefined ? {} : { spillPath: paths.stdout }) }) },
+            stderr: { readFrom: () => ({ text: 'the err tail', nextOffset: 13, lossy: true, ...(paths.stderr === undefined ? {} : { spillPath: paths.stderr }) }) }
+          },
+          terminate () {},
+          waitForExit: async () => true
+        }
+      }
+    }
+  }
+}
+
+test('a ceiling with a spill budget asks the provider for the file', async () => {
+  const provider = spillProvider({ stdout: '/tmp/dsh-subprocess-1/out.log', stderr: '/tmp/dsh-subprocess-1/err.log' })
+  const transport = new SshTransport(provider)
+  const out = await transport.execute('/usr/bin/ssh', ['true'], { ...CEILINGS, maxSpillBytes: 64 * 1024 * 1024 }, undefined, 5_000, 'test call')
+  const stdio = provider.seen[0].stdio
+  assert.deepEqual(stdio.stdout, { maxBytes: 65_536, spill: { maxBytes: 67_108_864 } })
+  assert.deepEqual(stdio.stderr, { maxBytes: 65_536, spill: { maxBytes: 67_108_864 } })
+  // Both tails stay in the answer, and each points at the file holding its whole stream.
+  assert.equal(out.truncated, true)
+  assert.equal(out.stdoutSpillPath, '/tmp/dsh-subprocess-1/out.log')
+  assert.equal(out.stderrSpillPath, '/tmp/dsh-subprocess-1/err.log')
+})
+
+test('a spill budget of zero means no file is asked for, and nothing is promised', async () => {
+  const provider = spillProvider({})
+  const transport = new SshTransport(provider)
+  const out = await transport.execute('/usr/bin/ssh', ['true'], { ...CEILINGS, maxSpillBytes: 0 }, undefined, 5_000, 'test call')
+  assert.deepEqual(provider.seen[0].stdio.stdout, { maxBytes: 65_536 })
+  assert.equal('spill' in provider.seen[0].stdio.stdout, false)
+  assert.equal(out.truncated, true)
+  assert.equal(out.stdoutSpillPath, undefined) // the renderer's "(no spill file configured)" branch
+})

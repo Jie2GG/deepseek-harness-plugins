@@ -97,6 +97,10 @@ export interface RemoteFileResult {
   lines?: number
   /** Whether the ceiling clipped the text. */
   truncated?: boolean
+  /** The file holding the whole stream when the ceiling clipped stdout, if one survived. */
+  stdoutSpillPath?: string
+  /** The file holding the whole stream when the ceiling clipped stderr, if one survived. */
+  stderrSpillPath?: string
   /** Whether an existing remote file was replaced. */
   overwrote?: boolean
   /** For `edit`: how many places were replaced. */
@@ -505,6 +509,8 @@ export function createOps(deps: OpsDeps): Ops {
       ...(run.durationMs === undefined ? {} : { durationMs: run.durationMs }),
       ...(run.exitCode === undefined && run.status === 'succeeded' ? {} : { exitCode: run.exitCode ?? null }),
       ...(run.truncated === undefined ? {} : { truncated: run.truncated }),
+      ...(run.stdoutSpillPath === undefined ? {} : { stdoutSpillPath: run.stdoutSpillPath }),
+      ...(run.stderrSpillPath === undefined ? {} : { stderrSpillPath: run.stderrSpillPath }),
       ...(run.timeoutMs === undefined ? {} : { timeoutMs: run.timeoutMs }),
       ...(run.outputBytes === undefined ? {} : { outputBytes: run.outputBytes }),
       ...(run.notes === undefined ? {} : { notes: run.notes }),

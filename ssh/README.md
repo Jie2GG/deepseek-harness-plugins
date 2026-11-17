@@ -428,6 +428,20 @@ next round does not have to re-derive them:
   heals a dead master by dialing directly, for free, inside the call that needed
   it. A control socket named by a literal path (no `%h`/`%C` tokens) works for
   `-O` too, which is what makes an eviction targetable.
+- **The subprocess provider already owns output retention; the plugin only had to
+  ask.** A stream collect is `{ maxBytes, spill?: { maxBytes } }`, and "omitting
+  `spill` keeps only the in-memory tail" is documented behaviour
+  (`packages/subprocess/subprocess/src/types.ts:38-52`): with `spill` present, the
+  provider keeps the **tail** in memory because "errors and final results cluster
+  at the end", and writes the **complete** stream to a `0600` file under its own
+  `mkdtemp` 0700 per-process directory (`packages/subprocess/subprocess-local/src/
+  output.ts:126-128,160-213`), reporting the path as `spillPath` on the read. This
+  plugin passed `maxBytes` alone until 0.0.25, which is why "truncated" used to mean
+  "the rest is gone"; it now passes the spill budget too and carries the path into
+  the result and the transcript, in the same sentence shape the bash tool uses
+  (`packages/shell/tool-bash/src/render.ts:11-15`). A stream larger than the spill
+  cap has the file discarded — the plugin does not pretend otherwise: it names what
+  is absent rather than inventing a recovery.
 - **`ssh -N` ends by itself when a master is being left behind** — measured on the
   same live server while 0.0.23 was written, which is what the probe is built on:
   with `-o ControlMaster=auto -o ControlPath=… -o ControlPersist=300`, an `-N` call

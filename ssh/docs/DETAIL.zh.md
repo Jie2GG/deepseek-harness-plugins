@@ -166,7 +166,7 @@ bundle 插入的那一行现在**会读** `config:` 里的键了。每个可调�
 | `transferBytes` / `maxTransferBytes` | 32 MiB | 512 MiB | 一次复制的字节上限 |
 | `probeTimeoutMs` | 30 秒 | — | 一次连通性测试最多等多久（页面上没有这个框） |
 | `statTimeoutMs` | 10 秒 | — | 下载前那次「这文件多大」的时限 |
-| `maxSpillBytes` | 64 MiB | — | 溢出文件能写多大；填 0 表示不落溢出文件（**本轮已声明，下一版接上**：现在超界只保留内存里的尾部） |
+| `maxSpillBytes` | 64 MiB | — | 溢出文件能写多大；填 0 表示不落溢出文件（结果里会明说没有文件可找） |
 | `promoteOnTimeout` | 开 | — | 前台命令撞时限时改挂成后台任务，而不是杀掉（**本轮已声明，尚未生效**） |
 | `graceMs` | 2 秒 | — | 子进程 SIGTERM 到 SIGKILL 之间的宽限 |
 
@@ -196,6 +196,11 @@ harness 那句 `tool call timed out` 掐掉。
   真正执行命令的是 agent 的 `exec` 动作。
 - 插件包被就地替换后，正在运行的 Harness 会沿用旧的 Host 模块直到重启：重启之前 agent 还
   没有 `ssh` 工具，新的超时与上限也未生效。设置页与输入区那一行属于浏览器侧，会自己更新。
+- 超界的输出不再是「丢了尾巴就算了」：这条命令的完整 stdout / stderr 会被写进 provider
+  自己那份私有临时目录里的溢出文件，结果里直接给路径（`[output truncated; full output —
+  stdout: /tmp/dsh-subprocess-…/….log]`）。两种情况例外：profile 把 `maxSpillBytes` 设成
+  0（那就明确告诉你没有文件可找），或者整条流比 `maxSpillBytes` 还长（文件到点会被放弃，
+  只剩内存里的尾部）。文件在系统临时目录里，随宿主进程的清理走，不在这个会话的工作区。
 - 下载回来的文件会像被编辑过的工作区文件一样，出现在这轮对话的改动清单里：插件在复制开始
   之前先向文件系统管线申请许可。注意一个路径只在一轮里的第一次改动会留下改动前的快照，而子
   agent 的会话不在记录范围内。

@@ -581,12 +581,12 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           {
             type: 'object',
             additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'exec', required: true }, command: { type: 'string' }, jobId: { type: 'string' }, exitCode: { oneOf: [{ type: 'integer' }, { type: 'null' }] }, stdout: { type: 'string' }, stderr: { type: 'string' }, truncated: { type: 'boolean' }, elevated: { type: 'string' }, durationMs: { type: 'integer' } },
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'exec', required: true }, command: { type: 'string' }, jobId: { type: 'string' }, exitCode: { oneOf: [{ type: 'integer' }, { type: 'null' }] }, stdout: { type: 'string' }, stderr: { type: 'string' }, truncated: { type: 'boolean' }, stdoutSpillPath: { type: 'string' }, stderrSpillPath: { type: 'string' }, timeoutMs: { type: 'integer' }, outputBytes: { type: 'integer' }, notes: { type: 'array', items: { type: 'string' } }, elevated: { type: 'string' }, durationMs: { type: 'integer' } },
           },
           {
             type: 'object',
             additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'read', required: true }, path: { type: 'string' }, type: { type: 'string', enum: ['file', 'directory', 'other', 'missing'] }, size: { type: 'integer' }, content: { type: 'string' }, entriesText: { type: 'string' }, bytes: { type: 'integer' }, lines: { type: 'integer' }, truncated: { type: 'boolean' }, durationMs: { type: 'integer' } },
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'read', required: true }, path: { type: 'string' }, type: { type: 'string', enum: ['file', 'directory', 'other', 'missing'] }, size: { type: 'integer' }, content: { type: 'string' }, entriesText: { type: 'string' }, bytes: { type: 'integer' }, lines: { type: 'integer' }, truncated: { type: 'boolean' }, stdoutSpillPath: { type: 'string' }, timeoutMs: { type: 'integer' }, outputBytes: { type: 'integer' }, notes: { type: 'array', items: { type: 'string' } }, durationMs: { type: 'integer' } },
           },
           {
             type: 'object',
@@ -867,6 +867,8 @@ function runResult(result: Awaited<ReturnType<Ops['runCommand']>>): Record<strin
     ...(run.stdout === undefined ? {} : { stdout: run.stdout }),
     ...(run.stderr === undefined ? {} : { stderr: run.stderr }),
     ...(run.truncated === undefined ? {} : { truncated: run.truncated }),
+    ...(run.stdoutSpillPath === undefined ? {} : { stdoutSpillPath: run.stdoutSpillPath }),
+    ...(run.stderrSpillPath === undefined ? {} : { stderrSpillPath: run.stderrSpillPath }),
     ...(run.elevated === undefined ? {} : { elevated: run.elevated }),
     ...(run.durationMs === undefined ? {} : { durationMs: run.durationMs }),
     ...(failed ? { message: runHint(run.status, run.stderr) } : {}),
@@ -957,6 +959,21 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
       const stderr = typeof value.stderr === 'string' ? value.stderr : ''
       if (stdout !== '') lines.push(stdout.replace(/\n$/u, ''))
       if (stderr !== '') lines.push(`[stderr] ${stderr.replace(/\n$/u, '')}`)
+      // The shape the harness's own shell tool uses for this: the tail stays in
+      // view, and the file holding the whole stream is named. "Truncated" should
+      // point somewhere, not just report a loss — and when the profile turned
+      // spilling off (`maxSpillBytes: 0`), saying so is the difference between a
+      // model re-running the command with a bigger ceiling and one hunting for a
+      // file that was never written.
+      const spills = [
+        typeof value.stdoutSpillPath === 'string' ? `stdout: ${String(value.stdoutSpillPath)}` : '',
+        typeof value.stderrSpillPath === 'string' ? `stderr: ${String(value.stderrSpillPath)}` : '',
+      ].filter(entry => entry !== '')
+      if (value.truncated === true) {
+        lines.push(spills.length > 0
+          ? `[output truncated; full output — ${spills.join(', ')}]`
+          : '[output truncated; full output: (no spill file configured — raise maxSpillBytes, or ask for more with `maxBytes`)]')
+      }
       const bits = [`status=${String(value.status)}`]
       if (typeof value.elevated === 'string') bits.push(`elevated=${String(value.elevated)}`)
       // A command left running has no exit code yet, and saying `exit=null` reads
@@ -985,7 +1002,7 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
       }
       const content = typeof value.content === 'string' ? value.content : ''
       const clipped = value.truncated === true
-        ? `, truncated${typeof value.size === 'number' ? ` of a ${String(value.size)} byte file` : ''}`
+        ? `, truncated${typeof value.size === 'number' ? ` of a ${String(value.size)} byte file` : ''}${typeof value.stdoutSpillPath === 'string' ? `; the whole stream is in ${String(value.stdoutSpillPath)}` : ''}`
         : ''
       lines.push(`${where}: ${String(value.path)} (${String(value.lines ?? 0)} lines, ${String(value.bytes ?? 0)} bytes${clipped})`)
       lines.push(content.replace(/\n$/u, ''))

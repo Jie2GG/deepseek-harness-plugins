@@ -399,6 +399,10 @@ export interface Collected {
   stderr: string
   durationMs: number
   truncated: boolean
+  /** Where the complete stdout went when the ceiling clipped it, if a spill survived. */
+  stdoutSpillPath?: string
+  /** Where the complete stderr went when the ceiling clipped it, if a spill survived. */
+  stderrSpillPath?: string
   /** Why the provider could not run the child, when that is the outcome. */
   error?: string
 }
@@ -724,11 +728,21 @@ export class SshTransport {
     const handle = this.#ctx.subprocess.spawn({
       argv: [program, ...argvTail],
       cwd: process.env.HOME ?? process.cwd(),
-      stdio: {
-        stdin: stdin === undefined ? 'ignore' : { data: stdin },
-        stdout: { maxBytes: settings.maxOutputBytes },
-        stderr: { maxBytes: settings.maxOutputBytes },
-      },
+      // The provider keeps an in-memory tail per stream and, when asked, writes the
+      // complete stream to a file whose path it hands back. `spill` is opt-in —
+      // omitting it is what used to make "truncated" mean "the rest is gone" — so a
+      // ceiling that clips a stream now costs a temp file instead of the answer.
+      stdio: (() => {
+        const collect = () => ({
+          maxBytes: settings.maxOutputBytes,
+          ...(settings.maxSpillBytes > 0 ? { spill: { maxBytes: settings.maxSpillBytes } } : {}),
+        })
+        return {
+          stdin: stdin === undefined ? 'ignore' : { data: stdin },
+          stdout: collect(),
+          stderr: collect(),
+        }
+      })(),
       graceMs: settings.graceMs,
       ...(env === undefined ? {} : { env }),
       signal: controller.signal,
@@ -808,6 +822,8 @@ export class SshTransport {
       stderr,
       durationMs: Date.now() - startedAt,
       truncated: stdoutRead?.lossy === true || stderrRead?.lossy === true,
+      ...(stdoutRead?.spillPath === undefined ? {} : { stdoutSpillPath: stdoutRead.spillPath }),
+      ...(stderrRead?.spillPath === undefined ? {} : { stderrSpillPath: stderrRead.spillPath }),
     }
   }
 
@@ -1111,6 +1127,8 @@ export class SshTransport {
             .join('\n'),
         }),
         ...(collected.truncated ? { truncated: true } : {}),
+        ...(collected.stdoutSpillPath === undefined ? {} : { stdoutSpillPath: collected.stdoutSpillPath }),
+        ...(collected.stderrSpillPath === undefined ? {} : { stderrSpillPath: collected.stderrSpillPath }),
       }
       return withRunNote(result, ticket)
     } finally {

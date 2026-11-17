@@ -232,7 +232,7 @@ call rather than the next restart:
 | `transferBytes` / `maxTransferBytes` | 32 MiB | 512 MiB | One copy |
 | `probeTimeoutMs` | 30 s | — | How long a connectivity test waits; the page has no field for it |
 | `statTimeoutMs` | 10 s | — | The size-and-type pre-check one download asks first |
-| `maxSpillBytes` | 64 MiB | — | How large a spill file may grow; `0` means no spill file (**declared this round, wired next**: over-cap output still keeps only its in-memory tail) |
+| `maxSpillBytes` | 64 MiB | — | How large a spill file may grow; `0` writes none, and the result says there is no file to look for |
 | `promoteOnTimeout` | on | — | Hand a command that runs out of time to the job registry instead of killing it (**declared this round, not wired yet**) |
 | `graceMs` | 2 s | — | SIGTERM to SIGKILL grace for a child |
 
@@ -254,6 +254,14 @@ classified result.
   not to one conversation: two conversations pointing at the same server ride the
   same connection, which is the point, and also why a server you reach through a
   jump host stays warm for the other one.
+- Over-cap output is no longer a tail and a shrug. The complete stdout and stderr of
+  a call are written by the subprocess provider into its own private temporary
+  directory, and the result names the file
+  (`[output truncated; full output — stdout: /tmp/dsh-subprocess-…/….log]`). Two
+  exceptions are stated rather than hidden: a profile with `maxSpillBytes: 0`
+  configures no file at all and the result says so, and a stream larger than
+  `maxSpillBytes` has its spill abandoned and keeps only the in-memory tail. Those
+  files live in the system temp directory, not in this conversation's workspace.
 - A downloaded file is listed among the conversation's changes, the same way an edited
   workspace file is, because the plugin asks the file pipeline for permission before the
   copy starts. Two honest caveats: only the first change to a path within a turn keeps a

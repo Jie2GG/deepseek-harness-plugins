@@ -199,6 +199,14 @@ export interface RemoteRunResult {
   stderr?: string | undefined
   /** Whether either stream lost bytes to the ceiling. */
   truncated?: boolean | undefined
+  /**
+   * Where the complete stdout went when the ceiling clipped it. The provider writes
+   * the whole stream to a file when a call asks for that (`maxSpillBytes`), so a
+   * truncated answer is a tail with a pointer, not a tail with a loss.
+   */
+  stdoutSpillPath?: string | undefined
+  /** The same for stderr. */
+  stderrSpillPath?: string | undefined
   /** Wall-clock duration in whole milliseconds. */
   durationMs?: number | undefined
   /** Whether the call ran under a requested pseudo-terminal (`-tt`). */

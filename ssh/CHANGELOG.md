@@ -17,6 +17,43 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.25
+
+### Changed
+
+- **A truncated answer now points somewhere.** The subprocess provider has always
+  been able to keep a stream's in-memory tail *and* write the complete stream to a
+  file, given one thing in the request: `spill: { maxBytes }` on the stdio entry.
+  Omitting it is documented as "keeps only the in-memory tail", and this plugin
+  omitted it — so `maxBytes` ceilings used to mean "the rest is gone", and the
+  result could only confess `[truncated]`. The transport now passes the configured
+  spill budget, carries the reported path through the result, and says what the
+  harness's own shell tool says:
+  `[output truncated; full output — stdout: /tmp/dsh-subprocess-…/….log]`. A `read`
+  clipped by the ceiling gets the same pointer, which for a big remote file is the
+  difference between "ask again with a bigger ceiling" and "go read that path".
+- **The two exceptions are named rather than smoothed over.** `maxSpillBytes: 0`
+  configures no file at all, and the result now says so in as many words ("no spill
+  file configured — raise `maxSpillBytes`, or ask for more with `maxBytes`"); a
+  stream larger than the spill cap has its file abandoned by the provider, and the
+  plugin does not promise a path that no longer holds the whole answer.
+
+### Notes
+
+- The path comes from the provider, in its own per-process `0700` temp directory
+  with `0600` files — so the plugin invented no layout, owns no cleanup, and cannot
+  collide with another user's socket or file. Those files live in the system temp
+  directory, not in the conversation workspace: a downloaded file still appears in
+  the change list, a spilled stdout does not.
+- Background jobs were already carrying `spillPath` through their offset reads; the
+  foreground path was the half that dropped it. Both now render the same sentence,
+  so a model cannot meet two answers to the same question.
+- `maxSpillBytes`, declared in 0.0.24's configuration table, is wired by this
+  round; `promoteOnTimeout` is the one row still waiting (0.0.26).
+- 116 tests across eleven suites are green, including a provider fake that pins the
+  `spill` request itself and the zero-budget branch. `tsc` clean, `oxlint` 0
+  warnings and 0 errors. Version 0.0.24 → 0.0.25 under the three-segment rule.
+
 ## 0.0.24
 
 ### Changed
