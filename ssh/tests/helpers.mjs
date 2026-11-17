@@ -79,9 +79,21 @@ export function fakeRunner () {
       state.optionsSeen.push({ target, auth, timeoutMs, extra })
       return { flags: [...(extra.portFlag === '-P' ? ['-P', String(target.port ?? 22)] : []), `-o`, 'BatchMode=yes'], env: {}, needsSecret: false }
     },
-    async execute (program, argvTail, settings, env, timeoutMs, label, _signal) {
-      state.calls.push({ kind: 'execute', program, argvTail, timeoutMs, label })
+    async execute (program, argvTail, settings, env, timeoutMs, label, signal, lane) {
+      state.calls.push({ kind: 'execute', program, argvTail, timeoutMs, label, signal, lane })
+      // A stand-in that lets one test play scp: the impl sees the argv tail (so it
+      // can write the destination the way a real copy would) and may return the
+      // Collected shape itself; returning nothing falls back to `executeOut`.
+      if (typeof state.executeImpl === 'function') {
+        const fromImpl = state.executeImpl(argvTail)
+        if (fromImpl !== undefined) return fromImpl
+      }
       return state.executeOut ?? { outcome: 'exit', exitCode: 0, stdout: '', stderr: '', durationMs: 3, truncated: false }
+    },
+    // The real transport joins `[user@]host` the same way; transfers ask it
+    // instead of hand-rolling the join, so the stand-in answers too.
+    authority (target) {
+      return target.user === undefined || target.user === '' ? target.host : `${target.user}@${target.host}`
     },
     async resolveExecutable (name) {
       state.calls.push({ kind: 'resolveExecutable', name })

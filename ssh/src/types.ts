@@ -250,6 +250,17 @@ export interface SshSettings {
   remoteTimeoutMs: number
   /** Largest file or tree one transfer may move, in bytes. */
   maxTransferBytes: number
+  /**
+   * Whole-budget deadline for one file transfer, in milliseconds — its own clock,
+   * not the command deadline, so a permitted copy is not killed at 30 s.
+   */
+  transferTimeoutMs: number
+  /** Pre-check cap on how many files one recursive upload may carry. */
+  maxTransferFiles: number
+  /** Pre-check cap on the cumulative bytes one recursive upload may carry. */
+  maxTransferTotalBytes: number
+  /** How many file transfers may hold an operation slot at once. */
+  maxConcurrentTransfers: number
   /** Deadline one connectivity probe waits to, in whole milliseconds. */
   probeTimeoutMs: number
   /** Deadline for the size-and-type pre-check one download asks first. */
@@ -309,6 +320,8 @@ export interface RemoteTransferResult {
   remotePath: string
   /** Bytes moved, when the transfer reported them. */
   bytes?: number
+  /** Files counted by the walk, for a recursive upload. */
+  files?: number
   /** The ceiling this copy ran under, after capping; stated because it is the answer to “why did that one refuse”. */
   bytesLimit?: number
   /** The deadline this copy ran under, after capping. */

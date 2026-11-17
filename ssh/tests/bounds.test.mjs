@@ -14,6 +14,11 @@ const VOLATILE = values => ({
   maxSpillBytes: { get: () => values.maxSpillBytes ?? DEFAULTS.maxSpillBytes },
   transferBytes: { get: () => values.transferBytes ?? DEFAULTS.transferBytes },
   maxTransferBytes: { get: () => values.maxTransferBytes ?? DEFAULTS.maxTransferBytes },
+  transferTimeoutMs: { get: () => values.transferTimeoutMs ?? DEFAULTS.transferTimeoutMs },
+  maxTransferTimeoutMs: { get: () => values.maxTransferTimeoutMs ?? DEFAULTS.maxTransferTimeoutMs },
+  maxTransferFiles: { get: () => values.maxTransferFiles ?? DEFAULTS.maxTransferFiles },
+  maxTransferTotalBytes: { get: () => values.maxTransferTotalBytes ?? DEFAULTS.maxTransferTotalBytes },
+  maxConcurrentTransfers: { get: () => values.maxConcurrentTransfers ?? DEFAULTS.maxConcurrentTransfers },
   probeTimeoutMs: { get: () => values.probeTimeoutMs ?? DEFAULTS.probeTimeoutMs },
   statTimeoutMs: { get: () => values.statTimeoutMs ?? DEFAULTS.statTimeoutMs },
   promoteOnTimeout: { get: () => values.promoteOnTimeout ?? DEFAULTS.promoteOnTimeout },
@@ -88,11 +93,26 @@ test('the resolved view carries every ceiling a call needs, including the ones w
     remoteTimeoutMs: DEFAULTS.timeoutMs,
     maxOutputBytes: DEFAULTS.outputBytes,
     maxTransferBytes: DEFAULTS.transferBytes,
+    transferTimeoutMs: DEFAULTS.transferTimeoutMs,
+    maxTransferFiles: DEFAULTS.maxTransferFiles,
+    maxTransferTotalBytes: DEFAULTS.maxTransferTotalBytes,
+    maxConcurrentTransfers: DEFAULTS.maxConcurrentTransfers,
     probeTimeoutMs: DEFAULTS.probeTimeoutMs,
     statTimeoutMs: DEFAULTS.statTimeoutMs,
     maxSpillBytes: DEFAULTS.maxSpillBytes,
     graceMs: DEFAULTS.graceMs
   })
+  // A transfer does not inherit the command's 30 s: the copy budget is its own,
+  // and it sits above the command default on purpose.
+  assert.ok(DEFAULTS.transferTimeoutMs > DEFAULTS.timeoutMs)
+})
+
+test('a transfer deadline follows the same layering as every other number', () => {
+  const bounds = defaultBounds()
+  assert.equal(resolveSettings(bounds, { call: { timeoutMs: 60_000 } }).settings.transferTimeoutMs, 60_000)
+  const capped = resolveSettings(bounds, { call: { timeoutMs: 7_200_000 } })
+  assert.equal(capped.settings.transferTimeoutMs, bounds.maxTransferTimeoutMs)
+  assert.ok(capped.notes.includes('transfer timeout asked for 7200000 and was capped to 1800000'))
 })
 
 test('the config schema validates a profile row and fills the defaults', () => {

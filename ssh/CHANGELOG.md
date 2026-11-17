@@ -17,6 +17,83 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.30
+
+Phase 2A of the review follow-up: the reliability fixes the architecture review
+identified, each with the tests the review listed as missing.
+
+### Fixed
+
+- **Cancelling a call now reaches the child.** `ToolDefinition.timeoutMs` is a
+  promise — the contracts say declaring it asserts the tool forwards
+  `exec.signal` — and the transport has long honoured an external signal, but
+  nothing between the tool and it ever carried one. `exec.signal` now travels
+  `tool.ts → ops → runner.run / startRun / transfer`, so cancelling the
+  conversation (or the harness's own call budget firing) terminates the local
+  ssh/scp child, releases its operation slot and pool lease, and is reported as
+  `cancelled` — while a plugin deadline passing on its own is still `timeout`,
+  by the fused-deadline first-cause rule. Started background jobs are the one
+  case that deliberately does not forward: the job outlives the call that
+  started it. The honest boundary stands: a killed local child does not
+  guarantee the server-side command died with it.
+- **Uploads are pre-checked at both ends.** A bare `scp` replaces a remote file
+  without a word and copies whatever the local path holds; an upload now
+  refuses a missing or unreadable local source, an oversized single file, a
+  tree over `maxTransferFiles` or `maxTransferTotalBytes`, and — the silent
+  data-loss case — an existing remote destination unless `overwrite` says
+  otherwise. A recursive copy walks the same ceilings a single file faces,
+  with a realpath-visited set so a symlink loop is walked once, and no check
+  failure lets a partial copy start. These are pre-checks against what `stat`
+  said at that moment, not gates on the bytes that move, and the docs say so.
+- **A download lands by rename, not by accumulation.** The bytes go to a
+  unique `…dsh-part-<pid>-<entropy>` sibling of the destination and are
+  renamed into place only after a clean finish; cancelled, timed-out, errored,
+  and refused-to-rename paths delete the sibling. A half-downloaded file no
+  longer masquerades as a finished one, and a failed download cannot wreck a
+  final file that was already there.
+- **Transfers run on their own clock.** A copy of a permitted 500 MiB file
+  under the command's 30 s default was dead on arrival on any slow link.
+  `transferTimeoutMs` (default 5 minutes, capped at 30) is its own
+  default-and-cap pair; the call's `timeoutMs` reads as "how long to wait for
+  the copy", and results echo the transfer deadline rather than the command's.
+  The declared tool-call budget now covers the longer of the two clocks.
+- **askpass answers from the slot the prompt names — and only that slot.** The
+  helper fell back across slots: a server asking for a key passphrase while
+  only a login password was stored got the login password, burned the single
+  allowed prompt, and reported the failure as `permission denied (publickey)`
+  about a secret nobody had been asked for. Each prompt now reads its own
+  environment slot; an empty slot answers empty and the method fails honestly.
+- **`unavailable` approval no longer masquerades as consent.** The gate merged
+  "the deployment says never ask" (full-access mode, respected as before) with
+  "there is nobody to ask" (no approval service, or no session to route
+  through). The latter now reaches the core as an ask, and the core answers
+  with its fail-closed denial that names the missing piece. A remote write
+  with no approval surface mounted is refused, not silently run.
+
+### Added
+
+- File transfers hold at most `maxConcurrentTransfers` (default 2) of the 16
+  operation slots — a per-kind lane ceiling inside the existing slot counter,
+  not a second scheduler — and the refusal names the ceiling it hit, so two
+  large copies cannot starve every command.
+- `scanLocal`, the walk behind the upload ceilings, and `TransferOutcome.files`,
+  so a recursive upload reports what it measured before it moved it.
+- Test suites that did not exist: `transfer.test.mjs` (both directions of the
+  pre-checks, the temp-file dance, and its cleanup on every failure path),
+  `approval.test.mjs` (the policy function the gate reads), `askpass.test.mjs`
+  (the real shell script, every slot combination), plus lane-ceiling and
+  16-slot-fill cases in `transport.test.mjs` and call-cancellation cases in
+  `tool.test.mjs` and `ops.test.mjs`. 150 tests across fourteen suites green.
+
+### Notes
+
+- Phase 1's report matched the source on every one of these; the one place its
+  prose needed reading against core code is `ApprovalPolicy = 'never'`, which
+  the core resolves to *rejection of asks* — the plugin's gate choosing not to
+  ask under `never` is this plugin's standing decision, documented and kept.
+- No RPC method, storage shape, or tool action changed. New config fields
+  arrive with defaults, so an old profile behaves as the new docs describe.
+
 ## 0.0.29
 
 ### Fixed

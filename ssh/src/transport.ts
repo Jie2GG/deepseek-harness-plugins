@@ -166,6 +166,12 @@ const CONTROL_SETTINGS: SshSettings = {
   maxOutputBytes: 8_192,
   remoteTimeoutMs: MASTER_EXIT_MS,
   maxTransferBytes: 1_024,
+  // The transfer block has no bearing on a teardown child — it never copies
+  // anything — but the type carries the fields, so they stand at their floor.
+  transferTimeoutMs: MASTER_EXIT_MS,
+  maxTransferFiles: 1,
+  maxTransferTotalBytes: 1_024,
+  maxConcurrentTransfers: 1,
   probeTimeoutMs: MASTER_EXIT_MS,
   statTimeoutMs: MASTER_EXIT_MS,
   maxSpillBytes: 0,
@@ -466,6 +472,11 @@ export class SshTransport {
   readonly #pool: MuxSource | undefined
   #inFlight = 0
   readonly #controllers = new Set<AbortController>()
+  // Slots counted per reservation kind (file transfers for now, background jobs
+  // next). The global ceiling bounds how many children exist at all; a kind
+  // ceiling is what keeps two large copies from holding every slot a command
+  // could have had, without anyone writing a second scheduler.
+  readonly #lanesByKind = new Map<string, number>()
   // The programs the plugin dials with, found on first use: no page names them
   // any more. Only a hit is cached, so installing openssh between calls takes
   // effect without a restart; a miss re-runs the search.
@@ -732,18 +743,45 @@ export class SshTransport {
   /**
    * Take one of the shared concurrency lanes.
    * @param label - what is being run, for the refusal message.
+   * @param lane - an optional reservation against a per-kind ceiling (transfers
+   *   hold far fewer slots than the global ceiling allows, so a long copy can
+   *   never starve every command); the kind name is what a refusal quotes back.
    * @returns the controller to hand to the child, already registered.
    */
-  #takeLane(label: string): AbortController {
+  #takeLane(label: string, lane?: { readonly kind: string; readonly cap: number }): AbortController {
     if (this.#inFlight >= MAX_CONCURRENT_OPS) {
       throw new SshError('busy', `At most ${String(MAX_CONCURRENT_OPS)} remote operations may run at once.`, {
         hint: `Wait for the running ${label} to finish.`,
       })
     }
+    if (lane !== undefined) {
+      const used = this.#lanesByKind.get(lane.kind) ?? 0
+      if (used >= lane.cap) {
+        throw new SshError('busy', `At most ${String(lane.cap)} ${lane.kind} may run at once, and all ${String(lane.cap)} slots are taken.`, {
+          hint: `Wait for one to finish (it also frees room for other calls), or raise the ceiling in the plugin's configuration.`,
+        })
+      }
+      this.#lanesByKind.set(lane.kind, used + 1)
+    }
     this.#inFlight += 1
     const controller = new AbortController()
     this.#controllers.add(controller)
     return controller
+  }
+
+  /**
+   * Give back one lane a taken slot occupied, in the single order the taker expects.
+   * @param controller - the controller {@link #takeLane} handed out.
+   * @param lane - the same reservation, when there was one.
+   */
+  #releaseLane(controller: AbortController, lane?: { readonly kind: string; readonly cap: number }): void {
+    this.#controllers.delete(controller)
+    this.#inFlight -= 1
+    if (lane !== undefined) {
+      const used = this.#lanesByKind.get(lane.kind) ?? 0
+      if (used <= 1) this.#lanesByKind.delete(lane.kind)
+      else this.#lanesByKind.set(lane.kind, used - 1)
+    }
   }
 
   /**
@@ -926,13 +964,13 @@ export class SshTransport {
     deadlineMs: number,
     label: string,
     external?: AbortSignal,
+    lane?: { readonly kind: string; readonly cap: number },
   ): Promise<Collected> {
-    const controller = this.#takeLane(label)
+    const controller = this.#takeLane(label, lane)
     try {
       return await this.#collect(program, argvTail, settings, env, deadlineMs, controller, external)
     } finally {
-      this.#controllers.delete(controller)
-      this.#inFlight -= 1
+      this.#releaseLane(controller, lane)
     }
   }
 

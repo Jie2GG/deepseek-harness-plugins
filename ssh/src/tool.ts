@@ -351,6 +351,27 @@ export function decideAccess(target: TargetSnapshot | undefined, args: RemoteCal
 }
 
 /**
+ * Which of the three live answers an ask for this call would get: `ask` (the
+ * conversation can be reached and is consulted normally), `never` (the user's
+ * standing decision — full-access mode — under which the core rejects every
+ * ask before any listener sees it), or `unavailable` (no approval service, or
+ * no session to route the question through — nobody could answer at all).
+ * @param deps - the tool dependencies.
+ * @param exec - the pending call.
+ * @returns the effective policy verdict.
+ */
+function approvalAnswer(deps: RemoteToolDeps, exec: Readonly<PendingCall>): ApprovalAnswer {
+  if (deps.approvalPolicyOf === undefined) return 'ask'
+  try {
+    return deps.approvalPolicyOf(exec) ?? 'ask'
+  } catch {
+    // A policy read that failed is not a licence to run unattended: ask, and
+    // let the approval surface answer for itself.
+    return 'ask'
+  }
+}
+
+/**
  * The `tools/pre-execute` decision for one call, swallowing nothing: a broken
  * catalog read becomes a denial with the reason, because running blind on a
  * remote server is the worse failure.
@@ -359,21 +380,6 @@ export function decideAccess(target: TargetSnapshot | undefined, args: RemoteCal
  * @param next - the waterfall's pass-through.
  * @returns the decision the pipeline applies.
  */
-/**
- * Whether an ask would reach someone who can answer it.
- * @param deps - the tool dependencies.
- * @param exec - the pending call.
- * @returns true when the conversation has a live approval surface.
- */
-function awaitable(deps: RemoteToolDeps, exec: Readonly<PendingCall>): boolean {
-  if (deps.approvalPolicyOf === undefined) return true
-  try {
-    return deps.approvalPolicyOf(exec) === 'ask'
-  } catch {
-    return true
-  }
-}
-
 export async function gateRemoteCall(deps: RemoteToolDeps, exec: Readonly<PendingCall>, next: () => Promise<GateDecision>): Promise<GateDecision> {
   const args = readArgs(exec)
   if (!REMOTE_TOOL_ACTIONS.includes(args.action)) return await next()
@@ -390,12 +396,23 @@ export async function gateRemoteCall(deps: RemoteToolDeps, exec: Readonly<Pendin
   const verdict = decideAccess(target, args)
   if (verdict.verdict === 'allow') return await next()
   if (verdict.verdict === 'deny') return { kind: 'deny', reason: verdict.reason }
-  if (!awaitable(deps, exec)) {
-    // Nobody is going to answer: run it, and let the deployment's standing decision
-    // be the consent. A `deny` stays a deny — that one is the user's own setting on
-    // the target, not a question.
+  const answer = approvalAnswer(deps, exec)
+  if (answer === 'never') {
+    // The user's standing decision, read from the same policy the approval
+    // service itself applies: under `never` the core rejects every ask BEFORE
+    // dispatching any approval listener, so asking here would be a
+    // self-inflicted denial. Running is respecting full-access mode, not
+    // bypassing it — and a `deny` from `decideAccess` stayed a deny above,
+    // because that one is the user's own setting on the target, not a question.
     return await next()
   }
+  // `ask` reaches whoever can answer it as usual. `unavailable` — no approval
+  // service mounted, or no session to route the question through — reaches the
+  // core as an ask too, and the core then denies with a reason that names the
+  // missing piece (pipeline.ts `serviceAsk`): nobody gave consent, so nothing
+  // runs. The old code merged these two answers into one boolean and let
+  // `unavailable` run unasked, which invented consent the deployment never
+  // stated — the distinction task book §3.5 asks to restore.
   return { kind: 'ask', reason: verdict.reason, ...(verdict.display === undefined ? {} : { displayReason: verdict.display }) }
 }
 
@@ -527,7 +544,17 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
   // The worst case this plugin can wait to: the capped command deadline, the kill
   // grace the provider gets, the pipe drain, and the slack above that.
   const bounds = (deps.boundsOf ?? defaultBounds)()
-  const callBudgetMs = bounds.maxTimeoutMs + bounds.graceMs + DRAIN_MS + BUDGET_SLACK_MS
+  // The longest this plugin can wait, on whichever path waits longest: the
+  // capped command deadline, or the capped transfer deadline plus the `stat`
+  // pre-check that comes before a copy. Either is paid with the kill grace and
+  // the pipe drain its child gets, plus the slack that lets the plugin's own
+  // classification arrive before the wrapper would overwrite it. Transfers
+  // need naming here because they run on their own clock now: a budget that
+  // only covered the 30 s command path would cut a permitted 25-minute copy.
+  const callBudgetMs = Math.max(
+    bounds.maxTimeoutMs,
+    bounds.statTimeoutMs + bounds.maxTransferTimeoutMs,
+  ) + bounds.graceMs + DRAIN_MS + BUDGET_SLACK_MS
   return defineTool({
     name: REMOTE_TOOL_NAME,
     description: describeRemote(deps.targetsOf?.() ?? []),
@@ -571,7 +598,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           {
             type: 'object',
             additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', enum: ['upload', 'download'], required: true }, localPath: { type: 'string' }, remotePath: { type: 'string' }, bytes: { type: 'integer' }, recursive: { type: 'boolean' }, overwrote: { type: 'boolean' }, bytesLimit: { type: 'integer' }, timeoutMs: { type: 'integer' }, notes: { type: 'array', items: { type: 'string' } } },
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', enum: ['upload', 'download'], required: true }, localPath: { type: 'string' }, remotePath: { type: 'string' }, bytes: { type: 'integer' }, files: { type: 'integer' }, recursive: { type: 'boolean' }, overwrote: { type: 'boolean' }, bytesLimit: { type: 'integer' }, timeoutMs: { type: 'integer' }, notes: { type: 'array', items: { type: 'string' } } },
           },
           {
             type: 'object',
@@ -618,6 +645,13 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
     async execute(args, exec) {
       const call = args as RemoteCallArgs
       const operations = await deps.ops()
+      // The call's own cancellation, read structurally: this bundle and the Host
+      // each carry a copy of the core types, and two nominal copies of one shape
+      // are the same object at runtime. Every remote action below forwards it,
+      // which is what the `timeoutMs` declaration promises: the harness wrapper
+      // fuses the tool-call budget into this signal, the transport fuses it with
+      // the command deadline, and the first to fire ends the local ssh child.
+      const signal = (exec as Readonly<CallSignal>).signal
       const params: Params = {}
       if (call.target !== undefined) params.target = call.target
       const sessionId = deps.sessionOf?.(exec)
@@ -675,6 +709,9 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
             // conversation reads and stops it with the harness's own job tools.
             if (execCallId !== undefined) params.callId = execCallId
             if (execRootCallId !== undefined) params.rootCallId = execRootCallId
+            // Deliberately not forwarded to the child: a started job outlives the
+            // call that started it — that is the whole bargain — so cancelling
+            // this call after registration must not kill the running command.
             const job = await operations.execBackground(params)
             await rememberSessionTarget(operations, sessionId, call, job)
             // Built field by field: the refreshed inventory is for the settings
@@ -689,7 +726,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
               ...(job.hint === undefined ? {} : { hint: job.hint }),
             } as never
           }
-          const result = await operations.runCommand(params)
+          const result = await operations.runCommand(params, signal)
           // Remembered from the mapped payload: that is where the target this call
           // actually used is spelled out.
           const payload = runResult(result)
@@ -750,7 +787,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           if (call.overwrite === true) params.overwrite = true
           if (call.recursive === true) params.recursive = true
           if (call.maxBytes !== undefined) params.maxBytes = call.maxBytes
-          const result = call.action === 'upload' ? await operations.upload(params) : await operations.download(params)
+          const result = call.action === 'upload' ? await operations.upload(params, signal) : await operations.download(params, signal)
           await rememberSessionTarget(operations, sessionId, call, result)
           return { ...result, action: call.action } as never
         }
@@ -770,7 +807,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           if (call.all === true) params.all = true
           if (call.replaceFirst === true) params.replaceFirst = true
           if (call.backup === false) params.backup = false
-          const edited = await operations.editRemote(params)
+          const edited = await operations.editRemote(params, signal)
           await rememberSessionTarget(operations, sessionId, call, edited)
           return { ...edited } as never
         }
@@ -791,8 +828,8 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           }
           if (call.maxBytes !== undefined) params.maxOutputBytes = call.maxBytes
           const result: RemoteFileResult = call.action === 'read'
-            ? await operations.readPath(params)
-            : await operations.writeRemote(params)
+            ? await operations.readPath(params, signal)
+            : await operations.writeRemote(params, signal)
           await rememberSessionTarget(operations, sessionId, call, result)
           return { ...result } as never
         }
@@ -893,7 +930,7 @@ function runResult(result: Awaited<ReturnType<Ops['runCommand']>>): Record<strin
       ? {
           hint: run.elevated !== undefined
             ? 'The elevation prompt could not be answered: the stored password this call spent (login for sudo, root for su) is wrong or missing.'
-            : 'Check the stored password, or switch the target to a key its agent already holds.',
+            : 'Check the stored password, or switch the target to a key its agent already holds. A key-passphrase prompt is answered only by the stored passphrase, and a login prompt only by the stored password — the two no longer fall back into each other.',
         }
       : {}),
   }

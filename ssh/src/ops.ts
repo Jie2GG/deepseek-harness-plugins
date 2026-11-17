@@ -185,26 +185,50 @@ export interface Ops {
   probe(params: Params): Promise<{ connection?: ConnectionView | undefined; probe?: ProbeOutcome | undefined; connections: ConnectionView[] }>
   /** Probe the stored targets, up to the built-in limit. */
   probeAll(): Promise<{ connections: ConnectionView[]; probed: number; skipped: number; failures: { id: string; message: string }[] }>
-  /** Run one remote command, resolving the target the same way the tool will. */
-  runCommand(params: Params): Promise<{ run: RemoteRunResult; connection?: ConnectionView | undefined; connections: ConnectionView[] }>
+  /**
+   * Run one remote command, resolving the target the same way the tool will.
+   * @param params - the call's wire parameters.
+   * @param signal - the caller's cancellation, forwarded to the ssh child.
+   */
+  runCommand(params: Params, signal?: AbortSignal): Promise<{ run: RemoteRunResult; connection?: ConnectionView | undefined; connections: ConnectionView[] }>
   /** Ask the local OpenSSH client what this target really resolves to. */
   resolveRemote(params: Params): Promise<ResolveResult>
   /** Start one remote command as a background job and return its id. */
   execBackground(params: Params): Promise<BackgroundRunResult>
-  /** Push one local file or directory to the server. */
-  upload(params: Params): Promise<RemoteTransferResult>
-  /** Pull one remote file into the conversation's workspace. */
-  download(params: Params): Promise<RemoteTransferResult>
+  /**
+   * Push one local file or directory to the server.
+   * @param params - the call's wire parameters.
+   * @param signal - the caller's cancellation, forwarded to the scp child.
+   */
+  upload(params: Params, signal?: AbortSignal): Promise<RemoteTransferResult>
+  /**
+   * Pull one remote file into the conversation's workspace.
+   * @param params - the call's wire parameters.
+   * @param signal - the caller's cancellation, forwarded to the scp child.
+   */
+  download(params: Params, signal?: AbortSignal): Promise<RemoteTransferResult>
   /** Point a conversation at a target. */
   setSessionTarget(params: Params): Promise<{ sessionTarget: { sessionId: string; targetId: string; setAt: string } | null }>
   /** Forget a conversation's chosen target. */
   clearSessionTarget(params: Params): Promise<{ sessionTarget: null }>
-  /** Read one remote path, whether it is a file, a directory, or missing. */
-  readPath(params: Params): Promise<RemoteFileResult>
-  /** Replace exact text inside one remote file. */
-  editRemote(params: Params): Promise<RemoteFileResult>
-  /** Write one remote file from text, with the overwrite guard. */
-  writeRemote(params: Params): Promise<RemoteFileResult>
+  /**
+   * Read one remote path, whether it is a file, a directory, or missing.
+   * @param params - the call's wire parameters.
+   * @param signal - the caller's cancellation, forwarded to the ssh child.
+   */
+  readPath(params: Params, signal?: AbortSignal): Promise<RemoteFileResult>
+  /**
+   * Replace exact text inside one remote file.
+   * @param params - the call's wire parameters.
+   * @param signal - the caller's cancellation, forwarded to both ssh children.
+   */
+  editRemote(params: Params, signal?: AbortSignal): Promise<RemoteFileResult>
+  /**
+   * Write one remote file from text, with the overwrite guard.
+   * @param params - the call's wire parameters.
+   * @param signal - the caller's cancellation, forwarded to the ssh child.
+   */
+  writeRemote(params: Params, signal?: AbortSignal): Promise<RemoteFileResult>
   /** Replace this profile's stored ceilings; `null` on a key drops the override. */
   configUpdate(params: Params): Promise<{ settings: StoredSettings; effective: SshSettings; notes: readonly string[] }>
 }
@@ -738,9 +762,11 @@ export function createOps(deps: OpsDeps): Ops {
    * for both directions.
    * @param direction - which way the bytes go.
    * @param params - validated inputs.
+   * @param signal - the caller's cancellation, forwarded to the scp child (and
+   *   to its pre-checks), so a cancelled copy leaves the destination untouched.
    * @returns the canonical transfer result.
    */
-  async function move(direction: 'upload' | 'download', params: Params): Promise<RemoteTransferResult> {
+  async function move(direction: 'upload' | 'download', params: Params, signal?: AbortSignal): Promise<RemoteTransferResult> {
     const state = await store()
     const globalSettings = state.settings()
     // The remote path is validated on its own first, so a metacharacter or a
@@ -763,16 +789,20 @@ export function createOps(deps: OpsDeps): Ops {
     }
     const local = pathInside(input.localPath, input.localDir)
     const overwrite = input.overwrite === true
-    if (direction === 'download' && !overwrite && localExists !== undefined && await localExists(local)) {
-      return {
-        action: 'download',
-        ok: false,
-        status: 'refused-exists',
-        target: { id: record.id, label: record.label, host: record.host },
-        localPath: local,
-        remotePath: input.path,
-        message: `${local} already exists locally.`,
-        hint: 'Pass overwrite to replace it.',
+    let destinationExists = false
+    if (direction === 'download' && localExists !== undefined) {
+      destinationExists = await localExists(local)
+      if (destinationExists && !overwrite) {
+        return {
+          action: 'download',
+          ok: false,
+          status: 'refused-exists',
+          target: { id: record.id, label: record.label, host: record.host },
+          localPath: local,
+          remotePath: input.path,
+          message: `${local} already exists locally.`,
+          hint: 'Pass overwrite to replace it.',
+        }
       }
     }
     const resolved = ceilings(globalSettings, record, { timeoutMs: input.timeoutMs, maxBytes: input.maxBytes })
@@ -784,10 +814,16 @@ export function createOps(deps: OpsDeps): Ops {
       remotePath: input.path,
       ...(input.recursive === undefined ? {} : { recursive: input.recursive }),
       overwrite,
-      // Both numbers are already resolved: the ceiling this copy runs under, and
-      // the deadline its pre-check and transfer wait to.
+      // All four numbers are already resolved: the ceiling this copy runs
+      // under, the pre-check ceilings for a tree, and the deadline its pre-check
+      // and transfer wait to — the transfer deadline being its own clock, not
+      // the 30 s command default, so a permitted copy is not killed mid-stream.
       maxBytes: settings.maxTransferBytes,
-      timeoutMs: settings.remoteTimeoutMs,
+      maxFiles: settings.maxTransferFiles,
+      maxTotalBytes: settings.maxTransferTotalBytes,
+      ...(destinationExists ? { destinationExists: true } : {}),
+      timeoutMs: settings.transferTimeoutMs,
+      ...(signal === undefined ? {} : { signal }),
     })
     const target = { id: record.id, label: record.label, host: record.host }
     const base: RemoteTransferResult = {
@@ -799,9 +835,10 @@ export function createOps(deps: OpsDeps): Ops {
       remotePath: input.path,
       durationMs: outcome.durationMs,
       bytesLimit: settings.maxTransferBytes,
-      timeoutMs: settings.remoteTimeoutMs,
+      timeoutMs: settings.transferTimeoutMs,
       ...(resolved.notes.length === 0 ? {} : { notes: resolved.notes }),
       ...(outcome.bytes === undefined ? {} : { bytes: outcome.bytes }),
+      ...(outcome.files === undefined ? {} : { files: outcome.files }),
       ...(input.recursive === true ? { recursive: true } : {}),
       ...(outcome.overwrote === true ? { overwrote: true } : {}),
       ...(outcome.message === undefined ? {} : { message: outcome.message }),
@@ -1003,7 +1040,7 @@ export function createOps(deps: OpsDeps): Ops {
       return { connections: await viewsOf(state), probed: chosen.length, skipped: all.length - chosen.length, failures }
     },
 
-    async runCommand(params: Params) {
+    async runCommand(params: Params, signal?: AbortSignal) {
       const state = await store()
       const globalSettings = state.settings()
       // The registry's own bookkeeping travels with the call so a command that gets
@@ -1075,6 +1112,10 @@ export function createOps(deps: OpsDeps): Ops {
         ? await runPromoted(record, settings, auth, command, {
           ...(tty === true ? { tty: true } : {}),
           ...(stdin === undefined ? {} : { stdin }),
+          // The caller's cancellation outranks the deadline: the transport fuses
+          // the two and reports whichever fired first, so a user cancel reads as
+          // `cancelled` and this plugin's own timeout still reads as `timeout`.
+          ...(signal === undefined ? {} : { signal }),
           label: `${record.label}: ${command}`,
           ...(owner === undefined ? {} : { owner }),
           ...(toolCall === undefined ? {} : { toolCall }),
@@ -1082,6 +1123,7 @@ export function createOps(deps: OpsDeps): Ops {
         : await runner.run(targetOf(record), settings, auth, command, {
           ...(tty === undefined ? {} : { tty }),
           ...(stdin === undefined ? {} : { stdin }),
+          ...(signal === undefined ? {} : { signal }),
         })
       if (elevated !== undefined) run.elevated = elevated
       // What applied, and whether a cap had to move it: only this layer knows.
@@ -1090,7 +1132,7 @@ export function createOps(deps: OpsDeps): Ops {
       return { run, connection, connections: await viewsOf(state) }
     },
 
-    async readPath(params: Params): Promise<RemoteFileResult> {
+    async readPath(params: Params, signal?: AbortSignal): Promise<RemoteFileResult> {
       const { record, settings, notes, auth, path } = await fileCall(params, 'read')
       // One round trip answers a file, a directory, and a miss. The remote shell
       // prints a marker line naming which it found — `file` carries the byte size
@@ -1103,7 +1145,9 @@ export function createOps(deps: OpsDeps): Ops {
         + `elif [ -f ${quoted} ]; then printf 'ssh-plugin: file %s\\n' "$(wc -c < ${quoted} | tr -dc 0-9)"; cat -- ${quoted}; `
         + `elif [ -e ${quoted} ]; then printf 'ssh-plugin: other\\n'; ls -la -- ${quoted}; `
         + `else printf 'ssh-plugin: missing\\n'; exit 20; fi`
-      const run = await runner.run(targetOf(record), settings, auth, command)
+      const run = await runner.run(targetOf(record), settings, auth, command, {
+        ...(signal === undefined ? {} : { signal }),
+      })
       stampCeilings(run, settings, notes)
       const body = splitMarker(run.stdout ?? '')
       if (body === undefined) {
@@ -1125,13 +1169,15 @@ export function createOps(deps: OpsDeps): Ops {
       })
     },
 
-    async editRemote(params: Params): Promise<RemoteFileResult> {
+    async editRemote(params: Params, signal?: AbortSignal): Promise<RemoteFileResult> {
       const { record, settings, notes, auth, path } = await fileCall(params, 'edit')
       const oldText = typeof params.oldText === 'string' ? params.oldText : ''
       const newText = typeof params.newText === 'string' ? params.newText : ''
       const quoted = shellQuote(path)
       const target = { id: record.id, label: record.label, host: record.host }
-      const read = await runner.run(targetOf(record), settings, auth, `if [ ! -f ${quoted} ]; then exit 20; fi; cat -- ${quoted}`)
+      const read = await runner.run(targetOf(record), settings, auth, `if [ ! -f ${quoted} ]; then exit 20; fi; cat -- ${quoted}`, {
+        ...(signal === undefined ? {} : { signal }),
+      })
       stampCeilings(read, settings, notes)
       if (read.status !== 'succeeded') {
         const missing = read.exitCode === 20
@@ -1191,6 +1237,7 @@ export function createOps(deps: OpsDeps): Ops {
       const wrote = await runner.run(targetOf(record), settings, auth, `${prepare}cat > ${quoted}`, {
         stdin: outcome.text,
         maxOutputBytes: settings.maxOutputBytes,
+        ...(signal === undefined ? {} : { signal }),
       })
       return {
         action: 'edit',
@@ -1208,7 +1255,7 @@ export function createOps(deps: OpsDeps): Ops {
       }
     },
 
-    async writeRemote(params: Params): Promise<RemoteFileResult> {
+    async writeRemote(params: Params, signal?: AbortSignal): Promise<RemoteFileResult> {
       const { record, settings, notes, auth, path } = await fileCall(params, 'write')
       const content = typeof params.content === 'string' ? params.content : ''
       const append = params.append === true
@@ -1222,6 +1269,7 @@ export function createOps(deps: OpsDeps): Ops {
       const prepare = mkdir && parent !== '' ? `mkdir -p -- ${shellQuote(parent)} && ` : ''
       const run = await runner.run(targetOf(record), settings, auth, `${guard}${prepare}cat ${append ? '>>' : '>'} ${quoted}`, {
         stdin: content,
+        ...(signal === undefined ? {} : { signal }),
       })
       stampCeilings(run, settings, notes)
       return fileResult('write', record, path, run, undefined, undefined, {
@@ -1351,12 +1399,12 @@ export function createOps(deps: OpsDeps): Ops {
       }
     },
 
-    async upload(params: Params): Promise<RemoteTransferResult> {
-      return await move('upload', params)
+    async upload(params: Params, signal?: AbortSignal): Promise<RemoteTransferResult> {
+      return await move('upload', params, signal)
     },
 
-    async download(params: Params): Promise<RemoteTransferResult> {
-      return await move('download', params)
+    async download(params: Params, signal?: AbortSignal): Promise<RemoteTransferResult> {
+      return await move('download', params, signal)
     },
 
     async setSessionTarget(params: Params) {

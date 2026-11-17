@@ -275,3 +275,59 @@ test('no deadline means no timer: only the caller can end the wait', async () =>
   controller.abort()
   assert.equal((await running).outcome, 'cancelled')
 })
+
+// ── the lane ceilings: per-kind room and the global count ──────────────────
+test('a per-kind lane ceiling refuses the copy over the ceiling, not over the global room', async () => {
+  const transport = new SshTransport(hangingProvider())
+  const settings = { ...CEILINGS, maxSpillBytes: 0, probeTimeoutMs: 30_000, statTimeoutMs: 10_000, graceMs: 100, maxConcurrentTransfers: 1 }
+  const lane = { kind: 'file transfer', cap: 1 }
+  const firstStop = new AbortController()
+  const first = transport.execute('/usr/bin/scp', ['-q', 'a', 'b'], settings, undefined, 0, 'file transfer', firstStop.signal, lane)
+  let err
+  try {
+    await transport.execute('/usr/bin/scp', ['-q', 'c', 'd'], settings, undefined, 0, 'file transfer', undefined, lane)
+  } catch (error) { err = error }
+  // The refusal says which ceiling it hit — a full transfer lane, not the plugin's
+  // 16 slots, which still had thirteen free — so the reader waits for the right thing.
+  assert.equal(err?.code, 'busy')
+  assert.match(err.message, /At most 1 file transfer/)
+  // And the room for a plain command survived the crowded transfer lane:
+  const room = await transport.run({ host: '10.0.0.9' }, settings, {}, 'true', { timeoutMs: 1, maxOutputBytes: 64 })
+  assert.ok(room.durationMs >= 0)
+  firstStop.abort()
+  assert.equal((await first).outcome, 'cancelled')
+  // A released lane admits the next copy; the counters returned to zero with it.
+  const nextStop = new AbortController()
+  const next = transport.execute('/usr/bin/scp', ['-q', 'e', 'f'], settings, undefined, 0, 'file transfer', nextStop.signal, lane)
+  nextStop.abort()
+  assert.equal((await next).outcome, 'cancelled')
+  assert.equal(transport.inFlight, 0)
+})
+
+test('sixteen children fill the global ceiling and the seventeenth is refused', async () => {
+  const transport = new SshTransport(hangingProvider())
+  const settings = { ...CEILINGS, maxSpillBytes: 0, probeTimeoutMs: 30_000, statTimeoutMs: 10_000, graceMs: 100 }
+  const stops = []
+  const running = []
+  for (let i = 0; i < 16; i += 1) {
+    const controller = new AbortController()
+    stops.push(controller)
+    // `timeoutMs: 0` arms no timer: each child waits only for its own controller.
+    running.push(transport.execute('/usr/bin/ssh', ['true'], settings, undefined, 0, 'remote command', controller.signal))
+  }
+  assert.equal(transport.inFlight, 16)
+  let err
+  try {
+    await transport.execute('/usr/bin/ssh', ['true'], settings, undefined, 0, 'remote command')
+  } catch (error) { err = error }
+  assert.equal(err?.code, 'busy')
+  assert.match(err.message, /At most 16 remote operations/)
+  for (const controller of stops) controller.abort()
+  for (const settled of await Promise.all(running)) assert.equal(settled.outcome, 'cancelled')
+  assert.equal(transport.inFlight, 0)
+  // And the machine works again: cancellation did not corrupt the count.
+  const after = new AbortController()
+  const ok = transport.execute('/usr/bin/ssh', ['true'], settings, undefined, 0, 'remote command', after.signal)
+  after.abort()
+  assert.equal((await ok).outcome, 'cancelled')
+})

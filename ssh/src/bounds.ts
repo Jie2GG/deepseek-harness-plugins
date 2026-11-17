@@ -43,6 +43,11 @@ export function defaultBounds(): Bounds {
     maxSpillBytes: DEFAULTS.maxSpillBytes,
     transferBytes: DEFAULTS.transferBytes,
     maxTransferBytes: DEFAULTS.maxTransferBytes,
+    transferTimeoutMs: DEFAULTS.transferTimeoutMs,
+    maxTransferTimeoutMs: DEFAULTS.maxTransferTimeoutMs,
+    maxTransferFiles: DEFAULTS.maxTransferFiles,
+    maxTransferTotalBytes: DEFAULTS.maxTransferTotalBytes,
+    maxConcurrentTransfers: DEFAULTS.maxConcurrentTransfers,
     probeTimeoutMs: DEFAULTS.probeTimeoutMs,
     statTimeoutMs: DEFAULTS.statTimeoutMs,
     promoteOnTimeout: DEFAULTS.promoteOnTimeout,
@@ -60,6 +65,16 @@ export interface Bounds {
   readonly maxSpillBytes: number
   readonly transferBytes: number
   readonly maxTransferBytes: number
+  /** Default whole-budget deadline for one file transfer. */
+  readonly transferTimeoutMs: number
+  /** Cap on any transfer deadline. */
+  readonly maxTransferTimeoutMs: number
+  /** Pre-check cap on the file count of one recursive upload. */
+  readonly maxTransferFiles: number
+  /** Pre-check cap on the cumulative bytes of one recursive upload. */
+  readonly maxTransferTotalBytes: number
+  /** How many file transfers may hold an operation slot at once. */
+  readonly maxConcurrentTransfers: number
   readonly probeTimeoutMs: number
   readonly statTimeoutMs: number
   readonly promoteOnTimeout: boolean
@@ -90,6 +105,7 @@ export function readBounds(config: SshConfig): Bounds {
   const [timeoutMs, maxTimeoutMs] = pair('timeoutMs', config.timeoutMs.get(), config.maxTimeoutMs.get())
   const [outputBytes, maxOutputBytes] = pair('outputBytes', config.outputBytes.get(), config.maxOutputBytes.get())
   const [transferBytes, maxTransferBytes] = pair('transferBytes', config.transferBytes.get(), config.maxTransferBytes.get())
+  const [transferTimeoutMs, maxTransferTimeoutMs] = pair('transferTimeoutMs', config.transferTimeoutMs.get(), config.maxTransferTimeoutMs.get())
   return {
     timeoutMs,
     maxTimeoutMs,
@@ -98,6 +114,11 @@ export function readBounds(config: SshConfig): Bounds {
     maxSpillBytes: Math.max(0, config.maxSpillBytes.get()),
     transferBytes,
     maxTransferBytes,
+    transferTimeoutMs,
+    maxTransferTimeoutMs,
+    maxTransferFiles: Math.max(1, config.maxTransferFiles.get()),
+    maxTransferTotalBytes: Math.max(1, config.maxTransferTotalBytes.get()),
+    maxConcurrentTransfers: Math.min(16, Math.max(1, config.maxConcurrentTransfers.get())),
     probeTimeoutMs: config.probeTimeoutMs.get(),
     statTimeoutMs: config.statTimeoutMs.get(),
     promoteOnTimeout: config.promoteOnTimeout.get(),
@@ -193,6 +214,22 @@ export function resolveTransferBytes(bounds: Bounds, stored?: number, requested?
 }
 
 /**
+ * The whole-budget deadline for one file transfer.
+ *
+ * A transfer carries its own clock: the command default (30 s) would kill a
+ * permitted copy of a large file mid-stream on any slow link, which is exactly
+ * the half-written payload the temp-file dance exists to avoid. The call's
+ * `timeoutMs` lands here too, read as "how long to wait for the copy", and the
+ * config cap holds it to `maxTransferTimeoutMs`.
+ * @param bounds - the live bounds.
+ * @param requested - what this call asked for, if anything.
+ * @returns the effective transfer deadline and what it took to get there.
+ */
+export function resolveTransferDeadline(bounds: Bounds, requested?: number): ResolvedValue {
+  return resolve('transferTimeoutMs', bounds.transferTimeoutMs, bounds.maxTransferTimeoutMs, undefined, requested)
+}
+
+/**
  * The probe deadline, which has no stored layer: the page never edited it and the
  * plan is that it stays a rule rather than becoming a fourth field.
  * @param bounds - the live bounds.
@@ -263,6 +300,10 @@ export function resolveSettings(bounds: Bounds, layers: CeilingLayers = {}): Res
       remoteTimeoutMs: settled('command timeout', resolveDeadline(bounds, target.remoteTimeoutMs ?? stored.remoteTimeoutMs, call.timeoutMs)),
       maxOutputBytes: settled('output ceiling', resolveOutputBytes(bounds, target.maxOutputBytes ?? stored.maxOutputBytes, call.maxOutputBytes)),
       maxTransferBytes: settled('transfer ceiling', resolveTransferBytes(bounds, stored.maxTransferBytes, call.maxBytes)),
+      transferTimeoutMs: settled('transfer timeout', resolveTransferDeadline(bounds, call.timeoutMs)),
+      maxTransferFiles: bounds.maxTransferFiles,
+      maxTransferTotalBytes: bounds.maxTransferTotalBytes,
+      maxConcurrentTransfers: bounds.maxConcurrentTransfers,
       probeTimeoutMs: bounds.probeTimeoutMs,
       statTimeoutMs: bounds.statTimeoutMs,
       maxSpillBytes: bounds.maxSpillBytes,

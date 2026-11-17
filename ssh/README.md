@@ -177,11 +177,20 @@ command's stdin capped at 1,000,000 characters, a remote command line at 8,192,
 and at most 32 allowlisted program names of 64 characters each. A backgrounded
 command has no deadline of its own since 0.0.26 — `BACKGROUND_DEADLINE_MS` is
 gone, and the job lives until it settles, is killed, loses its owner, or the Host
-exits, holding one of the 16 operation slots the while. The three
-*ceilings* a reader or a call can move — command timeout, per-stream output,
-transfer size — plus the probe and pre-check deadlines, the spill cap, the kill
-grace, and whether a timed-out command is promoted, now live in `src/config.ts`
-as a default-and-cap pair each, all `.volatile()`.
+exits, holding one of the 16 operation slots the while. Of those 16, at most
+`maxConcurrentTransfers` (default 2) may be held by file copies, so two large
+transfers can never starve every command; a copy refused by that ceiling is told
+which ceiling it hit. A transfer runs on its own clock —
+`transferTimeoutMs` (default 5 minutes, capped at `maxTransferTimeoutMs`,
+30 minutes) — never the command's 30 s, because a permitted copy over a slow
+link legitimately runs for minutes, and `scp` itself has no size limit of its
+own. The recursive upload's file-count and cumulative-size ceilings
+(`maxTransferFiles`, `maxTransferTotalBytes`) are pre-checks at walk time. The
+ceilings a reader or a call can move — command timeout, per-stream output,
+transfer size, transfer deadline — plus the probe and pre-check deadlines, the
+spill cap, the kill grace, the per-kind lane ceilings, and whether a timed-out
+command is promoted, now live in `src/config.ts` as a default-and-cap pair (or a
+plain bounded default) each, all `.volatile()`.
 
 ### Bounds resolution (`src/config.ts`, `src/bounds.ts`)
 
@@ -203,7 +212,8 @@ shape anywhere, and that was the argument for changing it:
 So `bounds.ts` is now the only place the layering is stated — **call → target →
 profile override → configured default**, capped by `max*` — and it returns the
 effective value plus a note per correction, which `stampCeilings` attaches to the
-result (`timeoutMs`, `outputBytes`, `notes`; transfers add `bytesLimit`). A value
+result (`timeoutMs`, `outputBytes`, `notes`; transfers add `bytesLimit` and echo
+their own transfer deadline rather than the command's). A value
 past the cap is no longer an error; a value that cannot mean a deadline (zero,
 negative, non-finite) still is, and the hint says where the line now sits.
 `readBounds` re-reads the volatile values per call — never snapshotted — so a
@@ -217,9 +227,10 @@ that declaration and **replaces whatever the tool returned** with
 (`packages/guard/timeout-policy/src/index.ts:57-79`). Declaring the same number as
 the internal cap — which is what 0.0.23 shipped, both at 300 s — meant that race
 was a coin toss. The declared budget is now derived
-(`maxTimeoutMs + graceMs + DRAIN_MS + 5 s` of slack) and a test pins the
-inequality, so the plugin's own classified answer always wins on an ordinary
-timeout. `bash` sidesteps the whole question by declaring no budget at all
+(`max(maxTimeoutMs, statTimeoutMs + maxTransferTimeoutMs) + graceMs + DRAIN_MS
++ 5 s` of slack — the longer of the two clocks a call can wait on) and a test
+pins the inequality, so the plugin's own classified answer always wins on an
+ordinary timeout. `bash` sidesteps the whole question by declaring no budget at all
 (`packages/shell/tool-bash/src/index.ts:368-534`); a remote call that hangs with
 nothing to time out on is the reason this plugin keeps one.
 
@@ -509,7 +520,19 @@ next round does not have to re-derive them:
   remote path copied locally instead, which is what the first live check caught.
   A size and type pre-check (`stat -c '%s %F' -- '<path>'`, GNU coreutils here) runs
   before a download so an oversized or directory payload is refused without
-  touching the disk. `rsync` is absent on this machine and is therefore not used.
+  touching the disk, and a **upload** is pre-checked at both ends: the local
+  file's existence, readability, and size — for a tree also the file count and
+  cumulative bytes, walked with a symlink loop guard — and the remote
+  destination, which is refused (`refused-exists`) unless `overwrite` says
+  otherwise, because bare `scp` replaces a remote file without a word. A
+  download never writes its final path directly: the bytes land in a unique
+  `.dsh-part-<pid>-<entropy>` sibling that is renamed into place only after a
+  clean finish, and cancelled, timed out, or failed copies delete the sibling
+  instead of leaving a half file behind. Every one of these checks measures what
+  `stat` said **before the copy started** — they are pre-checks, not gates on the
+  bytes that move: a file that grows during a transfer can still push more
+  through than the number quoted. `rsync` is absent on this machine and is
+  therefore not used.
 - Approval is two independent switches: the file sandbox (`read-only` /
   `workspace-write` / `danger-full-access`) governs writes, while
   `ApprovalPolicy = 'ask' | 'never'` governs whether a person is consulted at all.
@@ -545,7 +568,14 @@ next round does not have to re-derive them:
   the code happened to test first. A `timeout` now means the server was too slow,
   and a `cancelled` means the reader stopped it — never a coin toss between them.
   `timeoutMs: 0` means arm no timer, which is how a backgrounded or promoted job
-  outlives the reply that started it.
+  outlives the reply that started it. Since 0.0.30 every remote action forwards
+  the tool call's own `exec.signal` down this chain — `exec`, `read`, `write`,
+  `edit`, `upload`, `download` all end their local child when the conversation
+  cancels the call or the declared call budget expires; the plumbing existed in
+  the transport long before anything handed it a signal. The honest boundary:
+  that kills the **local** ssh/scp process. Whether the server-side command dies
+  with its channel is the server's choice, and this plugin does not claim
+  otherwise.
 - A probe reads that account's `~/.ssh`, not the terminal user's. `list` used to
   report `runsAs` (`uid`, `user`, `home`) so a settings card could name the
   account; the card was cut in 0.0.21 — the name settled nothing the probe

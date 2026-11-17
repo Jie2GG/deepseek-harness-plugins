@@ -27,7 +27,12 @@ const SCRIPT_NAME = 'askpass.sh'
 /**
  * The helper itself. `ssh` passes the prompt text as its first argument, so the
  * script answers a passphrase prompt with the passphrase and anything else with
- * the password, falling back to whichever slot is filled when only one was.
+ * the password — and **only** with that slot. The two never fall back into each
+ * other: a wrong login password against a key-only server once answered a
+ * passphrase prompt, spent the one allowed prompt attempt, and left the real
+ * failure reading as `permission denied (publickey)` for a secret nobody was
+ * being asked about. An empty answer to a prompt whose slot is empty fails that
+ * authentication method honestly, which is what the hint text then explains.
  */
 const SCRIPT = [
   '#!/bin/sh',
@@ -35,11 +40,9 @@ const SCRIPT = [
   'case "$1" in',
   '  *[Pp]assphrase*)',
   '    answer=$DSH_SSH_ASKPASS_PASSPHRASE',
-  '    if [ -z "$answer" ]; then answer=$DSH_SSH_ASKPASS_PASSWORD; fi',
   '    ;;',
   '  *)',
   '    answer=$DSH_SSH_ASKPASS_PASSWORD',
-  '    if [ -z "$answer" ]; then answer=$DSH_SSH_ASKPASS_PASSPHRASE; fi',
   '    ;;',
   'esac',
   'printf \'%s\\n\' "$answer"',

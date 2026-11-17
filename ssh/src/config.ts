@@ -30,6 +30,15 @@ const bytes = z.natural().min(1)
 /** A whole positive number of milliseconds, within what a Node timer can hold. */
 const ms = z.natural().min(1).max(2_147_483_647)
 
+/** A whole positive count of files; the schema bound is a sanity ceiling, not the policy. */
+const files = z.natural().min(1).max(1_000_000)
+
+/**
+ * A whole positive count of concurrent transfers; 16 is every operation slot the
+ * plugin can hand out at once, which is the only ceiling this number can have.
+ */
+const lanes = z.natural().min(1).max(16)
+
 /**
  * Bounds as this plugin reads them, every one a live value.
  *
@@ -61,6 +70,39 @@ export interface SshConfig {
   transferBytes: Volatile<number>
   /** Cap on any transfer ceiling. */
   maxTransferBytes: Volatile<number>
+  /**
+   * Default whole-budget deadline for one file transfer, in milliseconds.
+   *
+   * Transfers do not borrow the 30 s command default: a copy of a permitted file
+   * over a slow link is the one call that legitimately runs for minutes, and a
+   * command deadline that killed it would kill it mid-stream. This is the default
+   * for the whole `scp` child, pre-check round trip included; a call may still
+   * ask for longer, up to {@link maxTransferTimeoutMs}.
+   */
+  transferTimeoutMs: Volatile<number>
+  /** Cap on any transfer deadline, whether stored or asked. */
+  maxTransferTimeoutMs: Volatile<number>
+  /**
+   * Cap on how many files one recursive upload may carry.
+   *
+   * A pre-check bound, not a hard limit: it counts what the local tree holds at
+   * the moment the walk runs, so a directory that grows during the copy can still
+   * push more files through `scp -r`.
+   */
+  maxTransferFiles: Volatile<number>
+  /**
+   * Cap on the cumulative bytes one recursive upload may carry, in bytes.
+   *
+   * The same pre-check caveat as {@link maxTransferFiles}: the total is the sum
+   * of the `stat` sizes at walk time, not a gate on the bytes that move.
+   */
+  maxTransferTotalBytes: Volatile<number>
+  /**
+   * How many file transfers may occupy a child slot at once, out of the
+   * plugin's total concurrent-operation ceiling. Reserving capacity this way is
+   * what keeps two 500 MiB copies from starving every other call.
+   */
+  maxConcurrentTransfers: Volatile<number>
   /** Deadline for one connectivity probe, in milliseconds. */
   probeTimeoutMs: Volatile<number>
   /** Deadline for the size-and-type pre-check one download asks, in milliseconds. */
@@ -89,6 +131,16 @@ export const DEFAULTS = {
   maxSpillBytes: 67_108_864,
   transferBytes: 33_554_432,
   maxTransferBytes: 536_870_912,
+  // A transfer gets its own clock: five minutes by default, thirty at the cap —
+  // long enough for a permitted file over a real link, short enough that a dead
+  // connection does not hold a lane for an hour.
+  transferTimeoutMs: 300_000,
+  maxTransferTimeoutMs: 1_800_000,
+  maxTransferFiles: 500,
+  maxTransferTotalBytes: 536_870_912,
+  // Two copies at once, so the 16 operation slots keep room for commands even
+  // while big files are moving.
+  maxConcurrentTransfers: 2,
   probeTimeoutMs: 30_000,
   statTimeoutMs: 10_000,
   promoteOnTimeout: true,
@@ -104,6 +156,11 @@ export const Config = z.object({
   maxSpillBytes: z.natural().default(DEFAULTS.maxSpillBytes).volatile(),
   transferBytes: bytes.default(DEFAULTS.transferBytes).volatile(),
   maxTransferBytes: bytes.default(DEFAULTS.maxTransferBytes).volatile(),
+  transferTimeoutMs: ms.default(DEFAULTS.transferTimeoutMs).volatile(),
+  maxTransferTimeoutMs: ms.default(DEFAULTS.maxTransferTimeoutMs).volatile(),
+  maxTransferFiles: files.default(DEFAULTS.maxTransferFiles).volatile(),
+  maxTransferTotalBytes: bytes.default(DEFAULTS.maxTransferTotalBytes).volatile(),
+  maxConcurrentTransfers: lanes.default(DEFAULTS.maxConcurrentTransfers).volatile(),
   probeTimeoutMs: ms.default(DEFAULTS.probeTimeoutMs).volatile(),
   statTimeoutMs: ms.default(DEFAULTS.statTimeoutMs).volatile(),
   promoteOnTimeout: z.boolean().default(DEFAULTS.promoteOnTimeout).volatile(),

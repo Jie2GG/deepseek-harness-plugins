@@ -213,10 +213,19 @@ test('gateRemoteCall: an unreadable inventory denies, other tools are ignored', 
   assert.deepEqual(await gateRemoteCall(untouched, { name: 'ssh_client', arguments: { action: 'teleport' } }, pass), { kind: 'allow' })
 })
 
-test('gateRemoteCall: a conversation that cannot answer gets the run, not a self-refusal', async () => {
+test('gateRemoteCall: `never` runs; an unreachable approval surface asks and lets the core refuse', async () => {
   const deps = { ops: async () => ({}), catalog: async () => [snapshot()], approvalPolicyOf: () => 'never' }
   const result = await gateRemoteCall(deps, { name: 'ssh_client', arguments: { action: 'exec', command: 'reboot now' } }, pass)
   assert.equal(result.kind, 'allow') // the standing deployment decision is the consent
+  // The distinction task book §3.5 asks to keep: `unavailable` (no approval
+  // service, or no session to route through) is NOT that consent. Asking is
+  // what makes the core answer with its fail-closed denial that names the
+  // missing piece — the plugin never invents an approval nobody gave.
+  const deaf = { ...deps, approvalPolicyOf: () => 'unavailable' }
+  const deafOut = await gateRemoteCall(deaf, { name: 'ssh_client', arguments: { action: 'exec', command: 'reboot now' } }, pass)
+  assert.equal(deafOut.kind, 'ask')
+  // And a read never depended on the policy: it passes whatever the answer is.
+  assert.equal((await gateRemoteCall(deaf, { name: 'ssh_client', arguments: { action: 'read', path: '/x' } }, pass)).kind, 'allow')
   // A deny is the user's own switch: `never` does not rescue it.
   const off = { ...deps, catalog: async () => [snapshot({ agentAccess: 'off' })] }
   assert.equal((await gateRemoteCall(off, { name: 'ssh_client', arguments: { action: 'exec', command: 'x' } }, pass)).kind, 'deny')
@@ -235,10 +244,38 @@ test('gateRemoteCall: a conversation that cannot answer gets the run, not a self
   assert.equal(seen, 'session-77') // unlisted program on the session target -> ask, after resolving via session
 })
 
+test('execute: every remote action forwards the call cancellation to ops', async () => {
+  const flows = [
+    ['runCommand', { action: 'exec', command: 'uptime' }],
+    ['readPath', { action: 'read', path: '/srv/x' }],
+    ['writeRemote', { action: 'write', path: '/srv/x', content: 'hi' }],
+    ['editRemote', { action: 'edit', path: '/srv/x', oldText: 'a', newText: 'b' }],
+    ['upload', { action: 'upload', path: '/srv/x', localPath: '/ws/x', recursive: true }],
+    ['download', { action: 'download', path: '/srv/x', localPath: '/ws/x' }]
+  ]
+  for (const [method, args] of flows) {
+    const ops = fakeOps()
+    const { definition, exec } = toolHarness(ops)
+    await definition.execute(args, exec)
+    const sent = ops.signals.filter(entry => entry[0] === method)
+    assert.ok(sent.length >= 1, `${method} was called`)
+    assert.ok(sent.every(entry => entry[1] === exec.signal), `${method} must forward exec.signal`)
+  }
+  // A started background job is the one case that must NOT be cancelled with the
+  // call: the job outlives the call that started it — that is the whole bargain —
+  // so its child is stopped by `job_kill`, not by this signal.
+  const bg = fakeOps()
+  const { definition, exec } = toolHarness(bg)
+  await definition.execute({ action: 'exec', command: 'make world', background: true }, exec)
+  assert.deepEqual(bg.signals.filter(entry => entry[0] === 'execBackground'), [])
+})
+
 // ── execute: dispatch, refusals, session memory, payload-schema agreement ──
 function fakeOps () {
   return {
     seen: [],
+    // What each remote-facing call was handed as the caller's cancellation.
+    signals: [],
     async list () {
       return {
         connections: [{ id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9', user: 'deploy', auth: 'key', agentAccess: 'on', allowedCommands: [], secrets: { password: true, passphrase: false }, lastProbe: { status: 'reachable', at: '2026-01-01T00:00:00.000Z' } }],
@@ -255,34 +292,40 @@ function fakeOps () {
         }
       }
     },
-    async runCommand (params) {
+    async runCommand (params, signal) {
       this.seen.push(['runCommand', params])
+      this.signals.push(['runCommand', signal])
       return { run: { status: 'succeeded', at: 'x', exitCode: 0, stdout: 'ok\n', stderr: '', durationMs: 12 }, connection: { id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9' } }
     },
     async execBackground (params) {
       this.seen.push(['execBackground', params])
       return { action: 'exec', ok: true, status: 'started', target: { id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9' }, command: params.command, jobId: 'ssh-j1', connections: [] }
     },
-    async readPath (params) {
+    async readPath (params, signal) {
       this.seen.push(['readPath', params])
+      this.signals.push(['readPath', signal])
       return { action: 'read', ok: true, status: 'succeeded', target: { id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9' }, path: params.path, type: 'file', content: 'hello\n', bytes: 6, lines: 2, durationMs: 4 }
     },
-    async writeRemote (params) {
+    async writeRemote (params, signal) {
       this.seen.push(['writeRemote', params])
+      this.signals.push(['writeRemote', signal])
       return { action: 'write', ok: true, status: 'succeeded', target: { id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9' }, path: params.path, bytes: 3, durationMs: 4 }
     },
-    async editRemote (params) {
+    async editRemote (params, signal) {
       this.seen.push(['editRemote', params])
+      this.signals.push(['editRemote', signal])
       return { action: 'edit', ok: true, status: 'succeeded', target: { id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9' }, path: params.path, type: 'file', replaced: 1, bytesBefore: 12, bytesAfter: 12, backup: `${params.path}.dsh-bak`, durationMs: 9 }
     },
-    async upload (params) {
+    async upload (params, signal) {
       this.seen.push(['upload', params])
+      this.signals.push(['upload', signal])
       // Mirrors what ops really hands back, stamped fields included: a branch schema
       // that forgets one of them fails here, not against a live server.
-      return { action: 'upload', ok: true, status: 'moved', target: { id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9' }, localPath: params.localPath, remotePath: params.path, bytes: 5, durationMs: 7, bytesLimit: 33_554_432, timeoutMs: 30_000 } // ops omits an empty notes list entirely
+      return { action: 'upload', ok: true, status: 'moved', target: { id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9' }, localPath: params.localPath, remotePath: params.path, bytes: 5, durationMs: 7, bytesLimit: 33_554_432, timeoutMs: 30_000, ...(params.recursive === true ? { recursive: true, files: 1 } : {}) } // ops omits an empty notes list entirely
     },
-    async download (params) {
+    async download (params, signal) {
       this.seen.push(['download', params])
+      this.signals.push(['download', signal])
       return { action: 'download', ok: true, status: 'moved', target: { id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9' }, localPath: params.localPath, remotePath: params.path, bytes: 5, durationMs: 7, bytesLimit: 33_554_432, timeoutMs: 30_000, notes: ['transfer ceiling asked for 999999999 and was capped to 536870912'] }
     },
     async setSessionTarget (params) { this.seen.push(['setSessionTarget', params]); return { sessionId: params.sessionId, targetId: params.targetId, setAt: 'x' } }
@@ -297,7 +340,10 @@ function toolHarness (ops, extra = {}) {
     ...(sessionId === undefined ? {} : { sessionOf: () => sessionId }),
     ...extra.deps
   })
-  const exec = { name: 'ssh_client', callId: 'c1', rootCallId: 'r1', agent: {} }
+  // The harness hands every call a cancellation; forwarding it is what the
+  // `timeoutMs` declaration promises, so the tests carry one like the core does.
+  const controller = new AbortController()
+  const exec = { name: 'ssh_client', callId: 'c1', rootCallId: 'r1', agent: {}, signal: controller.signal, controller }
   return { definition, exec }
 }
 
@@ -452,13 +498,18 @@ test('presentationMeta and presentCall read only the canonical value', () => {
   assert.equal(card.kind, 'edit')
   assert.equal(definition.presentCall({ action: 'exec', command: 'uptime' }).kind, 'execute')
   // The declared call budget has to sit **above** the longest wait this plugin can
-  // have — the capped deadline, the kill grace, and the pipe drain. An equality (or
-  // anything smaller) would let `guard/timeout-policy` win the race and replace the
-  // plugin's own classified answer with its generic `TOOL_TIMEOUT` sentence, which is
-  // exactly the collision the shipped 300s/300s pair used to have.
+  // have on either of its clocks — the capped command deadline, or the capped
+  // transfer deadline plus the stat pre-check that runs before a copy — plus the
+  // kill grace and the pipe drain. An equality (or anything smaller) would let
+  // `guard/timeout-policy` win the race and replace the plugin's own classified
+  // answer with its generic `TOOL_TIMEOUT` sentence, which is exactly the
+  // collision the shipped 300s/300s pair used to have.
   const bounds = defaultBounds()
   assert.ok(definition.timeoutMs > bounds.maxTimeoutMs + bounds.graceMs + DRAIN_MS)
-  assert.equal(definition.timeoutMs, bounds.maxTimeoutMs + bounds.graceMs + DRAIN_MS + 5_000)
+  const longestTransfer = bounds.statTimeoutMs + bounds.maxTransferTimeoutMs
+  assert.ok(definition.timeoutMs > longestTransfer + bounds.graceMs + DRAIN_MS)
+  const expected = Math.max(bounds.maxTimeoutMs, longestTransfer) + bounds.graceMs + DRAIN_MS + 5_000
+  assert.equal(definition.timeoutMs, expected)
 })
 
 test('every action keeps its schema honest when a producer forgets a field', () => {

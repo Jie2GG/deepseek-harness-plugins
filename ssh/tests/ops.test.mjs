@@ -3,7 +3,11 @@
 // bookkeeping, resolve parsing, transfer pre-checks, and the background handoff.
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { createOps } from '../lib/ops.js'
+import { DEFAULTS } from '../lib/config.js'
 import { SshError } from '../lib/types.js'
 import { fakeRunner, fakeStore, fakeSecrets, record } from './helpers.mjs'
 import { defaultBounds } from '../lib/bounds.js'
@@ -471,43 +475,105 @@ test('a download consults the server first: missing, directory, and oversized al
   assert.match(bigOut.hint, /Raise the transfer ceiling/)
 })
 
+function tempTree () {
+  const dir = mkdtempSync(join(tmpdir(), 'dshssh-ops-'))
+  return dir
+}
+
 test('a sized-down download moves through scp with host:path both ends and the -P port seam', async () => {
+  const dir = tempTree()
+  const local = join(dir, 'x')
   const { ops, state } = build()
   state.nextRun = () => ({ status: 'succeeded', at: iso, exitCode: 0, stdout: '5 regular file', stderr: '', durationMs: 1 })
+  // The stand-in for scp writes what it is given, wherever the destination
+  // argument points — which is how this test can see that the copy did *not*
+  // land on the final path directly.
+  state.executeImpl = argvTail => {
+    writeFileSync(argvTail[argvTail.length - 1], 'hello')
+  }
   state.executeOut = { outcome: 'exit', exitCode: 0, stdout: '', stderr: '', durationMs: 4, truncated: false }
-  const out = await ops.download({ path: '/srv/x', localPath: '/ws/x', overwrite: true })
+  const out = await ops.download({ path: '/srv/x', localPath: local })
   assert.equal(out.status, 'moved')
   assert.equal(out.bytes, 5)
-  assert.equal(out.overwrote, true)
+  assert.equal(out.overwrote, undefined)
   const exec = state.calls.find(c => c.kind === 'execute')
   assert.equal(exec.program, '/usr/bin/scp')
-  // scp gets the far end named host:path on one side and the local path on the other;
-  // the quiet flag and the -P port seam ride in front of them.
+  // scp gets the far end named host:path on one side and a local part-file on the
+  // other; the quiet flag and the -P port seam ride in front of them.
   assert.equal(exec.argvTail.at(-2), 'deploy@10.0.0.9:/srv/x')
-  assert.equal(exec.argvTail.at(-1), '/ws/x')
+  assert.match(exec.argvTail.at(-1), /x\.dsh-part-/)
+  assert.notEqual(exec.argvTail.at(-1), local)
   assert.ok(exec.argvTail.includes('-q'))
   assert.ok(exec.argvTail.includes('-P'))
+  // The copy ran on its own clock, not the command's 30 s default.
+  assert.equal(out.timeoutMs, DEFAULTS.transferTimeoutMs)
+  assert.equal(exec.timeoutMs, DEFAULTS.transferTimeoutMs)
   // scp names the port -P, and a transfer builds its own child, so it has to say
   // which connection the copy is riding on rather than let the transport guess.
   assert.deepEqual(state.optionsSeen[0].extra, { portFlag: '-P', poolFlags: [] })
   const lease = state.shares.find(entry => entry.target.host === '10.0.0.9')
   assert.ok(lease, 'the copy leased a connection')
   assert.equal(lease.ticket.released, 1) // and handed it back once the bytes moved
+  // The rename replaced the part-file: the workspace holds exactly the answer.
+  assert.equal(readFileSync(local, 'utf8'), 'hello')
+  assert.deepEqual(readdirSync(dir), ['x'])
+  // An overwrite of an existing file says so honestly.
+  const over = build({ localExists: true })
+  over.state.nextRun = () => ({ status: 'succeeded', at: iso, exitCode: 0, stdout: '5 regular file', stderr: '', durationMs: 1 })
+  over.state.executeImpl = argvTail => {
+    writeFileSync(argvTail[argvTail.length - 1], 'hello2')
+  }
+  over.state.executeOut = { outcome: 'exit', exitCode: 0, stdout: '', stderr: '', durationMs: 2, truncated: false }
+  const overOut = await over.ops.download({ path: '/srv/x', localPath: local, overwrite: true })
+  assert.equal(overOut.overwrote, true)
+  assert.equal(readFileSync(local, 'utf8'), 'hello2')
+  // Upload: a real local source, and scp -r for a tree.
+  const srcDir = tempTree()
+  writeFileSync(join(srcDir, 'a'), 'aaa')
   const up = build()
   up.state.executeOut = { outcome: 'exit', exitCode: 0, stdout: '', stderr: '', durationMs: 2, truncated: false }
-  const upOut = await up.ops.upload({ path: '/srv/x', localPath: '/ws/x', recursive: true })
+  const upOut = await up.ops.upload({ path: '/srv/x', localPath: srcDir, recursive: true })
   assert.equal(upOut.ok, true)
   assert.equal(upOut.recursive, true)
+  assert.equal(upOut.files, 1)
   const upExec = up.state.calls.find(c => c.kind === 'execute')
   assert.ok(upExec.argvTail.includes('-r'))
-  assert.equal(upExec.argvTail.at(-2), '/ws/x') // upload: local first…
+  assert.equal(upExec.argvTail.at(-2), srcDir) // upload: local first…
   assert.equal(upExec.argvTail.at(-1), 'deploy@10.0.0.9:/srv/x') // …far end last
 })
 
-test('an upload whose source or far directory is missing says so in the useful direction', async () => {
+test('an upload is guarded at both ends: a missing source, and an existing destination', async () => {
+  const dir = tempTree()
+  // Missing local source: refused before the server is asked anything at all.
+  const gone = build()
+  const goneOut = await gone.ops.upload({ path: '/srv/x', localPath: join(dir, 'nope') })
+  assert.equal(goneOut.status, 'missing')
+  assert.match(goneOut.message, /Nothing at .* to upload\./)
+  assert.equal(gone.state.calls.filter(c => c.kind === 'execute').length, 0)
+  // An existing remote destination, no overwrite: the guard names it and refuses.
+  const exists = build()
+  exists.state.nextRun = () => ({ status: 'succeeded', at: iso, exitCode: 0, stdout: '9 regular file', stderr: '', durationMs: 1 })
+  const local = join(dir, 'x')
+  writeFileSync(local, '123456789')
+  const existsOut = await exists.ops.upload({ path: '/srv/x', localPath: local })
+  assert.equal(existsOut.status, 'refused-exists')
+  assert.match(existsOut.message, /already exists on 10\.0\.0\.9/)
+  assert.match(existsOut.hint, /Pass overwrite to replace the remote file/)
+  assert.equal(exists.state.calls.filter(c => c.kind === 'execute').length, 0) // untouched by scp
+  // With overwrite the same copy proceeds and says it replaced something.
+  exists.state.executeOut = { outcome: 'exit', exitCode: 0, stdout: '', stderr: '', durationMs: 2, truncated: false }
+  const overOut = await exists.ops.upload({ path: '/srv/x', localPath: local, overwrite: true })
+  assert.equal(overOut.status, 'moved')
+  assert.equal(overOut.overwrote, true)
+})
+
+test('an upload whose remote directory vanished between guard and copy says so in the useful direction', async () => {
+  const dir = tempTree()
+  const local = join(dir, 'x')
+  writeFileSync(local, 'hi')
   const { ops, state } = build()
-  state.executeOut = { outcome: 'exit', exitCode: 1, stdout: '', stderr: 'scp: /ws/x: No such file or directory', durationMs: 2, truncated: false }
-  const out = await ops.upload({ path: '/srv/x', localPath: '/ws/x' })
+  state.executeOut = { outcome: 'exit', exitCode: 1, stdout: '', stderr: 'scp: /srv/x: No such file or directory', durationMs: 2, truncated: false }
+  const out = await ops.upload({ path: '/srv/x', localPath: local })
   assert.equal(out.status, 'missing')
   assert.match(out.message, /remote directory does not exist/)
 })
@@ -681,3 +747,72 @@ test('a profile with no job registry never attempts a hand-over', async () => {
   assert.equal(state.calls.some(c => c.kind === 'run'), true)
   assert.equal(state.calls.some(c => c.kind === 'startRun'), false)
 })
+
+// ── cancellation: the caller's signal rides every child this layer starts ──
+test('the call cancellation reaches the transport for each remote action', async () => {
+  const controller = new AbortController()
+  const { ops, state } = build() // no jobs: the plain bounded wait runs
+  await ops.runCommand({ command: 'uptime' }, controller.signal)
+  assert.equal(state.calls[0].kind, 'run')
+  assert.equal(state.calls[0].options.signal, controller.signal)
+  const fileOps = build()
+  await fileOps.ops.readPath({ path: '/srv/x' }, controller.signal)
+  assert.equal(fileOps.state.calls[0].options.signal, controller.signal)
+  await fileOps.ops.writeRemote({ path: '/srv/x', content: 'hi' }, controller.signal)
+  assert.equal(fileOps.state.calls.at(-1).options.signal, controller.signal)
+  fileOps.state.nextRun = () => ({ status: 'succeeded', at: iso, exitCode: 0, stdout: 'abc', stderr: '', durationMs: 1 })
+  await fileOps.ops.editRemote({ path: '/srv/x', oldText: 'a', newText: 'z' }, controller.signal)
+  const editCalls = fileOps.state.calls.filter(c => c.kind === 'run')
+  assert.ok(editCalls.length >= 2, 'edit is read plus write')
+  assert.ok(editCalls.every(c => c.options.signal === controller.signal), 'both edit children are cancellable')
+  // Transfers carry the signal into the scp child — and into the stat pre-check
+  // that runs before it, so a cancel lands wherever the call happens to be.
+  const dir = tempTree()
+  const local = join(dir, 'x')
+  writeFileSync(local, 'hello')
+  const xfer = build()
+  xfer.state.executeOut = { outcome: 'exit', exitCode: 0, stdout: '', stderr: '', durationMs: 2, truncated: false }
+  await xfer.ops.upload({ path: '/srv/x', localPath: local }, controller.signal)
+  const execCall = xfer.state.calls.find(c => c.kind === 'execute')
+  assert.equal(execCall.signal, controller.signal)
+  assert.deepEqual(execCall.lane, { kind: 'file transfer', cap: DEFAULTS.maxConcurrentTransfers })
+  const stats = xfer.state.calls.filter(c => c.kind === 'run' && /^stat /.test(c.command ?? ''))
+  assert.ok(stats.length >= 1 && stats.every(c => c.options.signal === controller.signal))
+})
+
+test('a promoted hand-over stays cancellable while the call waits, and the started job is not', async () => {
+  // A job the registry already holds outlives the call that started it, so
+  // execBackground never forwards the caller's signal to the child; a foreground
+  // run that could get promoted is the opposite case — until the hand-over
+  // happens, the signal still owns the child.
+  const started = build({ jobs: registry() })
+  let resolveFinished
+  started.state.startRunOut = {
+    sources: [
+      { channel: 'stdout', read: () => ({ text: '', nextOffset: 0, lossy: false }) },
+      { channel: 'stderr', read: () => ({ text: '', nextOffset: 0, lossy: false }) }
+    ],
+    kill: () => {},
+    finished: new Promise(resolve => { resolveFinished = resolve })
+  }
+  const controller = new AbortController()
+  const waiting = started.ops.runCommand({ command: 'sleep 120' }, controller.signal)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const startRun = started.state.calls.find(c => c.kind === 'startRun')
+  assert.equal(startRun.options.signal, controller.signal)
+  // The command settles inside the wait window: a plain classified answer, and
+  // the promoted path never armed a kill the reader did not ask for.
+  resolveFinished({ outcome: 'exit', exitCode: 0, stdout: 'done\n', stderr: '', durationMs: 21, truncated: false })
+  const out = await waiting
+  assert.equal(out.run.status, 'succeeded')
+  // And backgrounding hands over without the caller's signal: cancelling the
+  // tool call after the job id arrived must not stop the running command.
+  const bg = build({ jobs: registry() })
+  bg.state.startRunOut = liveJob().job
+  const bgOut = await bg.ops.execBackground({ command: 'make world', callId: 'c1', rootCallId: 'r1' })
+  assert.equal(bgOut.status, 'started')
+  const bgRun = bg.state.calls.find(c => c.kind === 'startRun')
+  assert.equal(bgRun.options.signal, undefined)
+  assert.equal(bgRun.options.timeoutMs, 0) // a job arms no timer of its own
+}
+)
