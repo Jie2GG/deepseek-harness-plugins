@@ -224,8 +224,10 @@ result (`timeoutMs`, `outputBytes`, `notes`; transfers add `bytesLimit` and
 `limitMode` — `in-flight` when the ceiling was enforced against the bytes that
 moved, `pre-check` when it was enforced against what a walk or an enumeration
 said first — and echo their own transfer deadline rather than the command's; an
-edit adds `stale`, `restored`, and `versionChecked`, because which of those is
-true is the difference between a file, an undo, and a refusal). A value
+edit adds `stale`, `restored`, `versionChecked`, `contentVerified`, `verdict`,
+and `sha256`, because which of those is true is the difference between a file
+whose bytes were measured, a file whose length only happens to match, an undo,
+and a refusal). A value
 past the cap is no longer an error; a value that cannot mean a deadline (zero,
 negative, non-finite) still is, and the hint says where the line now sits.
 `readBounds` re-reads the volatile values per call — never snapshotted — so a
@@ -718,15 +720,22 @@ still open:
   and the command says `sudo` itself.
 - `edit` refuses a file larger than the read ceiling rather than replacing text it
   never saw, and since 0.0.34 it **guards what it overwrites**: the read asks for
-  the file's inode, size, and nanosecond mtime in the same round trip, the write
-  compares them in the same shell that truncates, and a change noticed in between
-  comes back `stale: true` with nothing written. A safety copy is taken before any
-  truncation — for `backup: false` too, under a private name that is removed once
-  the write is verified — the write is checked against the byte count it had to
-  leave, and a repair child then looks at the file before touching it and answers
-  with which of four things is true (the bytes landed, the file is intact, the
-  previous content is back at its own size, or the recovery failed and here is the
-  copy). **It is still a preview-and-confirm flow, not a transaction**: the window
+  the file's inode, size, nanosecond mtime **and SHA-256** in the same round trip,
+  the write re-measures both guards in the same shell that truncates, and a change
+  noticed in between comes back `stale: true` with nothing written. A safety copy is
+  taken before any truncation — for `backup: false` too, under a private name that is
+  removed once the write is verified — the write is checked against the byte count it
+  had to leave **and against the digest of the bytes it sent**, because a length is not
+  a content: 13 bytes may be the 13 bytes this edit composed, or 13 bytes somebody
+  else wrote. A repair child then looks at the file before touching it and answers
+  with which of the outcomes is true **and on what evidence** — a verdict (`landed`,
+  `intact`, `restored`, `unrecoverable`) carried either by a digest or by a byte count
+  alone. Since 0.0.35 a byte count buys no verdict: on a server with no `sha256sum`,
+  `shasum` or `openssl` the write still lands, the copy is kept, and the call ends
+  `ok: false` with `verdict: 'unknown'` and `contentVerified: false` rather than
+  claiming the bytes are this edit's. `restored: true` is set only when a digest says
+  the content this call read is back. **It is still a preview-and-confirm flow, not a
+  transaction**: the window
   between the version compare and the truncation is two shell builtins wide rather
   than a network trip, and a writer that lands inside it is still overwritten. The
   repair is not cancellable by the caller's abort — a reader who stopped the edit

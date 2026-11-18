@@ -92,74 +92,167 @@ test('previewEdit of an identical text is an empty diff, not a fake hunk', () =>
 // ── the shell sequence one guarded edit runs, stated where it can be read ───
 const guards = await import('../lib/edit.js')
 
-test('the edit read asks for the file and its version in the same round trip', () => {
+test('the edit read asks for the file, its version, and its digest in one round trip', () => {
   const command = guards.buildEditRead("'/etc/f'")
   assert.match(command, /^if \[ ! -f '\/etc\/f' \]; then exit 20; fi/)
   assert.match(command, /stat -c '%i\|%s\|%y' -- '\/etc\/f'/)
+  // The digest marker is what lets a later claim be about content and not about
+  // length, so it has to arrive before the body does.
+  assert.match(command, /printf 'ssh-plugin-sha256: %s\\n'/)
+  assert.match(command, /sha256sum -- '\/etc\/f'/)
+  assert.match(command, /shasum -a 256 -- '\/etc\/f'/)
+  assert.match(command, /openssl dgst -sha256 '\/etc\/f'/)
+  assert.ok(command.indexOf("ssh-plugin-sha256") < command.indexOf('cat --'), 'the marker must precede the body')
   assert.ok(command.indexOf('printf') < command.indexOf('cat --'), 'the marker must precede the body')
 })
 
-test('the version marker splits from the file without touching either', () => {
-  const split = guards.splitEditVersion("ssh-plugin: 7|5|2026-01-01 00:00:00.0 +0800\nfirst line\nsecond\n")
+test('the version and digest markers split from the file without touching either', () => {
+  const split = guards.splitEditVersion("ssh-plugin: 7|5|2026-01-01 00:00:00.0 +0800\nssh-plugin-sha256: aa\nfirst line\nsecond\n")
   assert.equal(split.version, '7|5|2026-01-01 00:00:00.0 +0800')
+  assert.equal(split.digest, 'aa')
   assert.equal(split.content, 'first line\nsecond\n')
-  // A server whose `stat` cannot answer leaves the marker empty: the edit runs
-  // without the guard, and the result says so rather than implying one ran.
-  const blind = guards.splitEditVersion('ssh-plugin: \nbody\n')
+  // A server with no checksum tool prints the marker empty: the edit runs, and the
+  // result says the content was never digested.
+  const noTool = guards.splitEditVersion('ssh-plugin: 7|5|t\nssh-plugin-sha256: \nbody\n')
+  assert.equal(noTool.version, '7|5|t')
+  assert.equal(noTool.digest, undefined)
+  assert.equal(noTool.content, 'body\n')
+  // A server whose `stat` cannot answer leaves the first marker empty.
+  const blind = guards.splitEditVersion('ssh-plugin: \nssh-plugin-sha256: bb\nbody\n')
   assert.equal(blind.version, undefined)
+  assert.equal(blind.digest, 'bb')
   assert.equal(blind.content, 'body\n')
-  // A reply with no marker at all is taken as plain file text, exactly as the
-  // read path has always treated it.
+  // The shape this protocol had before the digest existed is still read correctly:
+  // the body starts at the second line, and nothing claims a digest was taken.
+  const legacy = guards.splitEditVersion('ssh-plugin: 7|5|t\nbody\n')
+  assert.equal(legacy.version, '7|5|t')
+  assert.equal(legacy.digest, undefined)
+  assert.equal(legacy.content, 'body\n')
+  // A reply with no marker at all is plain file text, exactly as the read path has
+  // always treated it — including a file whose own first line looks like a digest.
   const plain = guards.splitEditVersion('just a file\n')
   assert.equal(plain.version, undefined)
+  assert.equal(plain.digest, undefined)
   assert.equal(plain.content, 'just a file\n')
   assert.equal(guards.splitEditVersion('').content, '')
 })
 
-test('the edit write guards, copies, replaces, and re-checks, in that order', () => {
+test('the edit write guards, copies, replaces, and re-checks by digest, in that order', () => {
   const command = guards.buildEditWrite({
     pathArg: "'/etc/f'",
     backupArg: "'/etc/f.dsh-bak'",
     version: '7|15|2026-01-01 00:00:00.000000000 +0800',
+    originalSha256: 'o'.repeat(64),
     expectedBytes: 13,
+    expectedSha256: 'e'.repeat(64),
     keepBackup: true
   })
-  const steps = [
-    command.indexOf('cp -p --'),
-    command.indexOf('cat > '),
-    command.indexOf('"$size" != 13'),
-  ]
-  assert.ok(steps.every(at => at > 0), JSON.stringify(steps))
+  const at = needle => command.indexOf(needle)
+  const steps = [at('cp -p --'), at('cat > '), at('"$size" != 13'), at('"$now" !=')]
+  assert.ok(steps.every(index => index > 0), JSON.stringify(steps))
   assert.deepEqual(steps, [...steps].sort((a, b) => a - b), 'the order is the promise')
+  // The pre-write digest is taken before the file is truncated, and any refusal it
+  // supports comes before the copy: a content change since the read means this edit
+  // is not the one the reader is looking at.
+  assert.ok(at('pre=$(') < at('cp -p --'), 'the state before the write is measured first')
+  assert.ok(at('"$pre" !=') < at('cp -p --'), 'a same-size rewrite since the read is refused before anything moves')
+  // The point of the whole exercise: the digest of what **landed** is compared after
+  // the write, and the byte count alone no longer closes the command.
+  assert.ok(at('"$now" =') === -1 && at('"$now" !=') > at('cat > '), 'the content is digested from what landed, not from what was sent')
   assert.match(command, /exit 21/) // a change since the read stops the edit
   assert.match(command, /exit 22/) // no safety copy, no write
   assert.match(command, /exit 23/) // the body stopped arriving
   assert.match(command, /exit 24/) // a short write is not a success
+  assert.match(command, /exit 28/) // same length, different bytes
+  assert.match(command, /exit 29/) // same length, and nothing on this server can tell
   assert.equal(command.includes('mv '), false, 'a rename would move the inode out from under the links')
   assert.equal(command.includes('rm -f'), false, 'the reader asked for the backup to stay')
 })
 
 test('a version token is quoted as one word, and an absent one leaves no guard behind', () => {
-  const odd = guards.buildEditWrite({ pathArg: "'/f'", backupArg: "'/b'", version: "7|1|it's 00:00", expectedBytes: 2, keepBackup: true })
+  const odd = guards.buildEditWrite({ pathArg: "'/f'", backupArg: "'/b'", version: "7|1|it's 00:00", originalSha256: 'a'.repeat(64), expectedBytes: 2, expectedSha256: 'b'.repeat(64), keepBackup: true })
   assert.match(odd, /!= '7\|1\|it'\\''s 00:00'/u)
-  const blind = guards.buildEditWrite({ pathArg: "'/f'", backupArg: "'/b'", version: undefined, expectedBytes: 2, keepBackup: false })
+  const blind = guards.buildEditWrite({ pathArg: "'/f'", backupArg: "'/b'", version: undefined, expectedBytes: 2, expectedSha256: 'b'.repeat(64), keepBackup: false })
   assert.equal(blind.includes('stat -c'), false)
   assert.match(blind, /cp -p -- '\/f' '\/b'/) // the copy is not optional
   assert.match(blind, /rm -f -- '\/b'/) // and it goes away once the write is verified
+  // A write with no original digest to compare against still checks what landed —
+  // the guard is one-sided, the verification is not.
+  assert.match(blind, /if \[ -n "\$pre" \] && \[ -n '' \]/u) // nothing to compare the read's digest against
+  assert.ok(blind.includes(`"$now" != '${'b'.repeat(64)}'`), 'the digest this edit promised is the one that closes it')
 })
 
-test('the repair child reports which of four things it found', () => {
-  const command = guards.buildEditRestore({ pathArg: "'/f'", backupArg: "'/b'", originalBytes: 15, intendedBytes: 13, keepBackup: true })
-  // A write that landed is not undone: the size is checked before the copy is read.
-  assert.ok(command.indexOf("= 13 ]; then exit 27") < command.indexOf('cp -p --'), 'the landed answer comes first')
-  assert.match(command, /ssh-plugin: landed/)
-  // No copy at all means nothing was ever truncated, which is a different sentence
-  // from a repair, and must not be reported as one.
-  assert.match(command, /if \[ ! -f '\/b' \]; then echo "ssh-plugin: intact \$size"; exit 0; fi/)
+test('the repair child states its verdict together with the evidence behind it', () => {
+  const command = guards.buildEditRestore({ pathArg: "'/f'", backupArg: "'/b'", originalBytes: 15, intendedBytes: 13, expectedSha256: 'e'.repeat(64), originalSha256: 'o'.repeat(64), keepBackup: true })
+  // A write that landed is not undone: the content is checked before the copy is read.
+  assert.ok(command.indexOf('landed digest') < command.indexOf('cp -p --'), 'the landed answer comes first')
+  assert.match(command, /ssh-plugin: landed digest \$size \$now/u)
+  assert.match(command, /ssh-plugin: landed sizeonly \$size -/u) // a server with no tool still says landed, quietly
+  assert.match(command, /if \[ ! -f '\/b' \]/u)
+  assert.match(command, /ssh-plugin: intact digest \$size \$now/u)
+  assert.match(command, /ssh-plugin: intact sizeonly \$size -/u)
+  assert.match(command, /ssh-plugin: intact none \$size -/u) // no reference to compare, so no proof
   assert.match(command, /ssh-plugin: unrecoverable/u) // the copy could not be applied
-  assert.match(command, /ssh-plugin: partial/u) // it came back at the wrong size
-  assert.match(command, /\$after" != 15/u)
-  assert.match(command, /echo 'ssh-plugin: restored'; true$/)
-  const cleaned = guards.buildEditRestore({ pathArg: "'/f'", backupArg: "'/b'", originalBytes: 15, intendedBytes: 13, keepBackup: false })
-  assert.match(cleaned, /echo 'ssh-plugin: restored'; rm -f -- '\/b'$/)
+  assert.match(command, /ssh-plugin: partial/u) // it came back as something else
+  // A restore is only `restored` when the file digests as the copy it came from.
+  assert.match(command, /"\$after" = "\$bak"/u)
+  assert.match(command, /echo "ssh-plugin: restored digest \$size \$after"; true; exit 0; fi/u)
+  // An unreadable file states `-` for its size rather than inventing a zero.
+  assert.match(command, /size=\$\{size:--\}/u)
+  const cleaned = guards.buildEditRestore({ pathArg: "'/f'", backupArg: "'/b'", originalBytes: 15, intendedBytes: 13, expectedSha256: 'e'.repeat(64), keepBackup: false })
+  assert.match(cleaned, /restored digest \$size \$after"; rm -f -- '\/b'/u)
+  const refused = guards.buildEditRestore({ pathArg: "'/f'", backupArg: "'/b'", originalBytes: 15, intendedBytes: 13, expectedSha256: 'e'.repeat(64), preSha256: 'p'.repeat(64), keepBackup: false })
+  assert.match(refused, /partial digest \$size \$after"; exit 26/u)
+  assert.equal(refused.indexOf('rm -f --') > refused.indexOf('partial digest'), false, 'a verdict this plugin cannot vouch for keeps the copy')
+})
+
+test('a write answer counts as verified only when it carries a digest', () => {
+  const verified = guards.parseWriteReport(`ssh-plugin: pre ${'p'.repeat(64)}\nssh-plugin: ok digest ${'d'.repeat(64)}`)
+  assert.equal(verified.evidence, 'digest')
+  assert.equal(verified.sha256, 'd'.repeat(64))
+  assert.equal(verified.preSha256, 'p'.repeat(64))
+  const counted = guards.parseWriteReport(`ssh-plugin: pre ${'p'.repeat(64)}\nssh-plugin: ok sizeonly 17`)
+  assert.equal(counted.evidence, 'sizeonly')
+  assert.equal(counted.sha256, undefined)
+  assert.equal(counted.bytes, 17)
+  const collision = guards.parseWriteReport(`ssh-plugin: pre -\nssh-plugin: mismatch 17 ${'x'.repeat(64)}`)
+  assert.equal(collision.evidence, 'digest', 'a refusal to match is still a digest of the real file')
+  assert.equal(collision.sha256, 'x'.repeat(64))
+  assert.equal(collision.preSha256, undefined, 'a dash is the server saying it has no digest, not a digest named dash')
+  assert.equal(collision.bytes, 17)
+  // An answer that never arrived, or arrived as anything else, is not evidence.
+  assert.equal(guards.parseWriteReport(undefined).evidence, 'none')
+  assert.equal(guards.parseWriteReport('').evidence, 'none')
+  assert.equal(guards.parseWriteReport('ssh-plugin: ok digest').evidence, 'none')
+})
+
+test('a repair verdict needs a digest to be believed', () => {
+  const restored = guards.parseRepairReport('ssh-plugin: restored digest 17 abc')
+  assert.equal(restored.verdict, 'restored')
+  assert.equal(restored.contentVerified, true)
+  assert.equal(restored.bytes, 17)
+  assert.equal(restored.sha256, 'abc')
+  // The same verdict reached by counting is a different claim, and the caller has
+  // to be able to tell them apart.
+  const counted = guards.parseRepairReport('ssh-plugin: restored sizeonly 17 -')
+  assert.equal(counted.verdict, 'restored')
+  assert.equal(counted.contentVerified, false)
+  assert.equal(counted.sha256, undefined)
+  const unattributed = guards.parseRepairReport('ssh-plugin: intact none 17 -')
+  assert.equal(unattributed.evidence, 'none')
+  assert.equal(unattributed.contentVerified, false)
+  const unreadable = guards.parseRepairReport('ssh-plugin: unrecoverable sizeonly - -')
+  assert.equal(unreadable.verdict, 'unrecoverable')
+  assert.equal(unreadable.bytes, undefined, 'the server could not read the file, and says so')
+  assert.equal(guards.parseRepairReport('').verdict, undefined)
+  assert.equal(guards.parseRepairReport('cat: /f: No such file\nssh-plugin: landed digest 3 abc').verdict, 'landed')
+  assert.equal(guards.parseRepairReport('ssh-plugin: landed 13').contentVerified, false, 'the old two-word marker proves nothing')
+})
+
+test('the digest a local edit is checked against is the digest of the bytes sent', () => {
+  // NIST's own vectors, so a changed algorithm or encoding shows up here first.
+  assert.equal(guards.digestHex(''), 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+  assert.equal(guards.digestHex('abc'), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
+  assert.equal(guards.digestHex('alpha\nbeta\ngamma\n'), guards.digestHex('alpha\nbeta\ngamma\n'), 'and it is stable')
+  assert.notEqual(guards.digestHex('alpha\nbeta\ngamma\n'), guards.digestHex('alpha\nBETA\ngamma\n'), 'a same-size change moves it')
 })

@@ -342,10 +342,14 @@ classified result.
   source's permission bits for a fresh one. A refused upload removes its temp; a
   recursive download refuses to land on a local directory that is not empty
   rather than copying the tree and then failing.
-  An `edit` reads the file **and its version** in one trip, copies it before
-  truncating, writes through the same inode, checks the size it had to leave, and
-  if any of that goes wrong a repair child puts the previous content back — then
-  says which of the four outcomes actually happened (`stale`, `restored`). The
+  An `edit` reads the file **and its version and its digest** in one trip, copies
+  it before truncating, writes through the same inode, checks the size it had to
+  leave **and the SHA-256 of the bytes it sent**, and if any of that goes wrong a
+  repair child puts the previous content back — then says which outcome happened and
+  on what evidence: `verdict` carried by a `digest`, or by a byte count alone, which
+  is reported as `unknown` and never as a success. The digest guard is what catches
+  the case a size check cannot see — another writer landing a body of the same length
+  and different bytes. The
   window between noticing a change and making one is now two shell builtins wide
   rather than a network trip, but it is a window: this is a preview-and-confirm
   flow, not a transaction. `dryRun: true` previews the match count and the diff

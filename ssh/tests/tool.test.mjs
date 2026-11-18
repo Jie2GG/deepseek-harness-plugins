@@ -3,6 +3,7 @@
 // own schema validator.
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import {
   REMOTE_TOOL_ACTIONS,
   REMOTE_TOOL_NAME,
@@ -16,6 +17,9 @@ import {
   buildRemoteTool
 } from '../lib/tool.js'
 import { defaultBounds } from '../lib/bounds.js'
+
+/** The digest this plugin would expect for a body, used to speak the server's side of the protocol. */
+const sha256Hex = (text) => createHash('sha256').update(text ?? '', 'utf8').digest('hex')
 import { DRAIN_MS } from '../lib/transport.js'
 import { createOps } from '../lib/ops.js'
 import { transferCallCeiling } from '../lib/transfer.js'
@@ -819,15 +823,21 @@ function remoteEditHarness (initial, path = '/srv/x', knobs = {}) {
   }
   const at = () => new Date().toISOString()
   const answer = (exitCode, over = {}) => ({ status: exitCode === 0 ? 'succeeded' : 'exit-nonzero', at: at(), exitCode, stdout: '', stderr: '', durationMs: 2, ...over })
+  const marker = (verdict, evidence, at, sha) => `ssh-plugin: ${verdict} ${evidence} ${String(at)} ${sha ?? '-'}`
   state.nextRun = (command, options) => {
     server.commands.push({ command, stdin: options.stdin })
     const gone = !server.files.has(path)
-    if (command.includes("printf 'ssh-plugin:")) {
-      // The read: the marker carries the version this server can state, and the
-      // body follows it — or the file is missing, which is exit 20.
+    const noTool = knobs.noSha === true
+    // Which of the three children is asking, told apart by what only that one says:
+    // the read prints the digest marker, the write both copies and replaces, and the
+    // repair opens by counting the bytes it is about to overwrite.
+    if (command.includes("printf 'ssh-plugin-sha256:")) {
+      // The read: a version token, the digest of the bytes it is about to hand over,
+      // then the body — or the file is gone, which is exit 20.
       if (gone) return answer(20)
       const version = knobs.noVersion === true ? '' : server.versions.get(path)
-      return answer(0, { stdout: `ssh-plugin: ${version ?? ''}\n${server.files.get(path) ?? ''}` })
+      const file = server.files.get(path) ?? ''
+      return answer(0, { stdout: `ssh-plugin: ${version ?? ''}\nssh-plugin-sha256: ${noTool ? '' : sha256Hex(file)}\n${file}` })
     }
     if (command.includes('cp -p --') && command.includes('cat >')) {
       if (gone) return answer(20)
@@ -838,63 +848,120 @@ function remoteEditHarness (initial, path = '/srv/x', knobs = {}) {
         const stampVersion = `9|${bytes(knobs.changedBeforeWrite)}|2026-01-01 00:00:01.500000000 +0800`
         server.versions.set(path, stampVersion)
       }
-      // 1. the version guard, in the same shell that is about to truncate
-      const wanted = /!= '([^']*)'/u.exec(command)?.[1]
+      const before = server.files.get(path) ?? ''
+      const pre = noTool ? null : sha256Hex(before)
+      const preLine = `ssh-plugin: pre ${pre ?? '-'}`
+      // 1. the version guard, then the content guard, in the order the shell runs them
+      const wanted = /2>\/dev\/null\)" != '([^']*)'/u.exec(command)?.[1]
       if (wanted !== undefined && wanted !== (server.versions.get(path) ?? '')) {
         return answer(21, { stderr: 'ssh-plugin: the file changed after it was read' })
       }
+      const promised = /\[ "\$pre" != '([0-9a-f]{64})' \]/u.exec(command)?.[1]
+      if (pre !== null && promised !== undefined && promised !== pre) {
+        // A same-length rewrite the version token could not see, stopped before the
+        // copy was made and before the file was truncated.
+        return answer(21, { stderr: 'ssh-plugin: the content changed after it was read' })
+      }
       // 2. the safety copy, which must succeed before anything is written
-      if (knobs.failCopy === true) return answer(22, { stderr: 'cp: cannot create regular file: No space left' })
-      const backupArg = /cp -p -- '[^']*' ('[^']*)'/u.exec(command)?.[1] ?? "\'/srv/x.dsh-bak\'"
+      if (knobs.failCopy === true) return answer(22, { stdout: preLine, stderr: 'cp: cannot create regular file: No space left' })
+      const backupArg = /cp -p -- '[^']*' ('[^']*)'/u.exec(command)?.[1] ?? "'/srv/x.dsh-bak'"
       const backupPath = backupArg.replaceAll(/^'|'$/gu, '')
-      const previous = server.files.get(path) ?? ''
-      server.backups.push({ backupPath, content: previous })
+      server.backups.push({ backupPath, content: before, sha: pre })
+      server.pre = pre
+      if (knobs.copyTampered !== undefined && server.backups.length > 0) {
+        // Something else wrote over the safety copy between the copy and the repair.
+        const taken = server.backups.at(-1)
+        taken.content = String(knobs.copyTampered)
+        taken.sha = noTool ? null : sha256Hex(String(knobs.copyTampered))
+      }
       // 3. the body, through the file's own inode
       const body = options.stdin ?? ''
-      // The size the write command promises to leave behind is stated in the
-      // command itself, so the fake reads its own marching orders rather than
-      // being told the answer by the test.
-      const expected = Number(/if \[ "\$size" != (\d+) \]/u.exec(command)?.[1] ?? bytes(body))
+      // The length and the digest this write has to leave behind are both stated in
+      // the command, so the fake reads its own marching orders rather than being
+      // told the answer by the test.
+      const expectedBytes = Number(/if \[ "\$size" != (\d+) \]/u.exec(command)?.[1] ?? bytes(body))
+      const expectedSha = /\[ "\$now" != '([0-9a-f]{64})' \]/u.exec(command)?.[1]
       if (knobs.lostAnswer === true) {
         // The bytes all arrived and the server was done with them; only the exit
         // status failed to come home. Restoring here would undo a finished edit.
         server.writes += 1
         server.files.set(path, body)
         server.versions.set(path, `7|${bytes(body)}|2026-01-01 00:00:02.000000000 +0800`)
-        return answer(23, { stderr: '' })
+        return answer(23, { stdout: preLine })
       }
       if (knobs.childDied === true) {
         server.files.set(path, body.slice(0, Math.floor(body.length / 2)))
         server.writes += 1
-        return answer(23, { stderr: 'ssh: kex_exchange_identification: Connection closed by remote host' })
+        return answer(23, { stdout: preLine, stderr: 'ssh: kex_exchange_identification: Connection closed by remote host' })
       }
+      const landed = typeof knobs.collision === 'string'
+        ? knobs.collision
+        : knobs.shortWrite === true
+          ? body.slice(0, Math.max(0, body.length - 3))
+          : body
       server.writes += 1
-      server.files.set(path, knobs.shortWrite === true ? body.slice(0, Math.max(0, body.length - 3)) : body)
-      server.versions.set(path, `7|${bytes(knobs.shortWrite === true ? body.slice(0, Math.max(0, body.length - 3)) : body)}|2026-01-01 00:00:02.000000000 +0800`)
-      // 4. the size the write had to leave behind
-      if (bytes(server.files.get(path)) !== expected) return answer(24, { stderr: '' })
-      // 5. the snapshot goes away when the reader never asked for a backup
+      server.files.set(path, landed)
+      server.versions.set(path, `7|${bytes(landed)}|2026-01-01 00:00:02.000000000 +0800`)
+      // 4. the length check, and only then the digest check
+      if (bytes(landed) !== expectedBytes) return answer(24, { stdout: preLine })
+      if (noTool) return answer(29, { stdout: `${preLine}\nssh-plugin: ok sizeonly ${bytes(landed)}` })
+      if (expectedSha !== undefined && expectedSha !== sha256Hex(landed)) {
+        return answer(28, { stdout: `${preLine}\nssh-plugin: mismatch ${bytes(landed)} ${sha256Hex(landed)}` })
+      }
+      // 5. the snapshot goes away when the reader never asked for a backup, and only
+      // on this path: a write the digest could not vouch for keeps it.
       if (command.includes('rm -f --')) server.backups = server.backups.filter(entry => entry.backupPath !== backupPath)
-      return answer(0)
+      return answer(0, { stdout: `${preLine}\nssh-plugin: ok digest ${sha256Hex(landed)}` })
     }
     if (command.startsWith('size=$(wc -c')) {
-      // The repair child: it reads the file before it touches anything, then says
-      // which of four things turned out to be true. The markers are part of the
-      // contract `ops.ts` writes its sentences from, so the fake answers with them.
-      const intended = Number(/= (\d+) \]; then echo .ssh-plugin: landed/u.exec(command)?.[1] ?? -1)
-      if (bytes(server.files.get(path)) === intended) return answer(27, { stdout: 'ssh-plugin: landed\n' })
+      // The repair child: it digests the file before it touches anything, then says
+      // which of the outcomes turned out to be true, and on what evidence. The
+      // markers are part of the contract `ops.ts` writes its sentences from, so the
+      // fake answers by re-measuring its own state the way the shell would.
+      const file = server.files.get(path) ?? ''
+      const atBytes = bytes(file)
+      const now = noTool ? null : sha256Hex(file)
+      const expected = /\[ "\$now" = '([0-9a-f]{64})' \]; then echo "ssh-plugin: landed digest/u.exec(command)?.[1]
+      const intended = Number(/\[ "\$size" = (\d+) \]; then echo "ssh-plugin: landed sizeonly/u.exec(command)?.[1])
+      const original = Number(/\[ "\$size" = (\d+) \]; then echo "ssh-plugin: intact sizeonly/u.exec(command)?.[1])
+      const known = /\[ "\$bak" = '([0-9a-f]{64})' \]/u.exec(command)?.[1]
+      if (now !== null && expected !== undefined && now === expected) return answer(27, { stdout: `${marker('landed', 'digest', atBytes, now)}\n` })
+      if (now === null && atBytes === intended) return answer(27, { stdout: `${marker('landed', 'sizeonly', atBytes)}\n` })
       const backup = server.backups.at(-1)
-      if (backup === undefined) return answer(0, { stdout: `ssh-plugin: intact ${bytes(server.files.get(path))}\n` })
+      if (backup === undefined) {
+        // Nothing to put back: either the file never changed, or it is somebody
+        // else's now and this call cannot say which.
+        if (now !== null && (server.pre === null || server.pre === undefined || now === server.pre)) {
+          return answer(0, { stdout: `${marker('intact', 'digest', atBytes, now)}\n` })
+        }
+        if (now === null) {
+          return atBytes === original
+            ? answer(0, { stdout: `${marker('intact', 'sizeonly', atBytes)}\n` })
+            : answer(25, { stdout: `${marker('unrecoverable', 'sizeonly', atBytes)}\n` })
+        }
+        return answer(25, { stdout: `${marker('unrecoverable', 'digest', atBytes, now)}\n` })
+      }
       if (knobs.failRestore === true) {
-        return answer(25, { stdout: `ssh-plugin: unrecoverable ${bytes(server.files.get(path))}\n`, stderr: 'cp: /dev/sda: Read-only file system' })
+        return answer(25, {
+          stdout: `${marker('unrecoverable', noTool ? 'sizeonly' : 'digest', atBytes, now)}\n`,
+          stderr: 'cp: /dev/sda: Read-only file system',
+        })
       }
       server.files.set(path, backup.content)
-      const original = Number(/\$after" != (\d+) \]/u.exec(command)?.[1] ?? bytes(backup.content))
-      if (bytes(backup.content) !== original) {
-        return answer(26, { stdout: `ssh-plugin: partial ${bytes(backup.content)}\n` })
+      const back = bytes(backup.content)
+      const bak = noTool ? null : sha256Hex(backup.content)
+      if (bak !== null) {
+        if (known === undefined || bak === known) {
+          if (command.includes('rm -f --')) server.backups = server.backups.filter(entry => entry.backupPath !== backup.backupPath)
+          return answer(0, { stdout: `${marker('restored', 'digest', back, bak)}\n` })
+        }
+        return answer(26, { stdout: `${marker('partial', 'digest', back, bak)}\n` })
       }
-      if (command.includes('rm -f --')) server.backups = server.backups.filter(entry => entry.backupPath !== backup.backupPath)
-      return answer(0, { stdout: 'ssh-plugin: restored\n' })
+      if (atBytes === original) {
+        if (command.includes('rm -f --')) server.backups = server.backups.filter(entry => entry.backupPath !== backup.backupPath)
+        return answer(0, { stdout: `${marker('restored', 'sizeonly', back)}\n` })
+      }
+      return answer(26, { stdout: `${marker('partial', 'sizeonly', back)}\n` })
     }
     return answer(0)
   }
@@ -964,7 +1031,10 @@ test('an edit without dryRun still writes through and keeps its backup', async (
   assertPayloadValid(h.definition.output.schema, payload)
   assert.equal(h.server.writes, 1)
   assert.equal(h.server.files.get(h.path), 'one\nBETA two\n')
-  assert.deepEqual(h.server.backups, [{ backupPath: `${h.path}.dsh-bak`, content: 'one\nbeta two\n' }])
+  assert.deepEqual(
+    h.server.backups.map(({ backupPath, content }) => ({ backupPath, content })),
+    [{ backupPath: `${h.path}.dsh-bak`, content: 'one\nbeta two\n' }],
+  )
 })
 
 test('dryRun false is a real edit, exactly like dryRun absent', async () => {
@@ -1077,10 +1147,50 @@ test('a failed repair says where the previous content is instead of claiming suc
   assert.equal(payload.ok, false)
   assert.equal(payload.restored, false)
   assert.equal(payload.backup, '/srv/x.dsh-bak')
-  assert.match(payload.message, /putting the file back did not succeed/)
-  assert.match(payload.message, /holds \d+ bytes; the previous content was 13/)
+  assert.match(payload.message, /could not be put back where it started/)
+  assert.match(payload.message, /holds \d+ bytes, digest [0-9a-f]{64}; the content this call read was 13 bytes/)
+  assert.equal(payload.verdict, 'unrecoverable')
   assert.match(payload.hint, /Read \/srv\/x\.dsh-bak to recover the previous content by hand/)
   assertPayloadValid(h.definition.output.schema, payload)
+})
+
+test('a server that cannot state a checksum writes, and is not believed', async () => {
+  // The fail-closed half of the contract: the file may well be correct, and this
+  // call still refuses to say so, because nothing measured the bytes.
+  const h = remoteEditHarness('one\nbeta two\n', '/srv/x', { noSha: true })
+  const payload = await h.definition.execute({ action: 'edit', path: h.path, oldText: 'beta', newText: 'BETA' }, h.exec)
+  assert.equal(payload.ok, false)
+  assert.equal(payload.verdict, 'unknown')
+  assert.equal(payload.contentVerified, false)
+  assert.equal(payload.sha256, undefined)
+  assert.equal(payload.dryRun, undefined, 'a preview is not what an unverified write means')
+  assert.match(payload.message, /stated no checksum/)
+  assert.match(payload.message, /not proven to be this edit's content/)
+  assert.equal(payload.backup, '/srv/x.dsh-bak', 'and the copy is named, because it was kept')
+  assert.match(payload.hint, /Read \/srv\/x to see what is in it/)
+  assertPayloadValid(h.definition.output.schema, payload)
+  const rendered = h.definition.output.render({ action: 'edit', path: h.path }, payload)[0].text
+  assert.match(rendered, /verdict=unknown \(content not verified by this server\)/)
+  assert.equal(h.server.files.get(h.path), 'one\nBETA two\n', 'the bytes did go down; only the proof is missing')
+})
+
+test('a same-length body of different bytes is refused at the tool layer, and the file comes back', async () => {
+  // The case the byte check could never see: 13 bytes went down, and they are not
+  // the 13 bytes this edit composed.
+  const initial = 'one\nbeta two\n'
+  const h = remoteEditHarness(initial, '/srv/x', { collision: 'one\nBETx two\n' })
+  assert.equal(Buffer.byteLength('one\nBETx two\n'), Buffer.byteLength('one\nBETA two\n'))
+  const payload = await h.definition.execute({ action: 'edit', path: h.path, oldText: 'beta', newText: 'BETA' }, h.exec)
+  assert.equal(payload.ok, false)
+  assert.equal(payload.verdict, 'restored')
+  assert.equal(payload.restored, true)
+  assert.equal(payload.contentVerified, true)
+  assert.equal(payload.sha256, sha256Hex(initial))
+  assert.match(payload.message, /previous content was put back/)
+  assertPayloadValid(h.definition.output.schema, payload)
+  assert.equal(h.server.files.get(h.path), initial)
+  const commands = h.server.commands.map(entry => entry.command)
+  assert.ok(commands.some(command => command.startsWith('size=$(wc -c')), 'the repair child ran')
 })
 
 test('an edit with backup off still copies the file first, and cleans the copy up after', async () => {
@@ -1105,9 +1215,10 @@ test('a server that states no version still edits, and says the guard was off', 
   assert.equal(payload.ok, true)
   assert.equal(payload.versionChecked, false)
   const write = h.server.commands.find(entry => entry.command.includes('cat >'))
-  // No comparison against a token it never got — and the copy and the size check
-  // are still there, which is what makes the sentence honest.
-  assert.equal(write.command.includes("!= '"), false)
+  // No comparison against a version token it never got — the stat guard is simply
+  // absent. The digest guard, the copy and the size check are still there, which is
+  // what makes the sentence honest.
+  assert.equal(write.command.includes("stat -c '%i|%s|%y'"), false)
   assert.match(write.command, /cp -p --/)
   assert.match(write.command, /if \[ "\$size" != \d+ \]/u)
   // A preview on such a server warns the reader rather than implying a guard it

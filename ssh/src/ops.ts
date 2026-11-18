@@ -23,15 +23,21 @@ import {
   buildEditWrite,
   buildEditRestore,
   splitEditVersion,
+  digestHex,
+  parseWriteReport,
+  parseRepairReport,
   EDIT_MISSING,
   EDIT_STALE,
   EDIT_BACKUP_FAILED,
   EDIT_WRITE_FAILED,
   EDIT_SIZE_MISMATCH,
+  EDIT_CONTENT_MISMATCH,
+  EDIT_CONTENT_UNVERIFIED,
   EDIT_RESTORE_FAILED,
   EDIT_RESTORE_UNVERIFIED,
   EDIT_LANDED_UNCONFIRMED,
 } from './edit.ts'
+import type { RepairReport } from './edit.ts'
 import { startRemoteJob } from './jobs.ts'
 import type { JobRegistry } from './jobs.ts'
 import { remotePathArg, shellQuote, leadingProgram, classifyCollectedRun, JOB_LANE } from './transport.ts'
@@ -137,8 +143,31 @@ export interface RemoteFileResult {
   backup?: string
   /** For `edit`: true when the write stopped because the file had changed under the read. */
   stale?: boolean
-  /** For `edit`: true when a failed write was undone from the copy, and the size says so. */
+  /**
+   * For `edit`: true when a failed write was undone from the copy **and the server
+   * digested the result as the content this call read**. A copy that merely counts
+   * out at the right length does not set this — see `verdict`.
+   */
   restored?: boolean
+  /**
+   * For `edit`: whether the content the server has now was confirmed by digest, as
+   * opposed to being counted by size or not observed at all. `false` means the
+   * plugin cannot say what the file holds; read it.
+   */
+  contentVerified?: boolean
+  /**
+   * For `edit`: what the last command this plugin ran can prove about the file.
+   *
+   * - `landed` — the intended content is in the file, proven by digest;
+   * - `intact` — the file still holds the content this call read, proven by digest;
+   * - `restored` — the copy was put back and digests as the content this call read;
+   * - `unrecoverable` — the file is not what this call read and cannot be put back;
+   * - `unknown` — the server could only count bytes, or never answered, so the
+   *   content is undetermined. Never read this as a success.
+   */
+  verdict?: EditVerdict
+  /** For `edit`: the SHA-256 the server stated for the file as it stands now. */
+  sha256?: string
   /**
    * For `edit`: whether this server stated an inode, size, and nanosecond mtime
    * for the file, which is what a write is checked against before anything is
@@ -338,6 +367,39 @@ export interface TempSummary {
  * local one.
  */
 const EDIT_REPAIR_BUDGET_MS = 30_000
+
+/** The one word a caller may rely on about an edit's file state. */
+export type EditVerdict = 'landed' | 'intact' | 'restored' | 'unrecoverable' | 'unknown'
+
+/**
+ * Turn the repair child's answer into the verdict this plugin reports.
+ *
+ * The rule is the whole point of the exercise: **a verdict that claims the file
+ * holds particular content needs a digest to back it.** A byte count that matches
+ * is a hint about the file, not a statement about it — content B of the same size
+ * as content A satisfies the count and falsifies the claim — so every answer the
+ * server could only count its way to comes back `unknown`, and no caller reads a
+ * same-size collision as a verified edit. A refusal to restore is different in
+ * kind: whether it was stated by digest or by size, there is nothing left to put
+ * back, so it stays `unrecoverable` either way.
+ * @param report - what the repair child attested, with its evidence level.
+ * @returns the outward verdict, and nothing else — the prose is built from it.
+ */
+function editVerdict (report: RepairReport): EditVerdict {
+  switch (report.verdict) {
+    case 'unrecoverable':
+    case 'partial':
+      return 'unrecoverable'
+    case 'landed':
+    case 'intact':
+    case 'restored':
+      return report.contentVerified ? report.verdict : 'unknown'
+    default:
+      // No marker at all: the repair child died before it could answer, or its
+      // stdout never arrived. Anything else would be this plugin inventing a state.
+      return 'unknown'
+  }
+}
 
 function targetOf(source: RemoteTarget): RemoteTarget {
   return {
@@ -1316,11 +1378,13 @@ export function createOps(deps: OpsDeps): Ops {
           hint: 'Raise the output ceiling in Settings → Remote connections, or replace the file with write.',
         }
       }
-      // The read answered with a version marker and then the file. A server whose
-      // `stat` could not state one leaves the marker empty, and the edit runs
-      // without the guard rather than refusing to run — the safety copy and the
-      // byte check still stand, and the result says no version was compared.
-      const { version, content } = splitEditVersion(read.stdout ?? '')
+      // The read answered with two markers and then the file: the `stat` token, and
+      // the digest this server computed over the bytes it was about to hand over. A
+      // server whose `stat` cannot state a token, or that has no checksum tool,
+      // leaves that marker empty, and the edit runs without the corresponding guard
+      // rather than refusing to run — the safety copy and the checks that follow
+      // still stand, and the result says which guard was in force.
+      const { version, digest: originalSha256, content } = splitEditVersion(read.stdout ?? '')
       const outcome = applyEdit({
         content,
         oldText,
@@ -1380,8 +1444,11 @@ export function createOps(deps: OpsDeps): Ops {
       // about and would quietly break all three (measured on a live server: an
       // overwrite kept `inode 584, mode 640, links 2`, and the second name saw the
       // new content because it is the same file). So the integrity comes from the
-      // copy taken before the truncation and the byte count taken after it, not
-      // from an atomic swap this plugin would have to apologise for later.
+      // copy taken before the truncation and the **digest of what is in the file
+      // after it**, not from an atomic swap this plugin would have to apologise for
+      // later. The digest is asked of the server, never computed here from the text
+      // we meant to send: counting the bytes was the old check, and a second writer
+      // can produce the same count with different content.
       //
       // What that buys, and what it does not: the version guard runs in the same
       // shell that truncates the file, which shrinks the window between noticing a
@@ -1392,11 +1459,14 @@ export function createOps(deps: OpsDeps): Ops {
         ? `${path}.dsh-bak`
         : `${path}.dsh-snap-${process.pid.toString(36)}-${Math.random().toString(36).slice(2, 8)}`
       const backupArg = remotePathArg(backupPath)
+      const expectedSha256 = digestHex(outcome.text)
       const wrote = await runner.run(targetOf(record), settings, auth, buildEditWrite({
         pathArg: quoted,
         backupArg,
         version,
+        ...(originalSha256 === undefined ? {} : { originalSha256 }),
         expectedBytes: outcome.bytesAfter,
+        expectedSha256,
         keepBackup,
       }), {
         stdin: outcome.text,
@@ -1415,21 +1485,73 @@ export function createOps(deps: OpsDeps): Ops {
         versionChecked: version !== undefined,
         durationMs,
       }
-      if (wrote.status === 'succeeded') {
+      const report = parseWriteReport(wrote.stdout)
+      if (wrote.status === 'succeeded' && report.evidence === 'digest') {
         // The write command removes the copy itself when the reader did not ask
         // for one, so a success that says `backup` is a success whose previous
         // content really is where the sentence says it is.
-        return { ...base, ok: true, status: 'succeeded' as const, ...(keepBackup ? { backup: backupPath } : {}) }
+        return {
+          ...base,
+          ok: true,
+          status: 'succeeded' as const,
+          contentVerified: true,
+          verdict: 'landed' as const,
+          sha256: report.sha256 ?? expectedSha256,
+          ...(keepBackup ? { backup: backupPath } : {}),
+        }
+      }
+      if (wrote.status === 'succeeded') {
+        // Exit 0 without a digest to stand on (a server with no `sha256sum`,
+        // `shasum`, or `openssl`): the count says the body is there, and nothing
+        // on this server can say the bytes are. The copy stays where it is for
+        // either value of `backup`, because dropping it is a claim this branch
+        // cannot support.
+        return {
+          ...base,
+          ok: false,
+          status: 'succeeded' as const,
+          contentVerified: false,
+          verdict: 'unknown' as const,
+          ...(report.bytes === undefined ? {} : { size: report.bytes }),
+          backup: backupPath,
+          message: `${path} holds ${String(report.bytes ?? outcome.bytesAfter)} bytes, which is the length this edit sent, but this server stated no checksum for the file, so it is not proven to be this edit's content.`,
+          hint: `Read ${path} to see what is in it, and recover the previous content from ${backupPath} if that is not it. Do not re-run the edit blind: it would read the file fresh.`,
+        }
+      }
+      if (wrote.exitCode === EDIT_CONTENT_UNVERIFIED) {
+        // The write finished and the count matches; this server has no
+        // `sha256sum`, `shasum`, or `openssl`, so nothing here can prove the bytes
+        // are the ones this edit sent. No repair: the file is not known to be
+        // damaged, and undoing a change that probably landed would be a worse guess
+        // than naming the doubt. The copy is left in place for exactly that reason,
+        // whatever `backup` was asked for.
+        return {
+          ...base,
+          ok: false,
+          status: 'exit-nonzero' as const,
+          contentVerified: false,
+          verdict: 'unknown' as const,
+          ...(report.bytes === undefined ? {} : { size: report.bytes }),
+          backup: backupPath,
+          message: `${path} holds ${String(report.bytes ?? outcome.bytesAfter)} bytes, which is the length this edit sent, but this server stated no checksum for the file, so those bytes are not proven to be this edit's content.`,
+          hint: `Read ${path} to see what is in it; the previous content is at ${backupPath} until you confirm. Do not re-run the edit blind, and put a sha256 tool (sha256sum, shasum, or openssl) on the server if this answer is not good enough.`,
+        }
       }
       // A refusal that stopped before the file was touched needs no repair, and
       // says so in the same breath it gives the reason.
       if (wrote.exitCode === EDIT_STALE) {
+        // Two guards can refuse: the `stat` token moved, or — invisible to a
+        // same-size rewrite with a coarse mtime — the content the server digested
+        // at write time is not the content the read digested. Which one happened is
+        // what the child said on stderr. No write verdict applies here: this call
+        // never truncated the file, and what is in it now belongs to someone else.
+        const byContent = (wrote.stderr ?? '').includes('content changed')
         return {
           ...base,
           ok: false,
           status: 'exit-nonzero' as const,
           stale: true,
-          message: `The file changed on ${record.host} between reading it and editing it, so this edit stopped before writing anything${version === undefined ? '' : ` (it was ${version} at the read)`}.`,
+          message: `The file changed on ${record.host} between reading it and editing it, so this edit stopped before writing anything${byContent ? ' (its content no longer matches the digest taken at the read)' : ''}${version === undefined ? '' : ` (it was ${version} at the read)`}.`,
           hint: 'Read the file again, then re-run the edit against what is there now.',
         }
       }
@@ -1466,6 +1588,9 @@ export function createOps(deps: OpsDeps): Ops {
         backupArg,
         originalBytes: outcome.bytesBefore,
         intendedBytes: outcome.bytesAfter,
+        expectedSha256,
+        ...(originalSha256 === undefined ? {} : { originalSha256 }),
+        ...(report.preSha256 === undefined ? {} : { preSha256: report.preSha256 }),
         keepBackup,
       }), {
         maxOutputBytes: settings.maxOutputBytes,
@@ -1474,56 +1599,126 @@ export function createOps(deps: OpsDeps): Ops {
       const reason = wrote.stderr === undefined || wrote.stderr === ''
         ? `the write child ended ${String(wrote.exitCode ?? wrote.status)}`
         : wrote.stderr
-      // The repair child says which of four things is true. Reading its answer,
-      // rather than assuming the write left a mess, is what keeps the sentences
-      // below supportable: a cancelled call that stopped before the truncation
-      // must not be reported as a repair, and a lost answer is not a failure to
-      // write.
-      const marker = /^ssh-plugin: (landed|intact|restored|unrecoverable|partial)( \d+)?/u.exec((repaired.stdout ?? '').trim())
-      const found = marker?.[1]
-      const atBytes = marker?.[2] === undefined ? undefined : Number(marker[2])
-      if (found === 'landed' || repaired.exitCode === EDIT_LANDED_UNCONFIRMED) {
+      // The repair child says which of five things is true about the file, and says
+      // **how it knows**. Reading its answer, rather than assuming the write left a
+      // mess, is what keeps the sentences below supportable: a cancelled call that
+      // stopped before the truncation must not be reported as a repair, and a lost
+      // answer is not a failure to write. And a verdict the server counted its way
+      // to is reported as `unknown`, because the count is not the content.
+      const repair = parseRepairReport(repaired.stdout)
+      const verdict = editVerdict(repair)
+      const atBytes = repair.bytes
+      const measured = `${atBytes === undefined ? 'an unknown number of' : String(atBytes)} bytes`
+      const digestNote = repair.sha256 === undefined ? '' : `, digest ${repair.sha256}`
+      if (repair.verdict === 'landed') {
         return {
           ...base,
           ok: false,
           status: wrote.status,
+          contentVerified: repair.contentVerified,
+          verdict,
+          ...(repair.sha256 === undefined ? {} : { sha256: repair.sha256 }),
+          ...(atBytes === undefined ? {} : { size: atBytes }),
           backup: backupPath,
-          message: `The answer from the write never arrived, but ${path} now holds the ${String(outcome.bytesAfter)} bytes this edit meant to send — the change is on the server, and the previous content is at ${backupPath}.`,
+          message: repair.contentVerified
+            ? `The answer from the write never arrived, but the server has since digested ${path} at exactly the content this edit meant to send (${measured}${digestNote}) — the change is on the server, and the previous content is at ${backupPath}.`
+            : `The answer from the write never arrived, and ${path} now holds ${measured}, the length this edit meant to send — but this server stated no checksum, so those bytes are not proven to be this edit's content. The previous content is at ${backupPath}.`,
           hint: 'Read the file to confirm it, rather than editing it again from memory.',
         }
       }
-      if (found === 'intact') {
+      if (repair.verdict === 'intact') {
         // Nothing was truncated: the call stopped before the write reached the
         // file, so there was nothing to put back and no copy to promise.
         return {
           ...base,
           ok: false,
           status: wrote.status,
-          message: `The edit stopped (${reason.slice(0, 300)}) before the write reached ${path}; the file still holds ${String(atBytes ?? outcome.bytesBefore)} bytes, as it did before.`,
+          contentVerified: repair.contentVerified,
+          verdict,
+          ...(atBytes === undefined ? {} : { size: atBytes }),
+          ...(repair.sha256 === undefined ? {} : { sha256: repair.sha256 }),
+          message: repair.contentVerified
+            ? `The edit stopped (${reason.slice(0, 300)}) before the write reached ${path}; the server has since digested the file as the content this call read (${measured}${digestNote}).`
+            : `The edit stopped (${reason.slice(0, 300)}) before the write reached ${path}; the file still holds ${measured}, the length it had before, though this server stated no checksum to prove the content did not move.`,
           hint: 'Run the same edit again, or read the file first if other writers are on it.',
         }
       }
-      if (found === 'restored' && repaired.status === 'succeeded') {
+      if (repair.verdict === 'restored' && repair.contentVerified && repaired.status === 'succeeded') {
+        // `restored: true` is only ever set on a digest: this is the field a caller
+        // reads as "the file is back the way it was", and a byte count cannot carry
+        // that claim.
         return {
           ...base,
           ok: false,
           status: wrote.status,
+          contentVerified: true,
+          verdict: 'restored' as const,
+          ...(atBytes === undefined ? {} : { size: atBytes }),
+          ...(repair.sha256 === undefined ? {} : { sha256: repair.sha256 }),
           ...(keepBackup ? { backup: backupPath } : {}),
           restored: true,
-          message: `The write failed (${reason.slice(0, 300)}), so the previous content was put back at ${path}.`,
+          message: `The write failed (${reason.slice(0, 300)}), so the previous content was put back at ${path} and the server has digested it as the content this call read${digestNote}.`,
           hint: 'Read the file to see it as it was, then try the edit again.',
         }
       }
+      if (repair.verdict === 'restored') {
+        // The copy went back and the length is the one this call read, and that is
+        // as far as a server without a checksum tool can go.
+        return {
+          ...base,
+          ok: false,
+          status: wrote.status,
+          contentVerified: false,
+          verdict: 'unknown' as const,
+          ...(atBytes === undefined ? {} : { size: atBytes }),
+          ...(keepBackup ? { backup: backupPath } : {}),
+          message: `The write failed (${reason.slice(0, 300)}), so the copy this edit took was written back at ${path}, and it counts out at ${measured} — the length this call read. This server stated no checksum, so the content is not proven to be back.`,
+          hint: `Read ${path} to see it for yourself${keepBackup ? `, or recover it from ${backupPath}` : ''}, then try the edit again.`,
+        }
+      }
+      if (verdict === 'unrecoverable') {
+        // Either the copy is gone, or the write back failed, or what came back is
+        // provably not the content this call read. All three need the same thing
+        // from the reader: the file is not what it was, and here is where the copy
+        // is (or that there is no copy).
+        const where = repair.verdict === 'partial'
+          ? 'the copy was written back but is not the content this call read'
+          : repair.verdict === 'unrecoverable'
+            ? 'there is no copy left to put back, or putting it back failed'
+            : `the repair child ended ${String(repaired.exitCode ?? repaired.status)}`
+        return {
+          ...base,
+          ok: false,
+          status: wrote.status,
+          contentVerified: repair.contentVerified,
+          verdict: 'unrecoverable' as const,
+          ...(atBytes === undefined ? {} : { size: atBytes }),
+          ...(repair.sha256 === undefined ? {} : { sha256: repair.sha256 }),
+          backup: backupPath,
+          restored: false,
+          message: `The write failed (${reason.slice(0, 300)}) and the file could not be put back where it started (${where}). ${path} holds ${measured}${digestNote}; the content this call read was ${String(outcome.bytesBefore)} bytes.`,
+          hint: `Read ${backupPath} to recover the previous content by hand, then retry the edit against what is there now.`,
+        }
+      }
       // Everything else is the bad news, said with the byte count the server just
-      // reported rather than a guess about it.
-      const where = repaired.status === 'succeeded' ? 'the repair reported no copy of the previous content' : `the repair child ended ${String(repaired.exitCode ?? repaired.status)}`
+      // reported rather than a guess about it — and with no verdict, because the
+      // repair never answered.
+      const where = repaired.status === 'succeeded'
+        ? 'the repair child answered without stating a verdict'
+        : `the repair child ended ${String(repaired.exitCode ?? repaired.status)}`
       return {
         ...base,
         ok: false,
         status: wrote.status,
+        contentVerified: false,
+        verdict: 'unknown' as const,
+        ...(atBytes === undefined ? {} : { size: atBytes }),
         backup: backupPath,
         restored: false,
-        message: `The write failed (${reason.slice(0, 300)}) and putting the file back did not succeed (${where}). ${path} holds ${String(atBytes ?? 'an unknown number of')} bytes; the previous content was ${String(outcome.bytesBefore)}.`,
+        // The repair never answered, so this call does not know whether the file was
+        // put back or left half written. Saying so is the whole point: the caller has
+        // to treat it as unverified, not as a restore.
+        message: `The write failed (${reason.slice(0, 300)}) and this call cannot say what state ${path} is in (${where}). ${path} holds ${measured}; the previous content was ${String(outcome.bytesBefore)} bytes.`,
         hint: `Read ${backupPath} to recover the previous content by hand, then retry the edit.`,
       }
     },

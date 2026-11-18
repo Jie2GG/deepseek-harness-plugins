@@ -9,7 +9,10 @@ import { join } from 'node:path'
 import { createOps } from '../lib/ops.js'
 import { DEFAULTS } from '../lib/config.js'
 import { SshError } from '../lib/types.js'
+import { createHash } from 'node:crypto'
 import { fakeRunner, fakeStore, fakeSecrets, record } from './helpers.mjs'
+
+const sha256Hex = text => createHash('sha256').update(text, 'utf8').digest('hex')
 import { defaultBounds } from '../lib/bounds.js'
 
 function build ({ records = [record()], store, secrets, askpassReady = true, localExists = false, jobs, bounds } = {}) {
@@ -230,14 +233,91 @@ test('write builds one shell line: guard, mkdir, redirect, content through stdin
 })
 
 // ── edit: read, decide locally, back up, write through the same inode ───────
+/**
+ * A server that speaks the edit protocol, in memory. It answers the read with the
+ * version token and the digest it computed over the bytes it holds, applies a write
+ * to its own copy, and re-digests whatever landed. `over` is where a test says what
+ * kind of server it is: one with no checksum tool (`noSha`), one whose bytes came
+ * out different from the bytes sent (`landing`), one whose answer never arrived
+ * (`lostAnswer`), one whose repair found something other than the copy (`repair`).
+ * The commands themselves are checked by tests/edit-shell.test.mjs, which runs them
+ * under a real /bin/sh; what is under test here is how ops.ts reads the answers.
+ */
 function editRunner (content, over = {}) {
   const built = build(over)
-  built.state.nextRun = command => {
-    if (command.startsWith('if [ ! -f')) {
-      return { status: 'succeeded', at: iso, exitCode: 0, stdout: content, stderr: '', durationMs: 2 }
+  const marked = content.startsWith('ssh-plugin:')
+  const head = marked ? content.slice(0, content.indexOf('\n')) : ''
+  const server = { file: marked ? content.slice(content.indexOf('\n') + 1) : content, copy: null }
+  const version = head.startsWith('ssh-plugin: ') ? head.slice('ssh-plugin: '.length) : ''
+  const noSha = over.noSha === true
+  const done = (stdout, extra = {}) => ({
+    status: 'succeeded', at: iso, exitCode: 0, stdout: `${stdout}\n`, stderr: '', durationMs: 3, ...extra
+  })
+  const failed = (exitCode, stdout, stderr = '') => ({
+    status: 'exit-nonzero', at: iso, exitCode, stdout: `${stdout}\n`, stderr, durationMs: 3
+  })
+  const stated = over.repair === undefined ? null : over.repair
+  // The write command opens with the same `if [ ! -f` as the read does, so the
+  // copy-and-replace pair is what tells the two apart.
+  // The write command opens with the same `if [ ! -f` as the read does, so the
+  // copy-and-replace pair is what tells the two apart.
+  let promised = null // what the edit intended to send, as the write understood it
+  built.state.nextRun = (command, options = {}) => {
+    if (over.beforeWrite !== undefined && command.includes('cp -p --') && server.file !== over.beforeWrite) {
+      server.file = String(over.beforeWrite) // a second writer got there first
     }
-    return { status: 'succeeded', at: iso, exitCode: 0, stdout: '', stderr: '', durationMs: 3 }
+    const pre = noSha ? '-' : sha256Hex(server.file)
+    const preLine = `ssh-plugin: pre ${pre}`
+    if (command.includes('cp -p --') && command.includes('cat >')) {
+      if (over.staleContent === true) return failed(21, '', 'ssh-plugin: the content changed after it was read\n')
+      const guard = /"\$pre" != '([0-9a-f]{64})'/u.exec(command)?.[1]
+      if (guard !== undefined && pre !== '-' && guard !== pre) {
+        // Refused before the copy: this call never truncated the file.
+        return failed(21, '', 'ssh-plugin: the content changed after it was read\n')
+      }
+      const landed = over.landing ?? String(options.stdin ?? '')
+      const bytes = Buffer.byteLength(landed)
+      if (over.failCopy === true) return failed(22, '')
+      if (over.failWrite === true) return failed(23, preLine)
+      server.copy = server.file
+      server.file = landed
+      promised = /"\$now" != '([0-9a-f]{64})'/u.exec(command)?.[1] ?? sha256Hex(landed)
+      const short = Number(/if \[ "\$size" != (\d+) \]/u.exec(command)?.[1])
+      if (short !== undefined && short !== bytes) return failed(24, preLine)
+      if (over.lostAnswer === true) return { status: 'timeout', at: iso, exitCode: undefined, stdout: `${preLine}\n`, stderr: 'ssh: write timed out\n', durationMs: 4 }
+      if (noSha) return failed(29, `${preLine}\nssh-plugin: ok sizeonly ${bytes}`)
+      if (guard !== undefined || promised !== sha256Hex(landed)) {
+        if (promised !== sha256Hex(landed)) return failed(28, `${preLine}\nssh-plugin: mismatch ${bytes} ${sha256Hex(landed)}`)
+      }
+      return done(`${preLine}\nssh-plugin: ok digest ${sha256Hex(landed)}`)
+    }
+    if (command.startsWith('if [ ! -f')) {
+      return done(`ssh-plugin: ${version}\nssh-plugin-sha256: ${noSha ? '' : sha256Hex(server.file)}\n${server.file}`.replace(/\n$/, ''))
+    }
+    if (command.startsWith('size=$(wc -c')) {
+      if (stated === 'died') return { status: 'timeout', at: iso, exitCode: undefined, stdout: '', stderr: 'ssh: read timed out\n', durationMs: 4 }
+      if (stated !== null) {
+        const at = stated.bytes ?? Buffer.byteLength(stated.content ?? server.file)
+        const hex = stated.sha ?? (stated.content === undefined ? undefined : sha256Hex(stated.content))
+        const evidence = stated.evidence ?? (hex === undefined ? 'sizeonly' : 'digest')
+        const exit = stated.exit ?? (evidence === 'digest' ? 25 : 25)
+        const marker = `ssh-plugin: ${stated.verdict} ${evidence} ${at}${evidence === 'digest' ? ` ${hex}` : ' -'}`
+        return exit === 0 ? done(marker) : failed(exit, marker)
+      }
+      // Nothing was forced: answer the way the shell sequence does, by re-digesting
+      // what is actually on the server.
+      if (promised !== null && sha256Hex(server.file) === promised) {
+        return failed(27, `ssh-plugin: landed digest ${Buffer.byteLength(server.file)} ${sha256Hex(server.file)}`)
+      }
+      if (server.copy !== null) {
+        server.file = server.copy
+        return done(`ssh-plugin: restored digest ${Buffer.byteLength(server.file)} ${sha256Hex(server.file)}`)
+      }
+      return done(`ssh-plugin: intact digest ${Buffer.byteLength(server.file)} ${sha256Hex(server.file)}`)
+    }
+    return done('')
   }
+  built.server = server
   return built
 }
 
@@ -314,6 +394,108 @@ test('edit refuses what it cannot see whole, and skips the backup on request', a
   assert.match(run.command, /cp -p -- '\/f' '\/f\.dsh-snap-/)
   assert.match(run.command, /rm -f -- '\/f\.dsh-snap-/)
   assert.equal(run.command.includes('.dsh-bak'), false)
+})
+
+test('a clean edit is reported as landed, with the digest the server read back', async () => {
+  const built = editRunner('one\nTARGET two\n')
+  const out = await built.ops.editRemote({ path: '/etc/f', oldText: 'TARGET', newText: 'KEPT' })
+  assert.equal(out.ok, true)
+  assert.equal(out.verdict, 'landed')
+  assert.equal(out.contentVerified, true)
+  assert.equal(out.sha256, sha256Hex('one\nKEPT two\n'), 'the digest stated is the digest of the bytes that landed')
+})
+
+test('bytes that land at the right length and the wrong content are refused, and put back', async () => {
+  // The case the byte check used to wave through: same size, different file.
+  const built = editRunner('one\nTARGET two\n', { landing: 'one\nKEPT txo\n' })
+  assert.equal(Buffer.byteLength('one\nKEPT txo\n'), 13, 'and it really is the length this edit sent')
+  const out = await built.ops.editRemote({ path: '/etc/f', oldText: 'TARGET', newText: 'KEPT' })
+  assert.equal(out.ok, false)
+  assert.equal(out.restored, true, 'the copy went back, and the server digested it as the content this call read')
+  assert.equal(out.verdict, 'restored')
+  assert.equal(out.contentVerified, true)
+  assert.equal(out.sha256, sha256Hex('one\nTARGET two\n'))
+  const repair = built.state.calls.find(call => call.command.startsWith('size=$(wc -c'))
+  assert.ok(repair !== undefined, 'a refused content is repaired, not just reported')
+})
+
+test('a server with no checksum tool writes, and is not believed', async () => {
+  const built = editRunner('abc\n', { noSha: true })
+  const out = await built.ops.editRemote({ path: '/f', oldText: 'b', newText: 'z' })
+  assert.equal(out.ok, false, 'an unverifiable write is not a success')
+  assert.equal(out.verdict, 'unknown')
+  assert.equal(out.contentVerified, false)
+  assert.match(out.message, /no checksum/)
+  assert.match(out.hint, /Read \/f/)
+  assert.equal(out.backup, '/f.dsh-bak', 'the way back is named, because nothing proved the new bytes belong here')
+  // And the plugin does not gamble: no third child undoing a write that may well
+  // have finished.
+  assert.equal(built.state.calls.filter(call => call.kind === 'run').length, 2)
+})
+
+test('a repair the server could only count is reported as unknown, never as restored', async () => {
+  const built = editRunner('one\nTARGET two\n', {
+    landing: 'one\nKEPTX tww\n',
+    repair: { verdict: 'restored', evidence: 'sizeonly', bytes: 15, exit: 0 },
+  })
+  const out = await built.ops.editRemote({ path: '/etc/f', oldText: 'TARGET', newText: 'KEPT' })
+  assert.equal(out.restored, undefined, 'the flag is only set when a digest vouches for the content')
+  assert.equal(out.verdict, 'unknown')
+  assert.equal(out.contentVerified, false)
+  assert.match(out.message, /no checksum/)
+})
+
+test('a repair that cannot put the content back says unrecoverable and names the copy', async () => {
+  const built = editRunner('one\nTARGET two\n', {
+    failWrite: true,
+    repair: { verdict: 'unrecoverable', content: 'half a file\n', exit: 25 },
+  })
+  const out = await built.ops.editRemote({ path: '/etc/f', oldText: 'TARGET', newText: 'KEPT' })
+  assert.equal(out.ok, false)
+  assert.equal(out.restored, false)
+  assert.equal(out.verdict, 'unrecoverable')
+  assert.equal(out.backup, '/etc/f.dsh-bak', 'the reader is told where the previous content still is')
+  assert.match(out.hint, /Read \/etc\/f\.dsh-bak/)
+})
+
+test('a write whose answer was lost is landed only when the digest agrees', async () => {
+  const proven = editRunner('one\nTARGET two\n', { lostAnswer: true })
+
+  const out = await proven.ops.editRemote({ path: '/etc/f', oldText: 'TARGET', newText: 'KEPT' })
+  assert.equal(out.ok, false, 'this call cannot claim it applied — but the file is claimed for')
+  assert.equal(out.verdict, 'landed')
+  assert.equal(out.contentVerified, true)
+  assert.match(out.message, /the change is on the server/)
+  const counted = editRunner('one\nTARGET two\n', {
+    lostAnswer: true,
+    repair: { verdict: 'landed', evidence: 'sizeonly', bytes: 13, exit: 27 },
+  })
+  const quiet = await counted.ops.editRemote({ path: '/etc/f', oldText: 'TARGET', newText: 'KEPT' })
+  assert.equal(quiet.verdict, 'unknown', 'the right byte count is not the right file')
+  assert.equal(quiet.contentVerified, false)
+})
+
+test('a repair child that never answered leaves the verdict unknown', async () => {
+  const built = editRunner('one\nTARGET two\n', { failWrite: true, repair: 'died' })
+  const out = await built.ops.editRemote({ path: '/etc/f', oldText: 'TARGET', newText: 'KEPT' })
+  assert.equal(out.ok, false)
+  assert.equal(out.restored, false)
+  assert.equal(out.verdict, 'unknown')
+  assert.equal(out.contentVerified, false)
+  assert.match(out.message, /cannot say what state \/etc\/f is in/)
+})
+
+test('a same-size rewrite between the read and the write stops before anything moves', async () => {
+  // The hole the size check left open: another writer replaces the file with a body
+  // of the very same length, so the version token and the byte count both still fit.
+  const built = editRunner('one\nTARGET two\n', { beforeWrite: 'one\nTARGET twO\n' })
+  const out = await built.ops.editRemote({ path: '/etc/f', oldText: 'TARGET', newText: 'KEPT' })
+  assert.equal(out.ok, false)
+  assert.equal(out.stale, true)
+  assert.equal(out.verdict, undefined, 'this call never truncated the file, so it has no verdict on its content')
+  assert.match(out.message, /content no longer matches the digest/)
+  assert.equal(built.server.copy, null, 'and it made no copy, because it never wrote')
+  assert.equal(built.state.calls.filter(call => call.kind === 'run').length, 2)
 })
 
 // ── elevation: as (sudo) and su (root's own secret) ────────────────────────

@@ -17,6 +17,34 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.35
+
+The release-readiness round the 0.0.34 report left open: an answer built on a byte
+count is not an answer about content.
+
+- **Fixed — a same-length, different-bytes body is no longer read as a successful
+  edit.** The read now takes the file's SHA-256 alongside its version token; the
+  write re-measures it before truncating (a rewrite that landed in the gap between
+  this call's read and its write is refused `stale`, at any length) and again after
+  — a body that arrives at the right size and the wrong content exits 28, is put
+  back from the safety copy, and comes home as `restored: true` only because a
+  digest vouches for it. Results carry `verdict`, `contentVerified`, and `sha256`.
+- **Changed — a server with no checksum tool is no longer believed on size alone.**
+  Where 0.0.34 reported success when the byte count matched, 0.0.35 writes the
+  file, keeps the safety copy, and ends the call `ok: false` with
+  `verdict: 'unknown'` and `contentVerified: false`. Fail-closed by intent: a
+  length cannot prove content, and a caller that treats `unknown` as applied is
+  the exact mistake this round set out to remove.
+- **Fixed — the repair child states its evidence, and only evidence counts.** A
+  restore that this server could only weigh is reported `unknown`, not `restored`;
+  a repair that never answered says so instead of naming a verdict it did not
+  receive. The safety copy is dropped only on a path a digest confirmed.
+- Tests: `tests/edit-shell.test.mjs` runs the generated POSIX sequences under a
+  real `/bin/sh` — collision at equal length, no-digest server, a copy that cannot
+  be written back, a tampered copy, a concurrent same-length rewrite — and the
+  ops- and tool-layer fakes now speak the marker protocol instead of being told
+  the answer.
+
 ## 0.0.34
 
 The round the 0.0.33 report left open: the transfer ceiling had to stop being a

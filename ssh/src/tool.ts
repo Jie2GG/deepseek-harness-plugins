@@ -623,7 +623,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           {
             type: 'object',
             additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'edit', required: true }, stale: { type: 'boolean' }, restored: { type: 'boolean' }, versionChecked: { type: 'boolean' }, path: { type: 'string' }, type: { type: 'string', enum: ['file', 'directory', 'other', 'missing'] }, replaced: { type: 'integer' }, matches: { type: 'integer' }, bytesBefore: { type: 'integer' }, bytesAfter: { type: 'integer' }, backup: { type: 'string' }, dryRun: { type: 'boolean' }, diff: { type: 'string' }, diffTruncated: { type: 'boolean' }, size: { type: 'integer' }, durationMs: { type: 'integer' }, timeoutMs: { type: 'integer' }, outputBytes: { type: 'integer' }, notes: { type: 'array', items: { type: 'string' } }, stdoutSpillPath: { type: 'string' }, stderrSpillPath: { type: 'string' }, },
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'edit', required: true }, stale: { type: 'boolean' }, restored: { type: 'boolean' }, contentVerified: { type: 'boolean' }, verdict: { type: 'string', enum: ['landed', 'intact', 'restored', 'unrecoverable', 'unknown'] }, sha256: { type: 'string' }, versionChecked: { type: 'boolean' }, path: { type: 'string' }, type: { type: 'string', enum: ['file', 'directory', 'other', 'missing'] }, replaced: { type: 'integer' }, matches: { type: 'integer' }, bytesBefore: { type: 'integer' }, bytesAfter: { type: 'integer' }, backup: { type: 'string' }, dryRun: { type: 'boolean' }, diff: { type: 'string' }, diffTruncated: { type: 'boolean' }, size: { type: 'integer' }, durationMs: { type: 'integer' }, timeoutMs: { type: 'integer' }, outputBytes: { type: 'integer' }, notes: { type: 'array', items: { type: 'string' } }, stdoutSpillPath: { type: 'string' }, stderrSpillPath: { type: 'string' }, },
           },
           {
             type: 'object',
@@ -1174,6 +1174,15 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
         lines.push(typeof value.bytesBefore === 'number' && typeof value.bytesAfter === 'number'
           ? `${verb} ${places}, ${String(value.bytesBefore)} -> ${String(value.bytesAfter)} bytes${typeof value.backup === 'string' ? ` (backup: ${String(value.backup)})` : ''}`
           : `${verb} ${places}`)
+        // Whether the server can say what is in the file now, in its own words.
+        // This line is the difference between "the count matches" and "the content
+        // matches", and a reader who misses it may re-edit against a file that is
+        // not what this call thinks it wrote.
+        if (value.contentVerified === true && typeof value.sha256 === 'string') {
+          lines.push(`| content verified: the server digested the file as the bytes this edit sent (sha256 ${value.sha256.slice(0, 12)}…)`)
+        } else if (value.contentVerified === false) {
+          lines.push('| content NOT verified: this server stated no checksum, so only the byte count is known to match — read the file before trusting it, and do not report this edit as applied')
+        }
         // The preview text belongs in the transcript line by line: a reader
         // comparing a dry run against the file needs the +/- shape, not a blob.
         if (typeof value.diff === 'string' && value.diff !== '') {
@@ -1191,7 +1200,7 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
       }
       if (typeof value.message === 'string') lines.push(String(value.message))
       if (typeof value.hint === 'string') lines.push(`hint: ${String(value.hint)}`)
-      if (value.ok !== true || typeof value.status === 'string') lines.push(`status=${String(value.status)}${typeof value.durationMs === 'number' ? ` · ${String(value.durationMs)} ms` : ''}`)
+      if (value.ok !== true || typeof value.status === 'string') lines.push(`status=${String(value.status)}${typeof value.verdict === 'string' ? ` · verdict=${String(value.verdict)}${value.contentVerified === false ? ' (content not verified by this server)' : ''}` : ''}${typeof value.durationMs === 'number' ? ` · ${String(value.durationMs)} ms` : ''}`)
       return lines.join('\n')
     }
     case 'write': {

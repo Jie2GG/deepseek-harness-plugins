@@ -11,7 +11,37 @@
  * @module @jie2gg/dsh-plugin-ssh/edit
  */
 
+import { createHash } from 'node:crypto'
 import { shellQuote } from './transport.ts'
+
+/**
+ * The SHA-256 of one body, hex, exactly as {@link buildEditWrite} will send it.
+ * @param text - the bytes the write child is about to push through stdin.
+ * @returns 64 lowercase hex characters.
+ */
+export function digestHex (text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex')
+}
+
+/**
+ * One POSIX substitution that answers with the file's SHA-256, or with nothing
+ * when this server cannot state one.
+ *
+ * `sha256sum` is what a Linux server has; `shasum -a 256` is what a FreeBSD or
+ * macOS one has; `openssl dgst -sha256` is the last reach for a box with neither
+ * coreutils nor perl. All three print the digest in a different shape, so the
+ * sed pair reduces every one of them to bare hex: the first expression keeps the
+ * leading 64 hex characters a checksum tool prints, the second takes what
+ * follows the `= ` an openssl line puts between its label and its digest. When no
+ * tool exists the substitution is empty, and empty means **no evidence** — not a
+ * digest of an empty file, which is a real value (`e3b0c442…`) and must never be
+ * confused with "could not ask".
+ * @param pathArg - the remote path, already shaped for the remote shell.
+ * @returns a `$( … )` expression usable inside a double-quoted shell word.
+ */
+export function remoteDigest (pathArg: string): string {
+  return `$( ( sha256sum -- ${pathArg} 2>/dev/null || shasum -a 256 -- ${pathArg} 2>/dev/null || openssl dgst -sha256 ${pathArg} 2>/dev/null || true ) | head -n 1 | sed -e 's/^\\([0-9a-f]\\{64\\}\\).*/\\1/' -e 's/.*= *//' )`
+}
 
 /** What the caller asked to replace. */
 export interface EditRequest {
@@ -200,46 +230,70 @@ export const EDIT_RESTORE_FAILED = 25
 export const EDIT_RESTORE_UNVERIFIED = 26
 /** The answer never arrived, but the bytes did: there is nothing to put back. */
 export const EDIT_LANDED_UNCONFIRMED = 27
+/** The write ended at the right size but with **different bytes** than were sent. */
+export const EDIT_CONTENT_MISMATCH = 28
+/** The write ended at the right size, and this server cannot state a digest to prove it is the right content. */
+export const EDIT_CONTENT_UNVERIFIED = 29
 
 /**
  * The read an edit begins from: the file's bytes, and what the server says about
  * those bytes at the same moment.
  *
  * The first line is a marker holding `stat`'s inode, size, and nanosecond
- * modification time; everything after it is the file. Asking in the same round
- * trip is deliberate — a second `stat` after the read would describe a file that
- * had another trip's worth of time to change under it. A server whose `stat`
- * cannot answer leaves the marker empty, and the edit then runs **without** the
- * version guard rather than refusing: the safety copy and the byte check still
- * stand, and the result says plainly that no version was compared.
+ * modification time; the second line is the digest **the server itself** computed
+ * over those bytes, and everything after them is the file. Asking in the same
+ * round trip is deliberate — a second `stat` after the read would describe a file
+ * that had another trip's worth of time to change under it. A server whose `stat`
+ * cannot answer leaves the first marker empty, and a server with no checksum tool
+ * leaves the second one empty; either way the edit still runs, because the safety
+ * copy and the checks that follow still stand, and the result says plainly which
+ * guard was in force.
+ *
+ * The digest is asked from the server rather than computed here from the decoded
+ * text: a file that is not valid UTF-8 round-trips through this read into
+ * something whose byte count *and* content differ from what is on disk, and a
+ * number measured on the server cannot be fooled by that.
  * @param pathArg - the remote path, already shaped for the remote shell.
- * @returns one POSIX command whose stdout is the marker line and the file.
+ * @returns one POSIX command whose stdout is the two marker lines and the file.
  */
 export function buildEditRead (pathArg: string): string {
   return `if [ ! -f ${pathArg} ]; then exit ${EDIT_MISSING}; fi; `
     + `printf 'ssh-plugin: %s\\n' "$(stat -c '%i|%s|%y' -- ${pathArg} 2>/dev/null)"; `
+    + `printf 'ssh-plugin-sha256: %s\\n' "${remoteDigest(pathArg)}"; `
     + `cat -- ${pathArg}`
 }
 
 /**
- * Split the version marker a read answered with from the file itself.
+ * Split the markers a read answered with from the file itself.
  * @param text - the raw stdout of {@link buildEditRead}.
- * @returns the token to guard a write with (`undefined` when this server could
- *   not state one), and the file's text.
+ * @returns the token to guard a write with and the digest the server stated (each
+ *   `undefined` when this server could not state it), and the file's text.
  */
-export function splitEditVersion (text: string): { version: string | undefined; content: string } {
+export function splitEditVersion (text: string): { version: string | undefined; digest: string | undefined; content: string } {
   const newline = text.indexOf('\n')
   const head = (newline === -1 ? text : text.slice(0, newline)).trim()
   const match = /^ssh-plugin:\s*(.*)$/u.exec(head)
   if (match === null) {
     // No marker at all: a shell that could not run `printf` the way the command
     // asked, or an old server. The whole body is the file, and no guard applies.
-    return { version: undefined, content: text }
+    return { version: undefined, digest: undefined, content: text }
   }
   const token = (match[1] ?? '').trim()
+  const rest = newline === -1 ? '' : text.slice(newline + 1)
+  const second = rest.indexOf('\n')
+  const secondLine = (second === -1 ? rest : rest.slice(0, second)).trim()
+  const stated = /^ssh-plugin-sha256:\s*(.*)$/u.exec(secondLine)
+  if (stated === null) {
+    // A read from before this protocol, or a shell that printed the version line
+    // and nothing else: the body starts at the second line, and there is no
+    // digest to verify anything against.
+    return { version: token === '' ? undefined : token, digest: undefined, content: rest }
+  }
+  const digest = (stated[1] ?? '').trim()
   return {
     version: token === '' ? undefined : token,
-    content: newline === -1 ? '' : text.slice(newline + 1),
+    digest: digest === '' ? undefined : digest,
+    content: second === -1 ? '' : rest.slice(second + 1),
   }
 }
 
@@ -254,34 +308,107 @@ export function splitEditVersion (text: string): { version: string | undefined; 
  * has no way back, and an edit that writes anyway is betting someone else's
  * file on a channel staying open. The body goes in through stdin, into the file
  * itself — `cat >` through the existing inode, which is what keeps the owner,
- * the mode, and every hardlink pointed at it. The size check at the end is what
- * tells a completed write from a short one, which is the difference between
- * reporting an edit and reporting a truncation.
- * @param guards - the paths, the token from the read, the byte count the write
- *   must leave behind, and whether the copy of the previous content stays for
- *   the reader to find.
+ * the mode, and every hardlink pointed at it. What comes after the write is what
+ * this call is allowed to claim: first the byte count, because a short body is a
+ * truncation and not an edit, and then a **digest of the bytes that are in the
+ * file now**, compared with the digest of the bytes that were sent. Equal size is
+ * not equal content — a second writer can leave behind a body of exactly this
+ * length that is not this edit's body — so the size check on its own no longer
+ * ends this command, and a server that cannot state a digest ends it with 29,
+ * which says "the bytes count out" without saying "the bytes are right".
+ *
+ * The digest is asked of the server for the same reason the version token is: it
+ * describes what is on disk, not what this process believes it pushed. One
+ * computed locally over the text to be written would prove only the transport,
+ * and the transport is already covered by the exit code.
+ * @param guards - the paths, the token and the digest the read found (either
+ *   `undefined` when this server could not state one), the byte count and the
+ *   digest the write must leave behind, and whether the copy of the previous
+ *   content stays for the reader to find.
  * @returns one POSIX command; the payload is its stdin.
  */
 export function buildEditWrite (guards: {
   pathArg: string
   backupArg: string
   version: string | undefined
+  originalSha256?: string | undefined
   expectedBytes: number
+  expectedSha256: string
   keepBackup: boolean
 }): string {
-  const { pathArg, backupArg, version, expectedBytes, keepBackup } = guards
+  const { pathArg, backupArg, version, originalSha256, expectedBytes, expectedSha256, keepBackup } = guards
   const guard = version === undefined
     ? ''
     : `if [ "$(stat -c '%i|%s|%y' -- ${pathArg} 2>/dev/null)" != ${shellQuote(version)} ]; then echo 'ssh-plugin: the file changed after it was read' >&2; exit ${EDIT_STALE}; fi; `
+  // A same-size rewrite can hide from `stat`'s size field, and from a coarse
+  // mtime; a digest cannot be hidden from. Both sides have to hold one for this
+  // to mean anything, which is why the empty string is tested before comparing.
+  const stated = shellQuote(originalSha256 ?? '')
+  const digestGuard = `if [ -n "$pre" ] && [ -n ${stated} ] && [ "$pre" != ${stated} ]; then echo 'ssh-plugin: the content changed after it was read' >&2; exit ${EDIT_STALE}; fi; `
   const drop = keepBackup ? '' : ` rm -f -- ${backupArg};`
   return `if [ ! -f ${pathArg} ]; then exit ${EDIT_MISSING}; fi; `
     + guard
+    + `pre=${remoteDigest(pathArg)}; `
+    + digestGuard
+    + `printf 'ssh-plugin: pre %s\\n' "\${pre:--}"; `
     + `cp -p -- ${pathArg} ${backupArg} || exit ${EDIT_BACKUP_FAILED}; `
     + `cat > ${pathArg}; rc=$?; `
     + `if [ "$rc" -ne 0 ]; then exit ${EDIT_WRITE_FAILED}; fi; `
     + `size=$(wc -c < ${pathArg} | tr -dc 0-9); `
-    + `if [ "$size" != ${String(expectedBytes)} ]; then exit ${EDIT_SIZE_MISMATCH}; fi;`
+    + `if [ "$size" != ${String(expectedBytes)} ]; then exit ${EDIT_SIZE_MISMATCH}; fi; `
+    + `now=${remoteDigest(pathArg)}; `
+    + `if [ -z "$now" ]; then echo "ssh-plugin: ok sizeonly $size"; exit ${EDIT_CONTENT_UNVERIFIED}; fi; `
+    + `if [ "$now" != ${shellQuote(expectedSha256)} ]; then echo "ssh-plugin: mismatch $size $now"; exit ${EDIT_CONTENT_MISMATCH}; fi; `
+    + `echo "ssh-plugin: ok digest $now";`
     + drop
+}
+
+/** What the write child's own answer says about the server's file. */
+export interface WriteReport {
+  /** The digest the file held **before** this write truncated it, when the server stated one. */
+  preSha256?: string
+  /** The digest the file holds now, when the server stated one. */
+  sha256?: string
+  /** How much the answer can be trusted: a digest, a byte count only, or nothing. */
+  evidence: 'digest' | 'sizeonly' | 'none'
+  /** Bytes the server counted after the write, when it said. */
+  bytes?: number
+}
+
+/**
+ * Read the markers {@link buildEditWrite} answers with.
+ * @param stdout - the raw stdout of the write child.
+ * @returns what the server attested, with `evidence: 'none'` for an answer that
+ *   never arrived or carried no marker at all.
+ */
+export function parseWriteReport (stdout: string | undefined): WriteReport {
+  const text = stdout ?? ''
+  const report: WriteReport = { evidence: 'none' }
+  const pre = /^ssh-plugin: pre (\S+)/mu.exec(text)?.[1]
+  if (pre !== undefined && pre !== '-') report.preSha256 = pre
+  const ok = /^ssh-plugin: ok (digest|sizeonly) (\S+)/mu.exec(text)
+  if (ok !== null) {
+    const stated = ok[2]
+    if (ok[1] === 'digest' && stated !== undefined) {
+      report.evidence = 'digest'
+      report.sha256 = stated
+    } else if (ok[1] === 'sizeonly' && stated !== undefined) {
+      report.evidence = 'sizeonly'
+      report.bytes = Number(stated)
+    }
+    // A marker whose shape is incomplete says nothing beyond `none`: a caller that
+    // reads evidence from a half-line would be inventing the rest of it.
+    return report
+  }
+  const mismatch = /^ssh-plugin: mismatch (\d+|-) (\S+)/mu.exec(text)
+  if (mismatch !== null) {
+    const counted = mismatch[1]
+    const stated = mismatch[2]
+    if (counted !== undefined && counted !== '-') report.bytes = Number(counted)
+    if (stated !== undefined) report.evidence = 'digest'
+    if (stated !== undefined && stated !== '-') report.sha256 = stated
+  }
+  return report
 }
 
 /**
@@ -289,24 +416,36 @@ export function buildEditWrite (guards: {
  * it can.
  *
  * It answers with a marker line rather than only an exit code, because there are
- * four different things that can be true at this moment and a caller that guesses
- * between them will write a sentence the server does not support:
+ * several different things that can be true at this moment and a caller that
+ * guesses between them will write a sentence the server does not support:
  *
- * - `landed` — the new bytes are there and only the answer was lost, so restoring
- *   would undo an edit that finished;
- * - `intact` — the file still holds the size it had before this call, which means
- *   the write never truncated it and there is nothing to put back;
- * - `restored` — the copy was still there, and the file came back at the size it
- *   started at;
- * - an exit of 25 or 26 — the copy is gone or the write back failed, and the file
- *   is whatever half a body it happens to hold.
+ * - `landed` — the intended content is in the file and only the answer was lost,
+ *   so restoring would undo an edit that finished;
+ * - `intact` — the file still holds the bytes this call measured before it
+ *   truncated anything, so the write never landed and there is nothing to put
+ *   back;
+ * - `restored` — the copy was still there, and the file holds what the copy holds;
+ * - `unrecoverable` — the content is not the one this call read and there is no
+ *   copy left to put back, or the copy itself failed to arrive;
+ * - `partial` — the copy was put back, but it is not provably the content this
+ *   call read.
+ *
+ * Every one of those markers carries **how the server knows**, because a verdict
+ * earned by counting bytes is not the same claim as one earned by comparing
+ * digests: the second field is `digest`, `sizeonly`, or `none`. Nothing in this
+ * command may report a successful edit or a successful restore on `sizeonly`
+ * evidence alone, and that is why the byte count no longer settles the question.
  *
  * Restoring goes *through* the file, not around it: `cp -p` onto an existing inode
  * keeps the owner, the mode, and the hardlinks the edit itself was careful to
- * keep.
- * @param restore - the paths, the copy to restore from, the size the file had
- *   before this edit, the size the edit meant to leave, and whether the copy of
- *   the previous content stays where the reader can find it.
+ * keep. The copy is only dropped on a branch that proved its way there, because a
+ * safety copy is worth nothing if the caller is told the file is fine when the
+ * server only counted it.
+ * @param restore - the paths, the copy to restore from, the digest the file had
+ *   when the read finished, the digest the file held the moment before this write
+ *   truncated it (when the write child got that far), the digest and the size the
+ *   edit meant to leave, the size the file had before, and whether the copy stays
+ *   where the reader can find it.
  * @returns one POSIX command.
  */
 export function buildEditRestore (restore: {
@@ -314,15 +453,78 @@ export function buildEditRestore (restore: {
   backupArg: string
   originalBytes: number
   intendedBytes: number
+  expectedSha256?: string | undefined
+  originalSha256?: string | undefined
+  preSha256?: string | undefined
   keepBackup: boolean
 }): string {
   const { pathArg, backupArg, originalBytes, intendedBytes, keepBackup } = restore
+  const expected = shellQuote(restore.expectedSha256 ?? '')
+  // What the file held the moment before this write truncated it. The write child
+  // states it; when that child died before printing anything, there is no
+  // reference to compare against, and an untouched file is then only *sized*.
+  const before = shellQuote(restore.preSha256 ?? restore.originalSha256 ?? '')
   const finish = keepBackup ? 'true' : `rm -f -- ${backupArg}`
-  return `size=$(wc -c < ${pathArg} 2>/dev/null | tr -dc 0-9); `
-    + `if [ "$size" = ${String(intendedBytes)} ]; then echo 'ssh-plugin: landed'; exit ${EDIT_LANDED_UNCONFIRMED}; fi; `
-    + `if [ ! -f ${backupArg} ]; then echo "ssh-plugin: intact $size"; exit 0; fi; `
-    + `cp -p -- ${backupArg} ${pathArg} || { echo "ssh-plugin: unrecoverable $(wc -c < ${pathArg} 2>/dev/null | tr -dc 0-9)"; exit ${EDIT_RESTORE_FAILED}; }; `
-    + `after=$(wc -c < ${pathArg} | tr -dc 0-9); `
-    + `if [ "$after" != ${String(originalBytes)} ]; then echo "ssh-plugin: partial $after"; exit ${EDIT_RESTORE_UNVERIFIED}; fi; `
-    + `echo 'ssh-plugin: restored'; ${finish}`
+  return `size=$(wc -c < ${pathArg} 2>/dev/null | tr -dc 0-9); size=\${size:--}; `
+    + `now=${remoteDigest(pathArg)}; `
+    + `if [ -n "$now" ] && [ -n ${expected} ] && [ "$now" = ${expected} ]; then echo "ssh-plugin: landed digest $size $now"; exit ${EDIT_LANDED_UNCONFIRMED}; fi; `
+    + `if [ -z "$now" ] && [ "$size" = ${String(intendedBytes)} ]; then echo "ssh-plugin: landed sizeonly $size -"; exit ${EDIT_LANDED_UNCONFIRMED}; fi; `
+    + `if [ ! -f ${backupArg} ]; then `
+    + `if [ -n "$now" ]; then `
+    + `if [ -n ${before} ] && [ "$now" = ${before} ]; then echo "ssh-plugin: intact digest $size $now"; exit 0; fi; `
+    + `if [ -n ${before} ]; then echo "ssh-plugin: unrecoverable digest $size $now"; exit ${EDIT_RESTORE_FAILED}; fi; `
+    + `if [ "$size" = ${String(originalBytes)} ]; then echo "ssh-plugin: intact none $size -"; exit 0; fi; `
+    + `echo "ssh-plugin: unrecoverable digest $size $now"; exit ${EDIT_RESTORE_FAILED}; `
+    + `fi; `
+    + `if [ "$size" = ${String(originalBytes)} ]; then echo "ssh-plugin: intact sizeonly $size -"; exit 0; fi; `
+    + `echo "ssh-plugin: unrecoverable sizeonly $size -"; exit ${EDIT_RESTORE_FAILED}; `
+    + `fi; `
+    + `cp -p -- ${backupArg} ${pathArg} || { if [ -n "$now" ]; then echo "ssh-plugin: unrecoverable digest $size $now"; else echo "ssh-plugin: unrecoverable sizeonly $size -"; fi; exit ${EDIT_RESTORE_FAILED}; }; `
+    + `after=${remoteDigest(pathArg)}; `
+    + `bak=${remoteDigest(backupArg)}; `
+    + `if [ -n "$after" ] && [ "$after" = "$bak" ] && { [ -z ${before} ] || [ "$bak" = ${before} ]; }; then echo "ssh-plugin: restored digest $size $after"; ${finish}; exit 0; fi; `
+    + `if [ -z "$after" ] && [ -z "$bak" ] && [ "$size" = ${String(originalBytes)} ]; then echo "ssh-plugin: restored sizeonly $size -"; ${finish}; exit 0; fi; `
+    + `if [ -n "$after" ]; then echo "ssh-plugin: partial digest $size $after"; exit ${EDIT_RESTORE_UNVERIFIED}; fi; `
+    + `echo "ssh-plugin: partial sizeonly $size -"; exit ${EDIT_RESTORE_UNVERIFIED}`
+}
+
+/** How much a repair answer can be trusted. */
+export type RepairEvidence = 'digest' | 'sizeonly' | 'none'
+
+/** What the repair child's answer says about the server's file. */
+export interface RepairReport {
+  /** The verdict the server reached, or `undefined` when it never said one. */
+  verdict: 'landed' | 'intact' | 'restored' | 'unrecoverable' | 'partial' | undefined
+  /** How the server knows it: a digest, a byte count only, or nothing stated. */
+  evidence: RepairEvidence
+  /** Only true when a digest backs the verdict — the whole point of this file. */
+  contentVerified: boolean
+  /** Bytes the server counted, when it said. */
+  bytes?: number
+  /** The digest the file holds now, when the server stated one. */
+  sha256?: string
+}
+
+/**
+ * Read the markers {@link buildEditRestore} answers with.
+ *
+ * The rule lives here rather than in the caller's prose, because there are two
+ * callers of this and a third coming: a verdict backed by a byte count only is
+ * reported as **unknown**, never as the good-sounding word the marker used.
+ * @param stdout - the raw stdout of the repair child.
+ * @returns the verdict, its evidence, and what the server stated about the file.
+ */
+export function parseRepairReport (stdout: string | undefined): RepairReport {
+  const match = /^ssh-plugin: (landed|intact|restored|unrecoverable|partial) (digest|sizeonly|none) (\d+|-)( (\S+))?/mu.exec(stdout ?? '')
+  if (match === null) return { verdict: undefined, evidence: 'none', contentVerified: false }
+  const evidence = match[2] as RepairEvidence
+  const counted = match[3]
+  const stated = match[5]
+  return {
+    verdict: match[1] as RepairReport['verdict'],
+    evidence,
+    contentVerified: evidence === 'digest',
+    ...(counted !== undefined && counted !== '-' ? { bytes: Number(counted) } : {}),
+    ...(stated !== undefined && stated !== '-' ? { sha256: stated } : {}),
+  }
 }
