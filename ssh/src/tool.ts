@@ -411,13 +411,29 @@ export async function gateRemoteCall(deps: RemoteToolDeps, exec: Readonly<Pendin
     // because that one is the user's own setting on the target, not a question.
     return await next()
   }
-  // `ask` reaches whoever can answer it as usual. `unavailable` — no approval
-  // service mounted, or no session to route the question through — reaches the
-  // core as an ask too, and the core then denies with a reason that names the
-  // missing piece (pipeline.ts `serviceAsk`): nobody gave consent, so nothing
-  // runs. The old code merged these two answers into one boolean and let
-  // `unavailable` run unasked, which invented consent the deployment never
-  // stated — the distinction task book §3.5 asks to restore.
+  // `ask` reaches whoever can answer it as usual.
+  //
+  // `unavailable` — no approval service mounted, or no session to route the
+  // question through — also reaches the core as an ask, and the core refuses it
+  // (pipeline.ts `serviceAsk`): nobody gave consent, so nothing runs. The old code
+  // merged these two answers into one boolean and let `unavailable` run unasked,
+  // which invented consent the deployment never stated.
+  //
+  // What the live check taught is that the refusal still has to be *legible*. When
+  // the ask carries a reason, the core quotes that reason and appends nothing: a
+  // deployment with no approval service therefore reads exactly the sentence a
+  // human would have been shown — "Write <path> on <host>" — with nothing to say
+  // why it came back refused. So the missing channel is named here, in the words
+  // this plugin controls.
+  if (answer === 'unavailable') {
+    return {
+      kind: 'ask',
+      reason: `${verdict.reason} — refused because this conversation cannot be asked: this Host mounts no approval service, or the session has no route to one. Nothing was run; ask where an answer can arrive, or give the session a permission preset that does not need one.`,
+      ...(verdict.display === undefined ? {} : {
+        displayReason: verdict.display,
+      }),
+    }
+  }
   return { kind: 'ask', reason: verdict.reason, ...(verdict.display === undefined ? {} : { displayReason: verdict.display }) }
 }
 

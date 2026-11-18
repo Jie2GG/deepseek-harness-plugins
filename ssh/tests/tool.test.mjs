@@ -244,6 +244,21 @@ test('gateRemoteCall: `never` runs; an unreachable approval surface asks and let
   const deaf = { ...deps, approvalPolicyOf: () => 'unavailable' }
   const deafOut = await gateRemoteCall(deaf, { name: 'ssh_client', arguments: { action: 'exec', command: 'reboot now' } }, pass)
   assert.equal(deafOut.kind, 'ask')
+  // …and the refusal has to read as a missing channel, not as a human's no. The
+  // core quotes whatever reason this gate hands it and appends nothing, so a
+  // deployment with no approval service would otherwise show the very sentence it
+  // would have shown a person — which is how the live check found it looking.
+  assert.match(deafOut.reason, /^Run on deploy@10\.0\.0\.9: reboot now — refused because/u)
+  assert.match(deafOut.reason, /refused because this conversation cannot be asked/u)
+  assert.match(deafOut.reason, /no approval service/u)
+  assert.match(deafOut.reason, /Nothing was run/u)
+  // An answerable ask keeps the short sentence: the person reading it is deciding,
+  // not debugging the deployment.
+  const answerable = { ...deps, approvalPolicyOf: () => 'ask' }
+  const asked = await gateRemoteCall(answerable, { name: 'ssh_client', arguments: { action: 'exec', command: 'reboot now' } }, pass)
+  assert.equal(asked.kind, 'ask')
+  assert.equal(asked.reason.includes('cannot be asked'), false)
+  assert.deepEqual(Object.keys(asked).sort(), ['displayReason', 'kind', 'reason'])
   // And a read never depended on the policy: it passes whatever the answer is.
   assert.equal((await gateRemoteCall(deaf, { name: 'ssh_client', arguments: { action: 'read', path: '/x' } }, pass)).kind, 'allow')
   // A deny is the user's own switch: `never` does not rescue it.

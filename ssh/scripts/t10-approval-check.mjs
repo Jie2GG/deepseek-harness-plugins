@@ -42,7 +42,7 @@
 import { DeepSeekHarness } from '/data/deepseek-harness/packages/sdk/client/lib/index.js'
 import { mkdtempSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 
 const TEST_HOME = process.env.DSH_TEST_HOME ?? '/data/dsh-home-test'
 const PROVIDER_PATCH = process.env.DSH_T10_PROVIDER ?? '/tmp/t10-patches/provider.yml'
@@ -162,11 +162,19 @@ async function runScenario (scenario) {
         return scenario.answer()
       })
     }
+    // Four string arguments, and nothing else. Booleans are left out on purpose:
+    // a small model asked to send `mkdir=true` sends the *string* "True", the call
+    // fails the parameter schema, and the scenario then measures a schema rejection
+    // instead of the approval decision it was built to observe. `target` is required
+    // because this home has more than one saved server, and the plugin says so.
     const prompt = [
-      `Call the ssh_client tool exactly once, with these arguments and no others:`,
-      `action="write", target="${TARGET}", path="${path}", content="${scenario.name}", mkdir=true, overwrite=true.`,
+      `Call the ssh_client tool exactly once, with exactly these four string arguments and no others:`,
+      `action="write", target="${TARGET}", path="${path}", content="${scenario.name}".`,
+      `Do not send any other argument, and do not send booleans or numbers.`,
       `Do not call read, exec, or any other tool. Do not retry the call if it fails.`,
-      `After the tool returns, reply with the tool's own status word on one line, then DONE.`,
+      `After the tool returns, reply with two lines: the tool's own status word, then the tool's`,
+      `message text quoted exactly as it came back (or NONE if it returned no message). Do not paraphrase that line.`,
+      `Reply DONE on a third line.`,
     ].join(' ')
     const result = await harness.run(prompt, {
       onNotification: (notification) => {
@@ -181,14 +189,27 @@ async function runScenario (scenario) {
       },
     })
     observed.finalResponse = String(result?.finalResponse ?? '').slice(0, 200)
+    // The SDK turn does not surface the tool payload to a notification listener,
+    // so this column is only what the turn reported. The authority is the probe
+    // file on the server — the script prints the one command that settles it, and
+    // a scenario is not "verified" until somebody runs it.
     observed.written = observed.writeEvents.length > 0
+      || /succeeded|wrote|replaced/iu.test(observed.finalResponse ?? '')
+    for (const needle of ['not yet supported', 'no approval channel is available', 'the user rejected', 'requires approval']) {
+      const said = (observed.finalResponse ?? '').toLowerCase()  // the turn quotes the tool's own message verbatim on request
+      const at = said.indexOf(needle)
+      if (at >= 0) observed.denials.push(`(model line) ${observed.finalResponse.slice(Math.max(0, at - 40), at + 120)}`)
+    }
+    observed.probePath = path
     return observed
   } catch (error) {
     observed.error = error instanceof Error ? error.message : String(error)
     return observed
   } finally {
     for (const [key] of previous) delete process.env[key]
-    await harness.close?.().catch?.(() => undefined)
+    // The client owns the subprocess and reaps it through its async-disposal hook.
+    const dispose = harness[Symbol.asyncDispose] ?? harness.close
+    if (typeof dispose === 'function') await dispose.call(harness)
   }
 }
 
@@ -212,7 +233,7 @@ if (selected.length === 0) {
         ? `host error: ${observed.error}`
         : [
             `ask reached the client: ${observed.asked ? 'yes' : 'no'}`,
-            `write executed: ${observed.written ? 'yes' : 'no'}`,
+            `write reported run: ${observed.written ? 'yes' : 'no'} (authority: ssh ${TARGET} ls -l ${dirname(observed.probePath)})`,
             observed.denials.length > 0 ? `deny: ${JSON.stringify(observed.denials[0])}` : 'deny: none',
             `expectations: asked=${String(scenario.want.asked)} written=${String(scenario.want.written)} ${denialRight ? 'deny-shape ok' : 'deny-shape MISSING'}`,
           ].join('\n    '))
