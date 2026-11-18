@@ -17,6 +17,133 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.34
+
+The round the 0.0.33 report left open: the transfer ceiling had to stop being a
+photograph of a `stat`, the copy lane had to be countable, the edit had to keep
+its promises when the write went wrong, and the temp files this plugin leaves
+behind had to stop accumulating. No tool parameter or output field was removed,
+no stored record format changed, and the RPC surface was left alone.
+
+### Added
+
+- **A byte ceiling that is enforced while the bytes move.** One file now travels
+  through an `ssh` channel — `cat` on the far end, this process's counter on the
+  near one — instead of through `scp`, which moves bytes without telling anybody
+  how many. A copy that crosses the ceiling is stopped: the pump ends, the child
+  is taken down through the provider's managed range, and the answer is
+  `refused-size` quoting the bytes that arrived. An upload stopped by its ceiling
+  never sends the end of file, so the far end cannot mistake a partial body for a
+  complete one, and it never reaches the step that would move it into place.
+- **The upload's landing order.** The bytes land in a sibling temp file on the
+  server and only then take their final name — *through* an existing file, which
+  is what keeps the inode, the owner, the mode and every hardlink pointed at it
+  (the behaviour `scp` had, measured on a live server), or by rename with the
+  source's permission bits filtered through the server's umask for a fresh name.
+  A refused upload removes its own temp; a publish that failed leaves the complete
+  bytes where they are and names the path in the answer.
+- **`limitMode` on every transfer result**: `in-flight` for one file, `pre-check`
+  for a tree. The two are different promises, and the field is in the payload and
+  the transcript rather than only in a document a reader may never open.
+- **A recursive download is enumerated on the server before it copies** — file
+  count and cumulative bytes, with a probe that tells a server without GNU `find`
+  apart from a directory that really is empty — and what landed is walked and
+  reported afterwards, so a tree's numbers come from somewhere honest.
+- **The guarded edit.** The read now asks for the file's version (inode, size,
+  nanosecond mtime) in the same round trip; the write compares it in the same
+  shell that truncates, and stops with `stale: true` when something else wrote
+  first. A safety copy is taken before any truncation — including for
+  `backup: false`, which now means "leave nothing behind" rather than "bet the
+  file on the channel" — the write reports the size it had to leave, and a repair
+  child looks at the file before touching it and answers with one of four facts:
+  landed, intact, restored, or unrecoverable. New payload fields: `stale`,
+  `restored`, `versionChecked`; the repair runs on its own short clock, because a
+  reader who cancels an edit stops the edit and not the file's claim to be whole.
+- **A spill budget per Host process.** 1 GiB and 64 files, against a per-stream
+  ceiling the provider could otherwise be handed sixteen slots times two streams
+  of. A grant is never cut down — a spill file the provider runs out of room for
+  is deleted, which is the one outcome worse than no file — so the budget stops
+  the *next* child, and the answer says so in its notes and in the transcript line
+  that used to blame the configuration for what the budget decided.
+- **The temp namespace is collected.** The askpass and control-socket directories
+  now carry the process id that made them, a sweep at startup collects what a dead
+  id left, a legacy name is judged by the idleness of the *helper* rather than the
+  age of the directory, a socket whose master still answers a connect is never
+  touched, and a helper taken from under a running Host is rebuilt on the next
+  read (and using it keeps its timestamps young).
+- **The transfer lane is countable.** `transfersInFlight` and `laneUsage(kind)` on
+  the transport, `pool.transfers` in the list payload, and the settings card now
+  prints each ceiling beside what is standing in it: operations, shared
+  connections, copy slots. `get_connection` answers with the live copy count too.
+- **A ninth background job is refused in its own frame.** `laneRoom` asks whether a
+  reservation has room without taking it, and `execBackground` consults it before
+  registering: `status: 'refused'`, no id, the ceiling in its words. The
+  reservation, the ceiling, and the job lifecycle are unchanged.
+- **`scripts/live-check.mjs`**: the same boundaries driven against a live server
+  with the real DSH subprocess provider and the stored credentials — 86 checks,
+  including a growing source that passes a pre-check of 0 bytes, three copies
+  racing two slots, an overwrite measured by inode and hardlink, a concurrent
+  writer refused 6 times in 6 attempts, and a sweep against the machine's actual
+  residue.
+
+### Changed
+
+- `transfer()` no longer takes the askpass face it never read, and
+  `ops.askpassSource()` went with it; the option builder owns that failure.
+- A tool call's declared budget is computed by `transferCallCeiling` — pre-check,
+  channel, publish and cleanup each with their own grace and drain — instead of
+  one deadline plus a pre-check.
+- Remote paths go through `remotePathArg` everywhere, which is also what makes
+  `~/` work; a `mkdir -p` is no longer issued against the home directory itself.
+- Ceiling notes are merged into a result's notes rather than replacing whatever the
+  child already had to say.
+
+### Fixed
+
+- **`~/` paths were accepted and then never expanded.** The schema allowed the
+  form, `shellQuote` wrapped it whole, and a live read of `~/f.txt` answered
+  `Nothing at ~/f.txt` for a file that exists. A tilde-prefix ends at an unquoted
+  slash; the `~/` now stays outside the quotes and the rest stays inside, measured
+  under `sh`, `dash` and `bash`, for a read and for a redirection.
+- **A recursive download into a directory that was not empty destroyed the tree it
+  had just copied.** The part sibling renamed onto a non-empty directory, got
+  `ENOTEMPTY`, and the cleanup deleted the finished copy — so the reader got a
+  failure and no data. It is refused before a byte moves, and the file that was
+  already there is named back untouched.
+- **A copy whose child died by signal was treated as finished.** `exitCode: null`
+  satisfied the `?? 0` success test; an interrupted download was renamed into place
+  with a short file. A raw stream now ends "cleanly" only when it read to EOF, and
+  an answer of `null` is no longer read as a zero.
+- **The upload's mode arithmetic ran differently in every shell.** The nested
+  substitution `chmod "$(printf '%o' $(( … ) ))"` the first cut shipped does not
+  parse under `sh` or `dash`, and under `bash` handed `chmod` an empty argument and
+  landed the uploaded file on mode `000`. Three assignments and a guard, measured
+  under all three shells.
+- **The spill budget charged streams that never spilled.** Ordinary answers ate
+  the budget, so the child that actually needed a file was the one refused.
+
+### Notes
+
+- 240 offline tests pass (169 before this round); the new ones were reverse-checked
+  by taking each fix out again — dropping the ceiling check, ignoring a stopped
+  copy's child, refusing to map `over-limit`, skipping the write pre-check,
+  ignoring the helper's timestamps, dropping the rebuild, and neutering the budget
+  each fail named tests rather than quiet ones.
+- A recursive copy is still bounded before it moves, not while it does: `scp -r`
+  cannot be counted, and carrying a tree through `tar` would quietly change what a
+  symlink means. The payload says which kind of ceiling answered.
+- The version guard shrinks the window between noticing a change and making one to
+  two shell builtins; it does not close it, and the README says so instead of
+  implying a transaction.
+- Spill files stay the subprocess provider's: it creates them, closes them, and
+  keeps completed ones until something outside the process cleans them. This
+  plugin counts what it asked for and unlinks nothing.
+- One live finding shaped a default: the first version of the sweep collected a
+  long-running Host's askpass helper because its *directory* was thirteen hours
+  old. The idle rule now reads the helper's own timestamps, the horizon is three
+  days, and the rebuild-on-read means a mistaken sweep costs a re-created file
+  rather than a password prompt.
+
 ## 0.0.33
 
 Phase 2D: the one defect the deployed 0.0.32 showed in the field — the `edit`

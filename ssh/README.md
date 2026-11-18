@@ -18,6 +18,7 @@ ssh/
 ├── tsconfig.json             # NodeNext ESM, src/ → lib/, type-only client imports
 ├── icon.svg                  # original artwork (prompt caret + dashed link + server rack)
 ├── scripts/finalize-client.mjs  # strips TS's `export {};` and proves the script form
+├── scripts/live-check.mjs      # the same boundaries against a live server, with the real provider
 ├── docs/DETAIL.md            # plugin detail page, English
 ├── docs/DETAIL.zh.md         # plugin detail page, Chinese
 ├── locale/en.json            # meta.title / meta.description / meta.detail
@@ -30,7 +31,9 @@ ssh/
 │   ├── transport.test.mjs    # quoting, program extraction, the fingerprint tables, the sharing flags
 │   ├── pool.test.mjs         # the master ledger: what a socket is named by, who is evicted, what gets closed
 │   ├── jobs.test.mjs         # the background-job lifecycle and its outcome classes
-│   ├── edit.test.mjs         # the exact-match rules, refusal by counted occurrence
+│   ├── edit.test.mjs         # the exact-match rules, refusal by counted occurrence, the guarded write
+│   ├── spill.test.mjs        # the spill budget: what is granted, what is refused, what is counted
+│   ├── tmpgc.test.mjs        # who may be collected from the temp directory, and what may never be
 │   ├── local-path.test.mjs   # the workspace boundary a transfer obeys
 │   └── rpc.test.mjs          # method allowlisting and the failure-code-to-status map
 └── src/
@@ -43,7 +46,9 @@ ssh/
     ├── secrets.ts            # password and passphrase records in the credential store
     ├── askpass.ts            # the private helper that answers an ssh prompt
     ├── tool.ts               # the agent-facing `ssh_client` tool and its policy gate
-    ├── transfer.ts           # scp moves, pre-checked at both ends; downloads land by rename
+    ├── transfer.ts           # one file on a counted channel, a tree on scp -r, both guarded where they land
+    ├── spill.ts                # how much spill one Host process will ask the provider to keep
+    ├── tmpgc.ts                # which temp directories are ours to collect, and on what evidence
     ├── local-path.ts         # the workspace boundary a local transfer path obeys
     ├── edit.ts               # the pure match-and-replace rules behind `edit`
     ├── jobs.ts               # a backgrounded remote command on the harness job registry
@@ -215,8 +220,12 @@ shape anywhere, and that was the argument for changing it:
 So `bounds.ts` is now the only place the layering is stated — **call → target →
 profile override → configured default**, capped by `max*` — and it returns the
 effective value plus a note per correction, which `stampCeilings` attaches to the
-result (`timeoutMs`, `outputBytes`, `notes`; transfers add `bytesLimit` and echo
-their own transfer deadline rather than the command's). A value
+result (`timeoutMs`, `outputBytes`, `notes`; transfers add `bytesLimit` and
+`limitMode` — `in-flight` when the ceiling was enforced against the bytes that
+moved, `pre-check` when it was enforced against what a walk or an enumeration
+said first — and echo their own transfer deadline rather than the command's; an
+edit adds `stale`, `restored`, and `versionChecked`, because which of those is
+true is the difference between a file, an undo, and a refusal). A value
 past the cap is no longer an error; a value that cannot mean a deadline (zero,
 negative, non-finite) still is, and the hint says where the line now sits.
 `readBounds` re-reads the volatile values per call — never snapshotted — so a
@@ -392,8 +401,12 @@ Two notes on that field table, both pinned by `tests/tool.test.mjs`:
 - The `parameters` schema now declares all twenty-three fields the body reads; until
   0.0.16 the seven the `edit` and prompt-answering calls use (`oldText`, `newText`,
   `all`, `replaceFirst`, `backup`, `tty`, `input`) arrived undeclared and survived
-  only the defensive reader, 0.0.20 added `as`/`su` alongside them, and 0.0.32
-  added `dryRun` for the `edit` preview.
+  only the defensive reader, 0.0.20 added `as`/`su` alongside them, 0.0.32
+  added `dryRun` for the `edit` preview, and 0.0.34 changed no parameter at all —
+  what moved was what two of them promise: `maxBytes` now says it is the transfer
+  ceiling as well as the output ceiling (and that one file is held to it while the
+  bytes move), and `timeoutMs` says a copy's value covers its pre-check and publish
+  steps too.
 - The tool declares `isConcurrencySafe` for the two reads only — `get_connection`
   and `read` — so the harness may run several of those in one parallel batch.
   Every action that changes something stays exclusive: the transport *could* run
@@ -528,29 +541,50 @@ next round does not have to re-derive them:
   reported as such. The session change recorder attaches the edit by **object
   identity** of the actor it saw at `tools/pre-execute`, which is why the plugin
   hands the live tool execution to the waterfall and not a look-alike.
-- File transfer: `scp` is the sibling of the **detected** ssh executable
-  (`/usr/bin/ssh` → `/usr/bin/scp`, else its own `PATH`-then-locations search);
-  it takes the port as `-P` (not `-p`), accepts
-  the same `-o BatchMode` / `StrictHostKeyChecking=accept-new` / `-i` / `-J` /
-  `PreferredAuthentications` flags, and reads the remote end as one `host:path`
-  argument, so no local shell is involved and a path with spaces needs no quoting.
-  Both directions name the far end `host:path` — a download that passed the bare
-  remote path copied locally instead, which is what the first live check caught.
-  A size and type pre-check (`stat -c '%s %F' -- '<path>'`, GNU coreutils here) runs
-  before a download so an oversized or directory payload is refused without
-  touching the disk, and a **upload** is pre-checked at both ends: the local
-  file's existence, readability, and size — for a tree also the file count and
-  cumulative bytes, walked with a symlink loop guard — and the remote
-  destination, which is refused (`refused-exists`) unless `overwrite` says
-  otherwise, because bare `scp` replaces a remote file without a word. A
-  download never writes its final path directly: the bytes land in a unique
-  `.dsh-part-<pid>-<entropy>` sibling that is renamed into place only after a
-  clean finish, and cancelled, timed out, or failed copies delete the sibling
-  instead of leaving a half file behind. Every one of these checks measures what
-  `stat` said **before the copy started** — they are pre-checks, not gates on the
-  bytes that move: a file that grows during a transfer can still push more
-  through than the number quoted. `rsync` is absent on this machine and is
-  therefore not used.
+- File transfer, measured on a live server: **one file rides a counted `ssh`
+  channel, a tree rides `scp -r`**. `scp` is the sibling of the **detected** ssh
+  executable (`/usr/bin/ssh` → `/usr/bin/scp`, else its own `PATH`-then-locations
+  search); it takes the port as `-P` (not `-p`), accepts the same `-o BatchMode` /
+  `StrictHostKeyChecking=accept-new` / `-i` / `-J` / `PreferredAuthentications`
+  flags, and reads the far end as one `host:path` argument, so no local shell is
+  involved. A single file does not go through it: the payload is `cat` on the far
+  side of `ssh`, and the byte count is taken at this end, which is the only place
+  a ceiling can be enforced against the bytes that move rather than against a
+  number `stat` quoted before they did. The provider's `collect` mode cannot carry
+  that (a 400 MiB answer becomes a 400 MiB spill file), but its `stdout: 'pipe'`
+  and `stdin: 'pipe'` dispositions are caller-owned raw streams, and a copy asks
+  for no spill on either face. A `cat` whose reader went away dies of `EPIPE`/
+  `SIGPIPE` — measured — so stopping the local child stops the far half.
+  - **Landing, both directions.** A download writes a unique `.dsh-part-<pid>-<entropy>`
+    sibling and renames it into place only after a clean finish; an upload lands in
+    a sibling *on the server* and then takes its final name. Replacing an existing
+    file happens *through* it (`cat part > dest`): measured on a live server, `scp`
+    did the same — inode, `mode 640`, owner, and a second hardlink all surviving the
+    overwrite, the link's other name seeing the new bytes. A rename would have
+    quietly broken all three. A fresh name is renamed, then carries the source's
+    permission bits through the server's umask (`777` arrived as `755` under
+    `umask 0022`, `640` stayed `640`) — and the mode has to be computed with three
+    assignments, because `chmod "$(printf '%o' $(( … ) ))"` does not parse under
+    `sh` or `dash` and under `bash` hands `chmod` an empty argument and lands the
+    file on mode `000`. A stopped upload removes its temp; a publish that failed
+    leaves the complete bytes where they are and says so.
+  - **Recursion is a different promise, and says which one.** `scp -r`'s layout is
+    kept because it is the layout callers expect: an absent destination *becomes*
+    the tree, an existing one holds `dest/<basename>`, and symlinks are followed
+    (measured: a linked directory arrived as a real directory, a linked file with
+    its target's mode). Its ceilings are pre-checks — the cycle-guarded local walk
+    for an upload, one `find -L … -printf '%s\n' | awk` enumeration for a download,
+    behind a `-maxdepth 0 -printf` probe so a server without GNU `find` cannot read
+    as an empty directory. A tree is never *counted while it moves*: that would
+    need an archive, and an archive quietly changes what a symlink means.
+  - **`~/` needs the slash outside the quotes.** The schema has always allowed the
+    form, and a fully quoted `'~/f.txt'` is not the same word to a shell: a
+    tilde-prefix ends at the first *unquoted* slash, so the old shape reached the
+    server as a literal and `cat` answered `No such file or directory` — measured,
+    in `sh`, `dash`, and `bash`, for a read and for a redirection alike. `~/'f.txt'`
+    works, `~'/f.txt'` does not.
+  - `rsync` is absent on this machine and is therefore not used.
+
 - Approval is two independent switches: the file sandbox (`read-only` /
   `workspace-write` / `danger-full-access`) governs writes, while
   `ApprovalPolicy = 'ask' | 'never'` governs whether a person is consulted at all.
@@ -620,7 +654,7 @@ still open:
    remote call keeps rendering in the harness's generic tool row — see the note
    under **Verified contracts**.
 
-## Limits of 0.0.33
+## Limits of 0.0.34
 
 - The settings page is inventory, probes, resolve, and ceilings only: running
   commands, editing files, and moving bytes reach the server through the
@@ -643,7 +677,10 @@ still open:
   capped at `maxRunningJobs` (default 8) of those slots — a reservation inside
   the existing lane counter, not a second scheduler — so even eight abandoned
   long-running commands cannot busy-lock the plugin against foreground work; a
-  start refused by that ceiling names it and points at `job_kill`. A job arms no
+  start refused by that ceiling names it and points at `job_kill`, and since 0.0.34
+  the refusal is answered **in the frame that asked** — `status: 'refused'`, no id
+  to poll — rather than starting a job and letting the lane turn it into a failed
+  one a beat later. A job arms no
   timer of its own: it ends when it settles, when someone kills it, when its
   conversation goes away, or when the Host exits — the same bargain the harness's
   own background shell makes. The connection lives in the Host process:
@@ -655,14 +692,26 @@ still open:
   `as`/`su` is refused with a hint, and still works if the server runs NOPASSWD
   and the command says `sudo` itself.
 - `edit` refuses a file larger than the read ceiling rather than replacing text it
-  never saw, and `write` / `edit` / `upload` change the server in place: nothing
-  there is versioned beyond the optional `<path>.dsh-bak` copy an `edit` takes.
-  This is a preview-and-confirm flow, not a transaction: between an `edit`'s read
-  and its `cat >` write a server-side change is overwritten without a version
-  check, and a child killed mid-write leaves the file cut short — the undo is the
-  backup, not a rollback. Since 0.0.32 `edit` takes `dryRun: true`: the match is
-  counted and a line diff comes back, and nothing is written, backed up, or
-  dialed beyond the read the preview needs anyway.
+  never saw, and since 0.0.34 it **guards what it overwrites**: the read asks for
+  the file's inode, size, and nanosecond mtime in the same round trip, the write
+  compares them in the same shell that truncates, and a change noticed in between
+  comes back `stale: true` with nothing written. A safety copy is taken before any
+  truncation — for `backup: false` too, under a private name that is removed once
+  the write is verified — the write is checked against the byte count it had to
+  leave, and a repair child then looks at the file before touching it and answers
+  with which of four things is true (the bytes landed, the file is intact, the
+  previous content is back at its own size, or the recovery failed and here is the
+  copy). **It is still a preview-and-confirm flow, not a transaction**: the window
+  between the version compare and the truncation is two shell builtins wide rather
+  than a network trip, and a writer that lands inside it is still overwritten. The
+  repair is not cancellable by the caller's abort — a reader who stopped the edit
+  stopped the edit, not the file's claim to be whole — and runs under its own
+  30-second budget instead. `write` and `upload` land their own bytes; neither is
+  versioned, and nothing here rolls a server back behind this plugin's back.
+  Since 0.0.32 `edit` takes `dryRun: true`: the match is counted and a line diff
+  comes back, and nothing is written, backed up, or dialed beyond the read the
+  preview needs anyway; on a server that cannot state a version the preview says so,
+  because the guard the write would have run is the one that is off.
 - The elevation prompt and an `input` body share the one stdin, and the prompt
   reads first: `su` with input is refused up front, and so is `as` with input
   whenever a login password is stored. The single coexistence that is real —
@@ -676,6 +725,38 @@ still open:
   — and `-o IdentitiesOnly=no` in the target's extra arguments still wins,
   because those land after the plugin's flags. The `ssh -G` resolve view carries
   the same pair, so the card shows what the children actually run.
+- A transfer's ceiling is hard for **one file** and pre-checked for **a tree**, and
+  every result carries `limitMode` saying which answered. A tree that grew between
+  the enumeration and the rename is reported as what landed, with a note; the
+  alternative — carrying a directory through an archive — would change what a
+  symlink means on the way, and `scp -r`'s layout is the one callers already rely
+  on. A recursive download also refuses, before moving anything, to land on a local
+  directory that is not empty: that rename can only fail, and until 0.0.34 it failed
+  *after* copying the tree and then deleted it.
+- When a copy is stopped, the **local** child is gone: the provider is waited out
+  across its TERM→KILL grace before the answer is given, and the live check proves
+  no `ssh` of ours is left holding a slot. What the server does with the command on
+  the other end of the channel is the server's business — measured honestly: a
+  remote `cat` blocked writing to a pipe dies at once, while one parked in
+  `open()` on a fifo with no writer can sit there until its own luck changes,
+  because closing a channel cannot interrupt a syscall that never touches it.
+- Spill files — the full-output recovery files the subprocess provider writes when
+  a stream passes its ceiling — stay the **provider's**. It owns the directory,
+  closes them, keeps completed ones until something outside the process cleans
+  them, and no consumer in this harness unlinks them, so this plugin unlinks none
+  of them either. What it does own is the asking: one budget per Host process
+  (1 GiB, 64 files), grants never cut down to the remainder (a spill file the
+  provider runs out of room for is *deleted*), the total allowed to pass the
+  ceiling by at most the stream in flight, and an answer that says out loud when
+  the budget is why there is no file.
+- The plugin's own temp directories — the askpass helper's and the control
+  sockets' — are named after the process that made them, and a sweep at startup
+  collects what a dead id left. A name from before the id is judged by three days
+  of idleness, read from the *helper's* own timestamps, and a socket whose master
+  still answers a connect is never touched. A helper that is nevertheless taken
+  from under a running Host is rebuilt on the next use, and using it keeps its
+  timestamps young — both halves of that were learned from a first cut of the rule
+  collecting a live Host's helper because its directory was thirteen hours old.
 - The local edge of a transfer is lexical: `localPath` is matched against the
   conversation's workspace directory by prefix, without resolving symlinks — a
   choice `src/local-path.ts` states out loud. A symlink planted inside the

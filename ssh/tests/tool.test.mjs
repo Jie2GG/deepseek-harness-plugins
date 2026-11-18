@@ -94,7 +94,25 @@ test('parameters declare all twenty-three fields the body reads', () => {
   assert.ok(definition.parameters.required.includes('action'))
 })
 
+
 // ── decideAccess: the whole policy matrix ──────────────────────────────────
+test('the parameter text tells the model what each ceiling actually governs', () => {
+  // These sentences are the contract for a model that has never read the README:
+  // a ceiling described as an output limit, when it is also the transfer limit, is
+  // how an agent ends up asking for a 4 MiB copy of a 32 MiB file and being
+  // surprised by the refusal.
+  const { definition } = toolHarness(fakeOps())
+  const params = definition.parameters.properties
+  assert.match(params.maxBytes.description, /For `exec` and `read`/)
+  assert.match(params.maxBytes.description, /For `upload` and `download`/)
+  assert.match(params.maxBytes.description, /enforced against the bytes as they move/)
+  assert.match(params.maxBytes.description, /what the server enumerated before the copy started/)
+  assert.match(params.timeoutMs.description, /For `exec`, `upload`, and `download`/)
+  assert.match(params.timeoutMs.description, /pre-check and publish included/)
+  // `~/` is offered in the path description, and 0.0.34 is the round it expanded.
+  assert.match(params.path.description, /starting with `~\/`/)
+})
+
 test('reads are allowed, writes are asked, the off switch denies', () => {
   assert.equal(decideAccess(undefined, { action: 'exec', command: 'x' }).verdict, 'allow') // unresolved target: the body's problem
   for (const action of ['get_connection', 'read', 'download']) {

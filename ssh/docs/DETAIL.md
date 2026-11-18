@@ -5,7 +5,7 @@ aliases, how each one logs in, and a connectivity test you can run from the
 browser. The conversation can use that server too: the agent gets
 one `ssh_client` tool that runs commands (or leaves a long one running in the
 background and polls it later), lists and reads files, writes text, replaces
-exact text inside a file, and moves files with `scp` — all against the target you
+exact text inside a file, and moves files over `ssh` — all against the target you
 picked for the conversation, with the credentials you stored on this page.
 Nothing is installed or upgraded on either side.
 
@@ -79,8 +79,8 @@ keeps running while you edit values on the second.
   remaining lines are this Host's fixed rules — how many remote operations run at
   once, how many servers may each hold one shared connection, how long an idle
   connection stays open, how many targets one **Test all** round covers, and how
-  long a probe waits (thirty seconds, with the copy's size pre-check keeping its
-  own ten and the copy itself keeping its own five minutes), and how many copies
+  long a probe waits (thirty seconds, with the copy's size and tree-counting
+  questions keeping their own ten and the copy itself keeping its own five minutes), and how many copies
   and jobs may hold a slot at once. The ceilings the page and a call can move —
   command deadline, output capture, transfer size and transfer deadline — are
   resolved from the same defaults-and-caps table above, and a number that comes
@@ -247,14 +247,14 @@ call rather than the next restart:
 | --- | --- | --- | --- |
 | `timeoutMs` / `maxTimeoutMs` | 30 s | 300 s | One foreground remote command, and the most any layer (page, target, one call) may ask for |
 | `outputBytes` / `maxOutputBytes` | 64 KiB | 4 MiB | Per-stream in-memory capture — stdout and stderr each get their own |
-| `transferBytes` / `maxTransferBytes` | 32 MiB | 512 MiB | One copy — the single-file ceiling a pre-check measures against |
+| `transferBytes` / `maxTransferBytes` | 32 MiB | 512 MiB | One file — the ceiling enforced while its bytes move; for a tree, what the server said before they did |
 | `transferTimeoutMs` / `maxTransferTimeoutMs` | 5 min | 30 min | The whole budget of one copy, on its own clock: a transfer never borrows the command's 30 s, and a call's `timeoutMs` on the transfer actions reads as "how long to wait for the copy" |
 | `maxTransferFiles` | 500 | — | Pre-check cap on how many files one recursive upload may carry, counted at walk time |
 | `maxTransferTotalBytes` | 512 MiB | — | Pre-check cap on the cumulative bytes of one recursive upload, also at walk time |
 | `maxConcurrentTransfers` | 2 | 16 | How many copies may hold one of the 16 operation slots at once, so transfers cannot starve commands |
 | `maxRunningJobs` | 8 | 16 | How many explicitly backgrounded jobs may hold a slot at once; the rest stay reserved for foreground calls |
 | `probeTimeoutMs` | 30 s | — | How long a connectivity test waits; the page has no field for it |
-| `statTimeoutMs` | 10 s | — | The size-and-type pre-check a copy asks before moving bytes |
+| `statTimeoutMs` | 10 s | — | The size, type, and tree-counting questions a copy asks before moving bytes |
 | `maxSpillBytes` | 64 MiB | — | How large a spill file may grow; `0` writes none, and the result says there is no file to look for |
 | `promoteOnTimeout` | on | — | Hand a command that runs out of time to the job registry instead of killing it |
 | `graceMs` | 2 s | — | SIGTERM to SIGKILL grace for a child |
@@ -329,15 +329,25 @@ classified result.
 - The page needs the Host's `/api` carrier, the subprocess provider, the storage
   domain, the credential store, the tool registry, and the mounted filesystem and
   working-directory services; a profile missing any of them keeps the plugin
-  inactive rather than failing. `write` and `upload` replace files in place: nothing
-  on the server is versioned or rolled back, and a directory download must be asked
-  for recursively. An upload is guarded at both ends before `scp` runs — the local
-  file's existence, readability and size (for a tree, the count and cumulative bytes
-  too), and the remote destination, which survives unless `overwrite` says otherwise;
-  a download lands in a temporary sibling and is renamed into place only on a clean
-  finish, so a cancelled, timed-out or failed copy leaves no half file. All of those
-  are pre-checks against what `stat` said at that moment — not gates on the bytes
-  that move: a file growing during a copy can still push more through. An `edit` is
-  read → compute → `cat >`, in place: a server-side change between the read and the
-  write is overwritten without a version check, and `dryRun: true` previews the
-  match count and the diff without writing or backing anything up.
+  inactive rather than failing. A **single file** copy is held to its size ceiling
+  while the bytes move — the count is taken at this end, and a file that grows
+  mid-copy is stopped, with the answer quoting how much arrived rather than how
+  much a `stat` once said. A **tree** rides `scp -r` for its layout and symlink
+  behaviour, and is measured before it moves: the local walk for an upload, one
+  enumeration on the server for a download, and the result says which kind of
+  ceiling answered (`limitMode`). Both directions land where they belong: a
+  download in a temporary sibling renamed in only on a clean finish, an upload in
+  a sibling on the server that then takes its final name *through* an existing
+  file — keeping its inode, mode, owner and hardlinks — or by rename with the
+  source's permission bits for a fresh one. A refused upload removes its temp; a
+  recursive download refuses to land on a local directory that is not empty
+  rather than copying the tree and then failing.
+  An `edit` reads the file **and its version** in one trip, copies it before
+  truncating, writes through the same inode, checks the size it had to leave, and
+  if any of that goes wrong a repair child puts the previous content back — then
+  says which of the four outcomes actually happened (`stale`, `restored`). The
+  window between noticing a change and making one is now two shell builtins wide
+  rather than a network trip, but it is a window: this is a preview-and-confirm
+  flow, not a transaction. `dryRun: true` previews the match count and the diff
+  without writing or backing anything up, and warns when the server cannot state a
+  version for the write to be checked against.

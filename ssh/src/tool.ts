@@ -587,9 +587,9 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
       mkdir: { type: 'boolean', description: 'For `write`: create the parent directory first. Defaults to true.' },
       localPath: { type: 'string', description: 'For `upload` and `download`: the path on this machine. Relative paths are resolved inside the conversation workspace, and a path outside it is refused.' },
       recursive: { type: 'boolean', description: 'For `upload` and `download`: move a directory rather than one file.' },
-      timeoutMs: { type: 'integer', description: 'For `exec`: the deadline for this call, in milliseconds. The plugin applies its configured default and cap — a number above the cap is capped to it and the effective value is echoed back, never refused.' },
+      timeoutMs: { type: 'integer', description: 'For `exec`, `upload`, and `download`: the deadline for this call, in milliseconds — for a copy, the whole budget the copy gets, pre-check and publish included. The plugin applies its configured default and cap — a number above the cap is capped to it and the effective value is echoed back, never refused.' },
       background: { type: 'boolean', description: 'For `exec`: start the command as a background job and return its id at once instead of waiting for it. Poll it with the `job_output` tool and stop it with `job_kill`; the command also ends when this conversation ends.' },
-      maxBytes: { type: 'integer', description: 'For `exec` and `read`: the largest amount of output to bring back.' },
+      maxBytes: { type: 'integer', description: 'For `exec` and `read`: the largest amount of output to bring back. For `upload` and `download`: the largest a single file may be — for one file, enforced against the bytes as they move, so a file that grows mid-copy is stopped rather than carried; for a tree, enforced against what the server enumerated before the copy started.' },
       tty: { type: 'boolean', description: 'For `exec`: run under `ssh -tt`, for a program that inspects its own terminal (it then merges stderr into stdout and ends lines with CRLF).' },
       input: { type: 'string', description: 'For `exec`: text fed to the command stdin, to answer a prompt or pipe a body. The one stdin is spoken for by elevation: `as` with a stored password, or any `su`, cannot be combined with it — the call is refused up front rather than losing the body or the answer.' },
       oldText: { type: 'string', description: 'For `edit`: the exact text to find, copied from a read; it must match once unless `all` or `replaceFirst` is set.' },
@@ -657,10 +657,13 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
     // anything. The shared local state they touch — lane counters, the pool
     // ledger, session memory — is maintained by synchronous, commuting updates.
     // Everything else mutates a remote filesystem this plugin cannot make
-    // transactional (no version or mtime check exists between a read and a
-    // write), so it stays exclusive even though the transport *could* run it
-    // concurrently: the question the contract asks is whether parallel dispatch
-    // is safe, not whether the plumbing survives it.
+    // transactional. An `edit` now compares the file's version before it
+    // truncates, which shrinks the window between noticing a change and making
+    // one to a couple of shell builtins — it does not close it, and a splice of
+    // two concurrent writers is still a thing that can happen. So the mutations
+    // stay exclusive even though the transport *could* run them concurrently:
+    // the question the contract asks is whether parallel dispatch is safe, not
+    // whether the plumbing survives it.
     isConcurrencySafe: (args: unknown): boolean => {
       const action = typeof args === 'object' && args !== null ? (args as { action?: unknown }).action : undefined
       return action === 'get_connection' || action === 'read'
