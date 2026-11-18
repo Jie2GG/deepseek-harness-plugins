@@ -39,6 +39,14 @@ count is not an answer about content.
   restore that this server could only weigh is reported `unknown`, not `restored`;
   a repair that never answered says so instead of naming a verdict it did not
   receive. The safety copy is dropped only on a path a digest confirmed.
+- **Corrected — what a copy's `timeoutMs` actually bounds.** The parameter promised
+  “the whole budget the copy gets, pre-check and publish included”, and a live
+  server disagreed: a 1.5 s upload whose publish step stalled on a readerless pipe
+  answered 3.651 s later, because the pre-check, the copy and the publish are three
+  remote children and each gets that clock. The behaviour is the one worth keeping
+  — a publish cut in half is worse than a publish refused — so the words moved:
+  the description now says the number bounds **one remote child**, and both DETAIL
+  languages carry the measured figures.
 - Tests: `tests/edit-shell.test.mjs` runs the generated POSIX sequences under a
   real `/bin/sh` — collision at equal length, no-digest server, a copy that cannot
   be written back, a tampered copy, a concurrent same-length rewrite — and the
