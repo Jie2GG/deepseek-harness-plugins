@@ -735,6 +735,23 @@ export class SshTransport {
     return this.laneUsage(TRANSFER_LANE)
   }
 
+  /**
+   * Whether one reservation still has room, asked without taking anything.
+   *
+   * The caller that owns a *job* needs this before it registers: the registry
+   * hands back an id the moment it is told to start, and a start that the lane
+   * then refuses arrives as a finished job the reader never saw running — a
+   * `started` that turns into `failed` in the next frame, which is a strange thing
+   * to tell a model that is deciding whether to poll. Asking first costs one
+   * comparison, and the reservation it is checking is still made the ordinary way.
+   * @param lane - the kind and the ceiling the call will ask against.
+   * @returns true when a child started now would be admitted.
+   */
+  laneRoom(lane: { readonly kind: string; readonly cap: number }): boolean {
+    if (this.#inFlight >= MAX_CONCURRENT_OPS) return false
+    return (this.#lanesByKind.get(lane.kind) ?? 0) < lane.cap
+  }
+
   /** Whether this Host can share connections at all, and why not when it cannot. */
   get mux(): { ready: boolean; failure?: string | undefined } {
     if (this.#pool === undefined) return { ready: false, failure: 'no pool was assembled for this profile' }

@@ -920,6 +920,37 @@ test('a profile that turns promotion off keeps the plain bounded wait', async ()
   assert.equal(state.calls.some(c => c.kind === 'startRun'), false)
 })
 
+test('a background call past the job ceiling is refused in its own frame, not as a failed job', async () => {
+  const starts = []
+  const jobs = {
+    start (spec) {
+      starts.push(spec.label)
+      let done
+      const settled = new Promise(resolve => { done = resolve })
+      // The registry contract: hooks come back synchronously, and `done` is what
+      // the registry waits on to settle the job.
+      void settled
+      return `ssh-job-${String(starts.length)}`
+    }
+  }
+  const { ops, state } = build({ jobs })
+  state.laneRoom = (lane) => lane.kind === 'background jobs' ? false : true
+  const out = await ops.execBackground({ command: 'make world' })
+  assert.equal(out.ok, false)
+  assert.equal(out.status, 'refused')
+  assert.equal(out.jobId, undefined, 'no id is handed back for a command that never started')
+  assert.match(out.message, /At most 8 background jobs may run at once, and all 8 slots are taken\./)
+  assert.match(out.hint, /job_kill/)
+  assert.deepEqual(starts, [], 'the registry was never asked to start it')
+  // The lane is only *asked*, never taken: the ceiling still belongs to the child.
+  assert.equal(state.calls.filter(call => call.kind === 'startRun').length, 0)
+  state.laneRoom = () => true
+  const room = await ops.execBackground({ command: 'make world' })
+  assert.equal(room.ok, true)
+  assert.equal(room.status, 'started')
+  assert.equal(starts.length, 1, 'and the next call does register')
+})
+
 test('a profile with no job registry never attempts a hand-over', async () => {
   const { ops, state } = build()
   await ops.runCommand({ command: 'uptime' })

@@ -34,7 +34,7 @@ import {
 } from './edit.ts'
 import { startRemoteJob } from './jobs.ts'
 import type { JobRegistry } from './jobs.ts'
-import { remotePathArg, shellQuote, leadingProgram, classifyCollectedRun } from './transport.ts'
+import { remotePathArg, shellQuote, leadingProgram, classifyCollectedRun, JOB_LANE } from './transport.ts'
 import type { RemoteAuth, RemoteTarget, SshTransport } from './transport.ts'
 import type { TargetStore } from './store.ts'
 import type { TargetSecrets } from './secrets.ts'
@@ -51,14 +51,16 @@ export interface BackgroundRunResult {
   action: 'exec'
   /** Whether the job started. */
   ok: boolean
-  /** `started` while it is running in the background. */
-  status: 'started'
+  /** `started` while it is running, `refused` when the job ceiling turned it away. */
+  status: 'started' | 'refused'
   /** The target the command runs on. */
   target: { id: string; label: string; host: string }
   /** The command line that was handed over. */
   command: string
-  /** The registry-issued id the reader polls with. */
-  jobId: string
+  /** The registry-issued id the reader polls with; absent when the call was refused. */
+  jobId?: string
+  /** Why the call was refused, in the words the ceiling answers with. */
+  message?: string
   /** What to do next. */
   hint?: string | undefined
   /** The refreshed inventory, for the page. */
@@ -1628,6 +1630,23 @@ export function createOps(deps: OpsDeps): Ops {
       const settings = resolved.settings
       const auth = await authFor(record.id, record.auth)
       const owner = typeof input.sessionId === 'string' ? input.sessionId : undefined
+      // The job ceiling is asked about *before* the registry is told to start, so a
+      // call that will not fit comes back in the frame that made it, with the
+      // ceiling in its words. The reservation itself is unchanged — the lane is
+      // still taken by the child when it spawns, and a start that loses the race to
+      // another call still ends as a failed job with the same sentence.
+      if (!runner.laneRoom({ kind: JOB_LANE, cap: settings.maxRunningJobs })) {
+        return {
+          action: 'exec',
+          ok: false,
+          status: 'refused',
+          target: { id: record.id, label: record.label, host: record.host },
+          command: input.command,
+          message: `At most ${String(settings.maxRunningJobs)} ${JOB_LANE} may run at once, and all ${String(settings.maxRunningJobs)} slots are taken.`,
+          hint: 'Stop one with `job_kill`, wait for one to settle, or raise the ceiling in the plugin\u2019s configuration.',
+          connections: await viewsOf(state),
+        }
+      }
       // A backgrounded command has no deadline of its own: it lives until it
       // settles, until `job_kill`, until its conversation goes away, or until the
       // Host exits — the same bargain the harness's own background shell makes, and

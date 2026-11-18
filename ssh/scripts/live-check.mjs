@@ -135,8 +135,42 @@ mux.attach((socketPath, authority) => transport.exitMaster(socketPath, authority
 // live check drives the same code path the model drives rather than a parallel
 // hand-written one: the store and the secret are fakes, everything past `ops` is
 // the real thing.
+// A stand-in for the harness job registry with the same contract the plugin drives:
+// `start` returns an id at once and returns the producer's hooks, so the quota and
+// the release paths are exercised against real children while the registry's own
+// polling and conversation plumbing stay out of the picture.
+const registry = (() => {
+  const live = new Map()
+  let counter = 0
+  return {
+    start (spec) {
+      counter += 1
+      const id = `ssh-live-${String(counter)}`
+      const hooks = spec.run({})
+      live.set(id, hooks)
+      hooks.done.then((outcome) => {
+        void outcome
+        live.delete(id)
+        return undefined
+      })
+      return id
+    },
+    /** How many jobs the registry is holding, which is what the ceiling counts. */
+    get running () { return live.size },
+    kill (id) { live.get(id)?.cancel('stopped by the live check') },
+    async settleAll () {
+      for (const [id, hooks] of live) {
+        hooks.cancel('the live check is finishing')
+        await hooks.done
+        live.delete(id)
+      }
+    }
+  }
+})()
+
 const ops = createOps({
   runner: transport,
+  jobs: registry,
   store: async () => fakeStore({ records: [record({ id: target.id, label: target.label, host: target.host, ...(target.user === undefined ? {} : { user: target.user }), ...(target.port === undefined ? {} : { port: target.port }), auth: auth.mode, pool: 'on', port: target.port, identityFile: target.identityFile, proxyJump: target.proxyJump })] }),
   secrets: () => fakeSecrets({ password: auth.password !== undefined, passphrase: false, root: false }, { password: auth.password }),
   askpass: () => ({ ready: askpass.ready, ...(askpass.path === undefined ? {} : { path: askpass.path }), ...(askpass.failure === undefined ? {} : { failure: askpass.failure }) }),
@@ -723,7 +757,47 @@ cases.spill = async () => {
   }
 }
 
-const order = ['plain', 'grow', 'overwrite', 'modes', 'tilde', 'lane', 'tree', 'edit', 'spill', 'temp', 'release']
+/**
+ * The job ceiling, measured where the 0.0.32 and 0.0.33 rounds could only report
+ * it: a ninth background command has to be turned away **in the frame that asked**,
+ * with the ceiling in its words, rather than starting and then arriving as a failed
+ * job the reader never saw running.
+ */
+cases.jobs = async () => {
+  const cap = settings.maxRunningJobs
+  const ids = []
+  for (let i = 0; i < cap; i += 1) {
+    const started = await ops.execBackground({ target: TARGET_LABEL, command: `sleep 25 && printf 'JOB_%d\\n' ${String(i)}` })
+    check(`background job ${String(i)} starts`, started.ok === true && typeof started.jobId === 'string', `${String(started.status)} ${String(started.jobId)}`)
+    if (typeof started.jobId === 'string') ids.push(started.jobId)
+  }
+  check('the registry holds exactly the ceiling', registry.running === cap, `${String(registry.running)} of ${String(cap)}`)
+  check('the transport lane counts the same jobs', transport.laneUsage('background jobs') === cap, String(transport.laneUsage('background jobs')))
+  const over = Date.now()
+  const ninth = await ops.execBackground({ target: TARGET_LABEL, command: 'sleep 25 && echo NINTH' })
+  const tookMs = Date.now() - over
+  evidence(`ninth call answered in ${String(tookMs)} ms: ${String(ninth.status)} / ok ${String(ninth.ok)} / jobId ${String(ninth.jobId ?? 'none')}`)
+  check('the call past the ceiling is refused in its own frame', ninth.ok === false && ninth.status === 'refused' && ninth.jobId === undefined, `${String(ninth.status)} ${String(ninth.jobId ?? 'no id')}`)
+  check('the refusal names the ceiling it hit', /At most \d+ background jobs may run at once/.test(String(ninth.message)), String(ninth.message).slice(0, 60))
+  check('the refusal says what would make room', /job_kill|wait for one to settle|raise the ceiling/iu.test(String(ninth.hint)), String(ninth.hint).slice(0, 60))
+  // A foreground call is not stopped by a full job lane — the reservation exists so
+  // abandoned background work can never busy-lock the plugin.
+  const inline = await ops.runCommand({ target: TARGET_LABEL, command: 'hostname' })
+  check('a foreground command still runs with the job ceiling full', inline.run.status === 'succeeded', String(inline.run.status))
+  // Release one slot, and the next call is admitted: the count is not leaking.
+  registry.kill(ids[0])
+  const released = Date.now()
+  while (registry.running > cap - 1 && Date.now() - released < 15_000) {
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+  check('killing a job gives its slot back', registry.running === cap - 1, `${String(registry.running)} still held`)
+  const tenth = await ops.execBackground({ target: TARGET_LABEL, command: 'sleep 25 && echo TENTH' })
+  check('the next background call is admitted once a slot is free', tenth.ok === true && typeof tenth.jobId === 'string', `${String(tenth.status)}`)
+  await registry.settleAll()
+  check('every job slot comes back when the jobs end', transport.laneUsage('background jobs') === 0 && transport.transfersInFlight === 0, `jobs ${String(transport.laneUsage('background jobs'))}`)
+}
+
+const order = ['plain', 'grow', 'overwrite', 'modes', 'tilde', 'lane', 'tree', 'edit', 'spill', 'jobs', 'temp', 'release']
 process.stdout.write(`\n@jie2gg/dsh-plugin-ssh live check against "${TARGET_LABEL}"\nscratch: ${LOCAL} ⇄ ${REMOTE}\n\n`)
 
 let failure = null
@@ -745,6 +819,7 @@ try {
   }
 } finally {
   try { await remote(`rm -rf ${q(REMOTE_ROOT)}`) } catch { /* the server keeps what it keeps */ }
+  await registry.settleAll().catch(() => undefined)
   transport.dispose()
   await mux.dispose()
   await askpass.dispose()

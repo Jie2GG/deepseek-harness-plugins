@@ -750,7 +750,10 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
               status: job.status,
               target: job.target,
               command: job.command,
-              jobId: job.jobId,
+              ...(job.jobId === undefined ? {} : { jobId: job.jobId }),
+              // A refusal has no id to poll, so the sentence is the whole answer:
+              // which ceiling answered, and what the reader can do about it.
+              ...(job.message === undefined ? {} : { message: job.message }),
               ...(job.hint === undefined ? {} : { hint: job.hint }),
             } as never
           }

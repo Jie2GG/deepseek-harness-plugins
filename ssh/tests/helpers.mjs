@@ -27,6 +27,13 @@ export function fakeRunner () {
     // What the pool looks like from ops.ts: ready, and holding nothing.
     liveMasters: 0,
     transfersInFlight: 0,
+    // The job ceiling, asked without taking a slot: `execBackground` consults this
+    // before it registers anything with the fake registry.
+    // The job ceiling, asked without taking anything: `execBackground` consults
+    // this before it registers a job, so a test can stand in for a full set of
+    // running jobs without owning a process table.
+    laneRoom: (lane) => (typeof state.laneRoom === 'function' ? state.laneRoom(lane) : true),
+    laneUsage: (kind) => (typeof state.laneUsage === 'function' ? state.laneUsage(kind) : 0),
     // The shape the real transport reports through its `spill` getter.
     spill: { used: 0, files: 0, refusals: 0, max: 0 },
     mux: { ready: true, failure: undefined, liveMasters: 0 },

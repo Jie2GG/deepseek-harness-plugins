@@ -305,6 +305,11 @@ function fakeOps () {
     },
     async execBackground (params) {
       this.seen.push(['execBackground', params])
+      if (params.command === 'full lane') {
+        // The shape `ops.execBackground` answers with when the job ceiling is
+        // already reached: refused in the frame, with no id to poll.
+        return { action: 'exec', ok: false, status: 'refused', target: { id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9' }, command: params.command, message: 'At most 8 background jobs may run at once, and all 8 slots are taken.', hint: 'Stop one with `job_kill`, wait for one to settle, or raise the ceiling in the plugin\u2019s configuration.', connections: [] }
+      }
       return { action: 'exec', ok: true, status: 'started', target: { id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9' }, command: params.command, jobId: 'ssh-j1', connections: [] }
     },
     async readPath (params, signal) {
@@ -389,6 +394,18 @@ test('exec: backgrounding hands over the job identity and omits a premature exit
   const rendered = definition.output.render({ action: 'exec', command: 'make world' }, payload)[0].text
   assert.match(rendered, /Left running in the background as job ssh-j1/)
   assert.doesNotMatch(rendered, /exit=/) // a running command has no exit code to show
+})
+
+test('a refused background call reaches the model refused, with no id to poll', async () => {
+  const { definition } = toolHarness(fakeOps())
+  const payload = await definition.execute({ action: 'exec', command: 'full lane', background: true }, { agent: { id: 's1' } })
+  assertPayloadValid(definition.output.schema, payload)
+  assert.equal(payload.ok, false)
+  assert.equal(payload.status, 'refused')
+  assert.equal(payload.jobId, undefined, 'the frame carries no job that does not exist')
+  const rendered = definition.output.render({ action: 'exec', command: 'full lane', background: true }, payload).map(line => line.text).join('\\n')
+  assert.match(rendered, /At most 8 background jobs/)
+  assert.match(rendered, /status=refused/)
 })
 
 test('elevated exec echoes the account and swaps the credential hint', async () => {

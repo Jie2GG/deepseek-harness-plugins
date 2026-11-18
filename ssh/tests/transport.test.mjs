@@ -315,6 +315,21 @@ test('a per-kind lane ceiling refuses the copy over the ceiling, not over the gl
   assert.equal(transport.inFlight, 0)
 })
 
+test('the lane can be asked about without spending it, and reports full when it is', async () => {
+  const provider = streamProvider(() => undefined)
+  const transport = new SshTransport(provider)
+  const lane = { kind: 'background jobs', cap: 1 }
+  assert.equal(transport.laneRoom(lane), true)
+  const held = transport.streamFile('/usr/bin/ssh', ['host', 'cat -- /a'], { ...COPY_SETTINGS, maxRunningJobs: 1 }, undefined, 0, 'file transfer', { direction: 'download', localPath: join(mkdtempSync(join(tmpdir(), 'dshssh-lane-')), 'f'), maxBytes: 64 }, undefined, lane)
+  // Asking did not take the slot: the copy that arrives next still gets refused.
+  assert.equal(transport.laneRoom({ kind: 'file transfers', cap: 2 }), true)
+  assert.equal(transport.laneRoom(lane), false)
+  assert.equal(transport.inFlight, 1, 'exactly one child for one call, however often it was peeked at')
+  provider.children[0].stdout?.destroy()
+  await held
+  assert.equal(transport.laneRoom(lane), true, 'and the peek reads true again once it is back')
+})
+
 test('eight jobs cannot busy-lock the plugin: the job ceiling stops starts, not foreground calls', async () => {
   // A provider whose child answers to the kill: `job_kill` aborts the lane
   // controller, and only a fake that honours that signal can show the slot
