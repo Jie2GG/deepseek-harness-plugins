@@ -71,6 +71,8 @@ window.__ModuleLoader__.load({
         boundsTitle: 'Fixed bounds',
         boundsTargets: 'Targets per profile',
         boundsOps: 'Remote operations at once',
+        boundsCopies: 'File copies at once',
+        boundsRunning: 'ceiling {ceiling}, running {running}',
         boundsMasters: 'Servers sharing a connection',
         boundsPersist: 'A shared connection idles out after',
         boundsPerRound: 'Targets per “Test all” round',
@@ -204,6 +206,8 @@ window.__ModuleLoader__.load({
         boundsTitle: '固定边界',
         boundsTargets: '每个 profile 可存的目标数',
         boundsOps: '同时在跑的远程操作数',
+        boundsCopies: '同时在跑的文件传输数',
+        boundsRunning: '上限 {ceiling}，正在跑 {running}',
         boundsMasters: '共用一条连接的目标数上限',
         boundsPersist: '共享连接空闲多久后断开',
         boundsPerRound: '「全部测试」单轮覆盖的目标数',
@@ -930,7 +934,7 @@ window.__ModuleLoader__.load({
       // swapped in place keeps the previous Host module until the restart, and its
       // schema would refuse a `pool` field the new page is ready to send.
       const [pooling, setPooling] = React.useState(false)
-      const [pool, setPool] = React.useState(null as { ready: boolean; liveMasters: number; failure?: string } | null)
+      const [pool, setPool] = React.useState(null as { ready: boolean; liveMasters: number; transfers?: number; failure?: string } | null)
       // Whether the loaded Host half knows about authentication modes at all:
       // an in-place package swap needs a Host restart, and the page keeps working
       // without the secret controls until then.
@@ -1689,9 +1693,14 @@ window.__ModuleLoader__.load({
           // A Host that predates the pool sends no operation count and no sharing
           // rows: printing this release's numbers for that process would put a
           // surprise on the very card whose job is to prevent one.
-          h('div', { class: 'dshssh-bound', key: 'lanes' }, h('dt', {}, t('boundsOps')), h('dd', {}, pooling ? String(limits.concurrentOps) : '—')),
+          // A ceiling a reader cannot see being used is a ceiling they only meet
+          // as a refusal, so each row quotes what is standing in it right now: the
+          // operations, the shared connections, and the two copy slots that are the
+          // ones a file transfer can run out of while everything else is idle.
+          h('div', { class: 'dshssh-bound', key: 'lanes' }, h('dt', {}, t('boundsOps')), h('dd', {}, pooling ? format(t('boundsRunning'), { ceiling: String(limits.concurrentOps), running: String(probing) }) : String(limits.concurrentOps))),
           ...(pooling ? [
-            h('div', { class: 'dshssh-bound', key: 'masters' }, h('dt', {}, t('boundsMasters')), h('dd', {}, String(limits.maxLiveMasters))),
+            h('div', { class: 'dshssh-bound', key: 'masters' }, h('dt', {}, t('boundsMasters')), h('dd', {}, format(t('boundsRunning'), { ceiling: String(limits.maxLiveMasters), running: String(pool?.liveMasters ?? 0) }))),
+            h('div', { class: 'dshssh-bound', key: 'copies' }, h('dt', {}, t('boundsCopies')), h('dd', {}, format(t('boundsRunning'), { ceiling: String(bounds?.effective?.maxConcurrentTransfers ?? '—'), running: String(pool?.transfers ?? 0) }))),
             h('div', { class: 'dshssh-bound', key: 'persist' }, h('dt', {}, t('boundsPersist')), h('dd', {}, idleFor(limits.controlPersistSeconds))),
           ] : []),
           h('div', { class: 'dshssh-bound', key: 'round' }, h('dt', {}, t('boundsPerRound')), h('dd', {}, String(limits.probeAllLimit))),

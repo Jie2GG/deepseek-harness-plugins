@@ -289,9 +289,13 @@ function fakeOps () {
           transferBytes: 33554432, maxTransferBytes: 536870912,
           probeTimeoutMs: 30000, statTimeoutMs: 10000, maxSpillBytes: 67108864, graceMs: 2000,
           promoteOnTimeout: true,
-          effective: { maxOutputBytes: 65536, remoteTimeoutMs: 30000, maxTransferBytes: 33554432, probeTimeoutMs: 30000, statTimeoutMs: 10000, maxSpillBytes: 67108864, graceMs: 2000 },
+          effective: { maxOutputBytes: 65536, remoteTimeoutMs: 30000, maxTransferBytes: 33554432, probeTimeoutMs: 30000, statTimeoutMs: 10000, maxSpillBytes: 67108864, graceMs: 2000, maxConcurrentTransfers: 2, maxRunningJobs: 8, maxTransferFiles: 500, maxTransferTotalBytes: 536870912, transferTimeoutMs: 300000 },
           notes: []
-        }
+        },
+        // The live lane counts, which is how a reader of this call learns that a
+        // copy was turned away for want of a slot rather than for want of size.
+        pool: { ready: true, liveMasters: 1, transfers: 2 },
+        probing: 3
       }
     },
     async runCommand (params, signal) {
@@ -568,6 +572,18 @@ test('a transfer result tells the model which ceiling answered, in the transcrip
   assertPayloadValid(definition.output.schema, tree)
   const treeText = definition.output.render({ action: 'upload', path: '/srv/dir', localPath: '/ws/dir', recursive: true }, tree).map(line => line.text).join('\n')
   assert.match(treeText, /6 bytes \(directory\)/)
+})
+
+test('get_connection carries the transfer lane, in the payload and in the sentence', async () => {
+  const { definition } = toolHarness(fakeOps())
+  const payload = await definition.execute({ action: 'get_connection' }, { agent: { id: 's1' } })
+  assertPayloadValid(definition.output.schema, payload)
+  assert.equal(payload.transfers, 2)
+  assert.match(payload.message, /file copies at once 2, 2 running now/)
+  // A ceiling the reader cannot see being used is a ceiling they only meet as a
+  // refusal, so the standing numbers travel with the standing limits.
+  const rendered = definition.output.render({ action: 'get_connection' }, payload).map(line => line.text).join('\n')
+  assert.match(rendered, /2 running now/)
 })
 
 test('only the reads are declared concurrency-safe, and the description says so too', () => {

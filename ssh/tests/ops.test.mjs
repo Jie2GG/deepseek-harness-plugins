@@ -47,7 +47,7 @@ test('list carries the views, the limits, the pool state, and the askpass health
   assert.equal(out.limits.concurrentOps, 16)
   assert.equal(out.limits.maxLiveMasters, 8)
   assert.equal(out.limits.controlPersistSeconds, 300)
-  assert.deepEqual(out.pool, { ready: true, liveMasters: 0 })
+  assert.deepEqual(out.pool, { ready: true, liveMasters: 0, transfers: 0 })
   assert.equal(out.askpass, 'ready')
   assert.equal(out.sessionTarget, 'ssh-a1b2c3d4e5')
   assert.equal(out.probing, 0)

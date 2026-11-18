@@ -26,6 +26,7 @@ export function fakeRunner () {
     inFlight: 0,
     // What the pool looks like from ops.ts: ready, and holding nothing.
     liveMasters: 0,
+    transfersInFlight: 0,
     mux: { ready: true, failure: undefined, liveMasters: 0 },
     /** A lease that shares nothing but records that a call asked. */
     share (target, auth) {

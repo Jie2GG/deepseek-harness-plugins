@@ -617,7 +617,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           {
             type: 'object',
             additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'get_connection', required: true }, selectedId: { type: 'string' }, selectedLabel: { type: 'string' }, selectedHost: { type: 'string' }, selectedUser: { type: 'string' }, selectedVia: { type: 'string' }, targets: { type: 'array', items: { type: 'object', properties: TARGET_SHAPE, additionalProperties: false } }, count: { type: 'integer' } },
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'get_connection', required: true }, selectedId: { type: 'string' }, selectedLabel: { type: 'string' }, selectedHost: { type: 'string' }, selectedUser: { type: 'string' }, selectedVia: { type: 'string' }, transfers: { type: 'integer' }, targets: { type: 'array', items: { type: 'object', properties: TARGET_SHAPE, additionalProperties: false } }, count: { type: 'integer' } },
           },
           {
             type: 'object',
@@ -711,7 +711,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
             host: resolved.host,
             ...(resolved.user === undefined ? {} : { user: resolved.user }),
             via: (call.target ?? '').trim() !== '' ? 'argument' : stored !== undefined ? 'session' : 'only-target',
-          }) as never
+          }, listed.pool?.transfers) as never
         }
         case 'exec': {
           if (call.command === undefined || call.command.trim() === '') {
@@ -886,11 +886,17 @@ function listedResult(
   connections: Awaited<ReturnType<Ops['list']>>['connections'],
   bounds: Awaited<ReturnType<Ops['list']>>['bounds'],
   selected?: { id: string; label: string; host: string; user?: string | undefined; via: string } | undefined,
+  transfers?: number | undefined,
 ): Record<string, unknown> {
   return {
     action: 'get_connection',
     ok: true,
     count: connections.length,
+    // How many copies the transfer lane is holding right now. The number earns
+    // its place because a copy refused for a full lane is a retry decision, and a
+    // model that can see the lane is one that does not have to guess whether to
+    // wait, kill a job, or give up on the ceiling entirely.
+    ...(transfers === undefined ? {} : { transfers }),
     targets: connections.map(row => ({
       id: row.id,
       label: row.label,
@@ -918,7 +924,7 @@ function listedResult(
       // Stated as default / cap / in force, because a call that asks above the cap
       // is capped rather than refused — and a model that cannot see the cap has no
       // way to know its number was changed on it.
-      : `Ceilings as this Host resolves them (default to cap, and what is in force): command ${String(bounds.timeoutMs)}–${String(bounds.maxTimeoutMs)} ms, in force ${String(bounds.effective.remoteTimeoutMs)} ms; output ${String(bounds.outputBytes)}–${String(bounds.maxOutputBytes)} bytes per stream, in force ${String(bounds.effective.maxOutputBytes)}; transfer ${String(bounds.transferBytes)}–${String(bounds.maxTransferBytes)} bytes, in force ${String(bounds.effective.maxTransferBytes)}. A number past the cap is capped to it, not refused.`,
+      : `Ceilings as this Host resolves them (default to cap, and what is in force): command ${String(bounds.timeoutMs)}–${String(bounds.maxTimeoutMs)} ms, in force ${String(bounds.effective.remoteTimeoutMs)} ms; output ${String(bounds.outputBytes)}–${String(bounds.maxOutputBytes)} bytes per stream, in force ${String(bounds.effective.maxOutputBytes)}; transfer ${String(bounds.transferBytes)}–${String(bounds.maxTransferBytes)} bytes, in force ${String(bounds.effective.maxTransferBytes)}; file copies at once ${String(bounds.effective.maxConcurrentTransfers ?? '—')}${transfers === undefined ? '' : `, ${String(transfers)} running now`}. A number past the cap is capped to it, not refused.`,
   }
 }
 

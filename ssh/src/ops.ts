@@ -171,7 +171,7 @@ export interface ListResult {
     notes: readonly string[]
   }
   /** Whether calls on this Host can share a connection, and how many masters do. */
-  pool: { ready: boolean; liveMasters: number; failure?: string }
+  pool: { ready: boolean; liveMasters: number; transfers: number; failure?: string }
   /** Whether this Host can answer a password or passphrase prompt at all. */
   askpass: 'ready' | 'unavailable'
   /** Why the helper is unavailable, when it is. */
@@ -943,6 +943,10 @@ export function createOps(deps: OpsDeps): Ops {
         pool: {
           ready: runner.mux.ready,
           liveMasters: runner.liveMasters,
+          // The transfer lane is the one ceiling a reader can hit without having
+          // done anything wrong — two copies are moving and a third is turned away
+          // — and until now the refusal was the only place its number appeared.
+          transfers: runner.transfersInFlight,
           ...(runner.mux.failure === undefined ? {} : { failure: runner.mux.failure.slice(0, 512) }),
         },
         probing: runner.inFlight,
