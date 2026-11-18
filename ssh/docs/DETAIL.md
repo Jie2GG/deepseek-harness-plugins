@@ -248,7 +248,7 @@ call rather than the next restart:
 | `timeoutMs` / `maxTimeoutMs` | 30 s | 300 s | One foreground remote command, and the most any layer (page, target, one call) may ask for |
 | `outputBytes` / `maxOutputBytes` | 64 KiB | 4 MiB | Per-stream in-memory capture — stdout and stderr each get their own |
 | `transferBytes` / `maxTransferBytes` | 32 MiB | 512 MiB | One file — the ceiling enforced while its bytes move; for a tree, what the server said before they did |
-| `transferTimeoutMs` / `maxTransferTimeoutMs` | 5 min | 30 min | The whole budget of one copy, on its own clock: a transfer never borrows the command's 30 s, and a call's `timeoutMs` on the transfer actions reads as "how long to wait for the copy" |
+| `transferTimeoutMs` / `maxTransferTimeoutMs` | 5 min | 30 min | The deadline of **one remote child** of a copy, on its own clock: a transfer never borrows the command's 30 s, and a call's `timeoutMs` on the transfer actions reads as "how long to wait for the copy". An upload has more than one such child (pre-check, copy, publish), so a call can run to about that many times the number before it answers — measured on a live server at 3.65 s for a 1.5 s call |
 | `maxTransferFiles` | 500 | — | Pre-check cap on how many files one recursive upload may carry, counted at walk time |
 | `maxTransferTotalBytes` | 512 MiB | — | Pre-check cap on the cumulative bytes of one recursive upload, also at walk time |
 | `maxConcurrentTransfers` | 2 | 16 | How many copies may hold one of the 16 operation slots at once, so transfers cannot starve commands; a copy turned away by a full lane answers as an ordinary `failed` result, with the lane quoted in `message` |

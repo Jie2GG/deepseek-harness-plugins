@@ -173,7 +173,7 @@ bundle 插入的那一行现在**会读** `config:` 里的键了。每个可调�
 | `outputBytes` / `maxOutputBytes` | 64 KiB | 4 MiB | 每条流（stdout、stderr 各一份）留在内存里的上限 |
 | `transferBytes` / `maxTransferBytes` | 32 MiB | 512 MiB | 一次复制的字节上限 |
 | `probeTimeoutMs` | 30 秒 | — | 一次连通性测试最多等多久（页面上没有这个框） |
-| `transferTimeoutMs` / `maxTransferTimeoutMs` | 5 分钟 | 30 分钟 | 一次复制的整体时限，走自己的钟：传输不再借用命令的 30 秒；复制类调用里的 `timeoutMs` 读作「愿意等这次复制多久」 |
+| `transferTimeoutMs` / `maxTransferTimeoutMs` | 5 分钟 | 30 分钟 | 一份复制里**每个远端子进程**的时限，走自己的钟：传输不再借用命令的 30 秒；复制类调用里的 `timeoutMs` 读作「愿意等这一次复制多久」。上传会有多个这样的子进程（预检查、复制、落地），所以每步都等到期限的一次调用，实际可能跑到该数字的好几倍才回答——实测 1.5 秒的调用用了 3.65 秒 |
 | `maxTransferFiles` | 500 | — | 递归上传预检查的文件数上限（按遍历那一刻的统计） |
 | `maxTransferTotalBytes` | 512 MiB | — | 递归上传预检查的累计字节上限（同样是遍历时刻的数） |
 | `maxConcurrentTransfers` | 2 | 16 | 同时最多几条复制占用 16 个执行槽——传输不许饿死命令；槽位满而被拒的复制按普通 `failed` 结果回答，`message` 里点明是哪条通道 |

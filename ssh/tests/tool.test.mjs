@@ -112,7 +112,13 @@ test('the parameter text tells the model what each ceiling actually governs', ()
   assert.match(params.maxBytes.description, /enforced against the bytes as they move/)
   assert.match(params.maxBytes.description, /what the server enumerated before the copy started/)
   assert.match(params.timeoutMs.description, /For `exec`, `upload`, and `download`/)
-  assert.match(params.timeoutMs.description, /pre-check and publish included/)
+  // Measured on a live server: an upload that ran out at each of its remote children
+  // answered 3.65 s after a 1.5 s call. The text has to say what the number bounds —
+  // one remote child — because "the whole budget, pre-check and publish included"
+  // was a promise the copy itself did not keep.
+  assert.match(params.timeoutMs.description, /per remote child/)
+  assert.match(params.timeoutMs.description, /not one shared clock for the whole call/)
+  assert.doesNotMatch(params.timeoutMs.description, /pre-check and publish included/)
   // `~/` is offered in the path description, and 0.0.34 is the round it expanded.
   assert.match(params.path.description, /starting with `~\/`/)
 })
