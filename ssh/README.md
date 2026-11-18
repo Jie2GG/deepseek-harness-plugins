@@ -653,6 +653,31 @@ still open:
 3. Tried and deliberately dropped: claiming the `tool.call.toolview` seat, so a
    remote call keeps rendering in the harness's generic tool row — see the note
    under **Verified contracts**.
+4. Deliberately not built, each re-checked against the shipped behaviour in 0.0.34
+   rather than assumed stale:
+   - **No per-target `remoteTimeoutMs` / `maxOutputBytes` controls on the page.**
+     The resolution layer still honours both from a stored record (`bounds.ts`
+     reads target before profile before default), because stored records and the
+     page's own writes may carry them and dropping that would change a working
+     target's ceilings on upgrade. What is *not* there is a widget: no reader has
+     asked to set a deadline per server, and a card that shows default / cap / in
+     force for one shared table is the answer 99% of the questions. A per-target
+     value is set by the storage record, not by the UI.
+   - **No `dryRun` control on the page.** The preview exists for the model, which
+     reads a diff and decides whether to apply it. The page has no diff renderer
+     and no second confirm step, and inventing both to expose one checkbox would
+     be a worse preview than the one the tool already gives.
+   - **`su` stays.** It is one remote command shape (`su root -c …`) answered from
+     a third credential slot, and the alternative — telling a user with a distinct
+     root password to reach for `as` and hope `sudo` exists — trades a supported
+     server for a smaller file. It is not on the to-remove list; it is also not
+     growing.
+5. The ceilings that are still only pre-checks, stated so nobody has to rediscover
+   them: a **recursive** copy is measured before it moves (`limitMode:
+   'pre-check'`) because `scp -r` cannot be counted in flight and an archive would
+   quietly change what a symlink means; and a guarded **edit** narrows the
+   concurrent-writer window rather than closing it. Spill files stay the subprocess
+   provider's — counted here, never collected here.
 
 ## Limits of 0.0.34
 
