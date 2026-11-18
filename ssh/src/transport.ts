@@ -613,6 +613,16 @@ function aborted(signal: AbortSignal): Promise<void> {
  */
 function drained(stream: Writable): Promise<boolean> {
   return new Promise(resolve => {
+    // A stream that is already finished, closed, or destroyed will never emit
+    // `drain` again, and its `error`/`close` may already have fired before this
+    // listener attached — waiting for an event that is never coming back is how a
+    // download into a directory that does not exist sat for the whole transfer
+    // deadline (five minutes, measured in the running product) and then reported a
+    // timeout, when the true answer was one sentence about the local path.
+    if (stream.destroyed || stream.writableEnded || stream.writableFinished) {
+      resolve(false)
+      return
+    }
     const stop = (value: boolean): void => {
       stream.removeListener('drain', onDrain)
       stream.removeListener('error', onDeath)
@@ -1361,15 +1371,18 @@ export class SshTransport {
       }
       const stdoutRead = handle.collected.stdout?.readFrom(0)
       const stderrRead = handle.collected.stderr?.readFrom(0)
+      // Why the copy is over, in the order a reader can act on: the ceiling, then a
+      // local end that gave out (the clock only fired because the channel had
+      // nowhere to go), then the clock, then the child or the provider.
       const outcome: StreamedCopy['outcome'] = state.over
         ? 'over-limit'
-        : stopped === 'cancelled'
-          ? 'cancelled'
-          : stopped === 'timeout'
-            ? 'timeout'
-            : spawnFailure !== undefined
-              ? 'error'
-              : state.error !== undefined && state.ended === false
+        : state.error !== undefined && state.ended === false
+          ? 'error'
+          : stopped === 'cancelled'
+            ? 'cancelled'
+            : stopped === 'timeout'
+              ? 'timeout'
+              : spawnFailure !== undefined
                 ? 'error'
                 : 'exit'
       return {
@@ -1420,6 +1433,13 @@ export class SshTransport {
       let whole = true
       try {
         for await (const chunk of source) {
+          if (sinkFailure !== undefined) {
+            // The file stopped accepting bytes; keep pulling the channel would only
+            // pretend the copy might still land.
+            state.error = `The local file ${copy.localPath} could not be written to: ${sinkFailure}`
+            whole = false
+            break
+          }
           const bytes = size(chunk as string | Buffer)
           if (state.bytes + bytes > copy.maxBytes) {
             // The chunk that crossed the line is not delivered: the count this

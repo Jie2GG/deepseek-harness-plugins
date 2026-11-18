@@ -3,7 +3,7 @@
 // a call is handed about sharing.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
@@ -698,6 +698,50 @@ test('a download whose local file cannot be written is an error, not a silent sh
   assert.equal(out.outcome, 'error')
   assert.match(String(out.error), /ENOENT|no such file/iu)
   assert.equal(out.exitCode, 0) // the server did its part; saying so keeps the reader hunting in the right place
+})
+
+test('a local sink that died is reported at once, not after the whole deadline', async () => {
+  // The case the running product found: a download whose destination sits at a path
+  // that cannot hold a file. The write stream errors and closes before the pump
+  // asks it for room, so a listener waiting for `drain` is waiting for an event
+  // that already happened — and the copy then spends its entire deadline (five
+  // minutes, measured) arriving as a timeout that blames the server.
+  const dir = mkdtempSync(join(tmpdir(), 'dshssh-sink-'))
+  // The channel keeps talking: a sink that refused one chunk must not leave the
+  // far end writing into a stream nobody reads.
+  const asDirectory = join(dir, 'blocked')
+  mkdirSync(asDirectory)
+  // Two ways the local end can refuse the file: the path is a directory, and the
+  // directory the file should land in does not exist. Both used to arrive as a
+  // timeout after the copy had sat out its entire deadline.
+  const missingParent = join(dir, 'no-such-directory', 'f')
+  for (const [label, localPath] of [['a directory in the way', asDirectory], ['a parent directory that does not exist', missingParent]]) {
+    const transport = new SshTransport(streamProvider(child => {
+      for (let i = 0; i < 40; i += 1) child.push('x'.repeat(16 * 1024))
+    }))
+    const began = Date.now()
+    const out = await transport.streamFile('/usr/bin/ssh', ['host', 'cat -- /f'], COPY_SETTINGS, undefined, 30_000, 'file transfer', { direction: 'download', localPath, maxBytes: 8 * 1024 * 1024 })
+    const took = Date.now() - began
+    assert.equal(out.outcome, 'error', label)
+    assert.match(String(out.error), /ENOENT|EISDIR|could not be written|no such file/iu, label)
+    assert.ok(took < 5_000, `${label}: the answer came back in ${String(took)} ms, not at the 30 s deadline`)
+    assert.equal(transport.inFlight, 0, `${label}: the refused copy gave its operation slot back`)
+  }
+})
+
+test('a deadline that fires while the channel is still healthy stays a timeout', async () => {
+  // The pair to the case above: an answer must not start calling every slow copy a
+  // local failure. Nothing is wrong with the sink here — the far end simply has
+  // more to say than the deadline allows.
+  const dir = mkdtempSync(join(tmpdir(), 'dshssh-slow-'))
+  const provider = streamProvider(child => {
+    child.push('first chunk')
+    // and then silence: the child never settles and never ends its channel
+  })
+  const transport = new SshTransport(provider)
+  const out = await transport.streamFile('/usr/bin/ssh', ['host', 'cat -- /f'], COPY_SETTINGS, undefined, 120, 'file transfer', { direction: 'download', localPath: join(dir, 'f'), maxBytes: 8 * 1024 * 1024 })
+  assert.equal(out.outcome, 'timeout')
+  assert.equal(out.bytes, 11)
 })
 
 test('a streamed upload feeds the channel and closes it only once the file is done', async () => {

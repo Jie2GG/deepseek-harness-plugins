@@ -837,6 +837,15 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           if (call.overwrite === true) params.overwrite = true
           if (call.recursive === true) params.recursive = true
           if (call.maxBytes !== undefined) params.maxBytes = call.maxBytes
+          // A copy's deadline is its own clock (a permitted copy of a permitted file
+          // runs for minutes, and the 30 s command default would cut it mid-stream),
+          // so a call that asks for a shorter one has to have it forwarded — until
+          // this line, `timeoutMs` was documented as governing a transfer and only
+          // ever moved the command deadline, and a copy into a path the filesystem
+          // refused sat out the full five minutes blaming the server. The seam is the
+          // same one that lost `dryRun` in 0.0.32: the field is in the interface, the
+          // body reads it, and the case that assembles the params never passes it on.
+          if (call.timeoutMs !== undefined) params.timeoutMs = call.timeoutMs
           const result = call.action === 'upload' ? await operations.upload(params, signal) : await operations.download(params, signal)
           await rememberSessionTarget(operations, sessionId, call, result)
           return { ...result, action: call.action } as never

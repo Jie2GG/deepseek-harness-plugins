@@ -797,7 +797,46 @@ cases.jobs = async () => {
   check('every job slot comes back when the jobs end', transport.laneUsage('background jobs') === 0 && transport.transfersInFlight === 0, `jobs ${String(transport.laneUsage('background jobs'))}`)
 }
 
-const order = ['plain', 'grow', 'overwrite', 'modes', 'tilde', 'lane', 'tree', 'edit', 'spill', 'jobs', 'temp', 'release']
+/**
+ * The two failures the running product found in 0.0.34's first hours, pinned where
+ * they can be re-run: a copy that cannot write where it was told to write must say
+ * so at once, and a copy whose caller set a deadline must stop at that deadline.
+ * Before the fix, a download into a path whose parent directory was missing sat
+ * out the entire five-minute transfer deadline and then blamed the server with
+ * "ran out of its deadline".
+ */
+cases.sink = async () => {
+  const file = await ensureSource()
+  const { mkdirSync: makeLocal } = require('node:fs')
+  const blocked = join(LOCAL, 'in-the-way')
+  makeLocal(blocked, { recursive: true })
+  // 1. a landing path the local filesystem refuses
+  for (const [label, local] of [['missing parent directory', join(LOCAL, 'no-such-dir', 'f.bin')], ['a directory in the way', blocked]]) {
+    const started = Date.now()
+    const out = await copy('download', local, file, { maxBytes: 1024 * 1024, timeoutMs: 20_000 })
+    const took = Date.now() - started
+    evidence(`${label}: ${out.status} after ${String(took)} ms — ${String(out.message).slice(0, 110)}`)
+    // Two honest answers, depending on which half of the path is wrong: the sink
+    // refused the bytes (failed, with the filesystem's own sentence), or the copy
+    // landed and found the destination is a directory it must not pretend to
+    // replace (refused-exists). What must never happen is the copy sitting out its
+    // deadline and blaming the server.
+    const reason = `${String(out.message)} ${String(out.hint)}`
+    check(`${label}: the copy is refused, not timed out`, (out.status === 'failed' || out.status === 'refused-exists') && took < 8_000 && /written|ENOENT|EISDIR|no such file|flush|destination|directory/i.test(reason), `${String(out.status)} in ${String(took)} ms: ${reason.slice(0, 90)}`)
+    check(`${label}: no stray file or part is left behind`, readdirSync(LOCAL).filter(name => name.includes('dsh-part-')).length === 0)
+  }
+  // 2. a deadline the caller chose actually bounds the copy: a fifo nobody feeds
+  const idle = `${REMOTE}/sink-idle.fifo`
+  await remote(`mkdir -p ${q(REMOTE)} && rm -f ${q(idle)} && mkfifo ${q(idle)}`)
+  const began = Date.now()
+  const stalled = await copy('download', join(LOCAL, 'idle.bin'), idle, { maxBytes: 8 * 1024 * 1024, timeoutMs: 1_500 })
+  const waited = Date.now() - began
+  evidence(`idle fifo with a 1500 ms deadline: ${stalled.status} after ${String(waited)} ms`)
+  check("a caller's shorter deadline is honoured by the copy", stalled.status === 'failed' && /deadline/iu.test(String(stalled.message)) && waited < 12_000 && waited >= 1_400, `${String(stalled.status)} after ${String(waited)} ms`)
+  check('the stalled copy freed its lane slot', transport.transfersInFlight === 0, String(transport.transfersInFlight))
+}
+
+const order = ['plain', 'grow', 'overwrite', 'modes', 'tilde', 'lane', 'tree', 'edit', 'spill', 'jobs', 'temp', 'sink', 'release']
 process.stdout.write(`\n@jie2gg/dsh-plugin-ssh live check against "${TARGET_LABEL}"\nscratch: ${LOCAL} ⇄ ${REMOTE}\n\n`)
 
 let failure = null

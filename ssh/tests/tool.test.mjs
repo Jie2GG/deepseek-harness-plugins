@@ -306,6 +306,18 @@ test('execute: every remote action forwards the call cancellation to ops', async
 })
 
 // ── execute: dispatch, refusals, session memory, payload-schema agreement ──
+function recordingOps () {
+  const ops = fakeOps()
+  const seen = []
+  const wrapped = {
+    ...ops,
+    async upload (params, signal) { seen.push(['upload', params, signal]); return ops.upload(params, signal) },
+    async download (params, signal) { seen.push(['download', params, signal]); return ops.download(params, signal) },
+    async readPath (params, signal) { seen.push(['readPath', params, signal]); return ops.readPath(params, signal) },
+  }
+  return { ops: wrapped, seen }
+}
+
 function fakeOps () {
   return {
     seen: [],
@@ -519,6 +531,28 @@ test('transfers resolve the local side through the bridge and honour the write p
   assert.match(bad.message, /outside the conversation workspace/)
   assertPayloadValid(definition.output.schema, bad)
 })
+
+test('a transfer call forwards its own deadline, not just the ceiling', async () => {
+  // The 0.0.32 `dryRun` hole, in the same place: a parameter that is declared,
+  // read by the body, and never handed to the operation. A copy's deadline is the
+  // one number its caller is most likely to want to shorten — a stalled or
+  // unwritable landing path should cost the call, not five minutes.
+  const { ops, seen } = recordingOps()
+  const { definition } = toolHarness(ops)
+  await definition.execute({ action: 'download', path: '/srv/x', localPath: '/ws/x', timeoutMs: 5_000, maxBytes: 4_096 }, { agent: { id: 's1' } })
+  const download = seen.find(entry => entry[0] === 'download')
+  assert.equal(download[1].timeoutMs, 5_000, 'the copy ran on the deadline the call asked for')
+  assert.equal(download[1].maxBytes, 4_096)
+  await definition.execute({ action: 'upload', path: '/srv/x', localPath: '/ws/x', timeoutMs: 60_000 }, { agent: { id: 's1' } })
+  const upload = seen.find(entry => entry[0] === 'upload')
+  assert.equal(upload[1].timeoutMs, 60_000)
+  // A call that says nothing about the deadline still gets the configured default,
+  // which is what `ops` resolves — the tool only forwards what was asked.
+  await definition.execute({ action: 'read', path: '/srv/x' }, { agent: { id: 's1' } })
+  const read = seen.find(entry => entry[0] === 'readPath')
+  assert.equal(read[1].timeoutMs, undefined)
+})
+
 
 test('replaceIfVersion cannot be honoured around scp unless overwrite was said', async () => {
   const ops = fakeOps()
