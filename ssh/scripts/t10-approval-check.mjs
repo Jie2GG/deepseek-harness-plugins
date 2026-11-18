@@ -79,7 +79,11 @@ const scenarios = [
     approvalRequests: true,
     patches: [NO_APPROVAL_PATCH],
     answer: () => ({ outcome: 'allowed-once' }),
-    want: { asked: false, written: false, denial: /requires approval \(not yet supported\)|not yet supported/iu },
+    // 0.0.34's last round moved the sentence: with no approval service mounted, the
+    // plugin's own gate now says "no approval channel is available" instead of
+    // borrowing the core's older "not yet supported" wording, so either one is the
+    // fail-closed answer this scenario is about. What must never appear is a write.
+    want: { asked: false, written: false, denial: /requires approval|not yet supported|no approval channel is available|cannot be asked/iu },
   },
   {
     name: 'no-answerer',
@@ -183,7 +187,7 @@ async function runScenario (scenario) {
         // statement here worth trusting: the model's prose is a claim about the
         // call, while the event is the call.
         if (/\"action\":\"write\"/.test(text) && /\"status\":\"succeeded\"/.test(text)) observed.writeEvents.push(text.slice(0, 200))
-        const denial = /requires approval[^"]{0,80}|no approval channel is available[^"]{0,40}|the user rejected[^"]{0,60}/iu.exec(text)
+        const denial = /requires approval[^"]{0,80}|no approval channel is available[^"]{0,40}|cannot be asked[^"]{0,120}|the user rejected[^"]{0,60}/iu.exec(text)
         if (denial !== null && denial?.[0] !== undefined) observed.denials.push(denial[0].slice(0, 160))
         if (text.includes('approval/request')) observed.approvalEvents.push(text.slice(0, 160))
       },
@@ -195,7 +199,7 @@ async function runScenario (scenario) {
     // a scenario is not "verified" until somebody runs it.
     observed.written = observed.writeEvents.length > 0
       || /succeeded|wrote|replaced/iu.test(observed.finalResponse ?? '')
-    for (const needle of ['not yet supported', 'no approval channel is available', 'the user rejected', 'requires approval']) {
+    for (const needle of ['not yet supported', 'no approval channel is available', 'cannot be asked', 'the user rejected', 'requires approval']) {
       const said = (observed.finalResponse ?? '').toLowerCase()  // the turn quotes the tool's own message verbatim on request
       const at = said.indexOf(needle)
       if (at >= 0) observed.denials.push(`(model line) ${observed.finalResponse.slice(Math.max(0, at - 40), at + 120)}`)
@@ -235,6 +239,9 @@ if (selected.length === 0) {
             `ask reached the client: ${observed.asked ? 'yes' : 'no'}`,
             `write reported run: ${observed.written ? 'yes' : 'no'} (authority: ssh ${TARGET} ls -l ${dirname(observed.probePath)})`,
             observed.denials.length > 0 ? `deny: ${JSON.stringify(observed.denials[0])}` : 'deny: none',
+            // The turn's own two lines are the audit trail: a refusal that was never
+            // quoted is a judgement the reader cannot check from this output alone.
+            `the session's answer: ${JSON.stringify(String(observed.finalResponse ?? '').slice(0, 180))}`,
             `expectations: asked=${String(scenario.want.asked)} written=${String(scenario.want.written)} ${denialRight ? 'deny-shape ok' : 'deny-shape MISSING'}`,
           ].join('\n    '))
     process.stdout.write('\n')

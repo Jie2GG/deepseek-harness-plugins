@@ -563,6 +563,19 @@ cases.edit = async () => {
   check('the hardlink still points at the same file, and sees the new bytes', before.split(' ')[2] === after.split(' ')[2] && throughLink === now, `links ${before.split(' ')[2]} → ${after.split(' ')[2]}`)
   check('the edit stated a version guard, or said it could not', edited.versionChecked === true, `versionChecked ${String(edited.versionChecked)}`)
   check('the backup names where the previous content is', edited.backup === `${path}.dsh-bak` && (await remote(`cat -- ${q(`${path}.dsh-bak`)}`)).stdout === original, String(edited.backup))
+  // The promise 0.0.35 added, checked where a fake cannot flatter it: the write is
+  // confirmed by a digest the server itself computed over the bytes that landed, and
+  // that digest has to agree with both the file on disk and the body this call sent.
+  const canDigest = (await remote('command -v sha256sum >/dev/null 2>&1 && echo yes || echo no')).stdout.trim() === 'yes'
+  if (canDigest) {
+    const serverDigest = (await remote(`sha256sum ${q(path)} | cut -c1-64`)).stdout.trim()
+    const sentDigest = createHash('sha256').update(now, 'utf8').digest('hex')
+    check('a real edit reports its content as verified by digest', edited.contentVerified === true && edited.verdict === 'landed', `${String(edited.contentVerified)} / ${String(edited.verdict)}`)
+    check('the digest the edit quotes is the one the server computes for the file', serverDigest !== '' && edited.sha256 === serverDigest, `${String(edited.sha256).slice(0, 12)}… vs server ${serverDigest.slice(0, 12)}…`)
+    check('and it is the digest of the bytes this call meant to send', edited.sha256 === sentDigest, `${String(edited.sha256).slice(0, 12)}… vs sent ${sentDigest.slice(0, 12)}…`)
+  } else {
+    evidence('observation: this server states no sha256sum, so the digest cross-check could not run here')
+  }
   if (canXattr) {
     const carried = (await remote(`getfattr -n user.live-check --only-values ${q(path)} 2>/dev/null`)).stdout.trim()
     check('an extended attribute survives the edit', carried === '1', `getfattr said ${JSON.stringify(carried)}`)
@@ -599,6 +612,37 @@ cases.edit = async () => {
   evidence(`race outcomes: ${String(staleSeen)} refused by the version guard, ${String(wroteSeen)} wrote`)
   check('the version guard fired against a real concurrent writer at least once', staleSeen >= 1, `${String(staleSeen)} of 6 attempts refused`)
 
+  // The shape a byte-count-only check cannot see coming: a rival body of exactly
+  // the same length landing between this call's read and its write. Either the
+  // guard refuses it, or the write is confirmed by digest — what must never happen
+  // is an unverified “it worked”.
+  const base = 'worker_processes 1;\n# keep this line\n'
+  const rivalOf = (at) => {
+    const i = at % 6
+    const ch = base[i]
+    return base.slice(0, i) + (ch === ch.toUpperCase() ? ch.toLowerCase() : ch.toUpperCase()) + base.slice(i + 1)
+  }
+  check('the same-length rival really is the same length', Buffer.byteLength(rivalOf(0)) === Buffer.byteLength(base) && rivalOf(0) !== base, `${String(Buffer.byteLength(rivalOf(0)))} vs ${String(Buffer.byteLength(base))}`)
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await remote(`printf '%s' ${q(base)} > ${q(path)}`)
+    const racing = ops.editRemote({ target: TARGET_LABEL, path, oldText: 'worker_processes 1;', newText: `MINE_${String(attempt)}` })
+    await new Promise(resolve => setTimeout(resolve, 40 + attempt * 30))
+    await remote(`printf '%s' ${q(rivalOf(attempt))} > ${q(path)}`)
+    const raced = await racing
+    const body = (await remote(`cat -- ${q(path)}`)).stdout ?? ''
+    const onDisk = canDigest ? (await remote(`sha256sum ${q(path)} | cut -c1-64`)).stdout.trim() : ''
+    evidence(`same-length race ${String(attempt)}: ${raced.ok === true ? `wrote (verified ${String(raced.contentVerified)}, verdict ${String(raced.verdict)})` : raced.stale === true ? 'guard refused it as stale' : `refused (${String(raced.status)}, exit ${String(raced.exitCode ?? '—')})`} verdict ${String(raced.verdict ?? '—')}; body ${JSON.stringify(body.slice(0, 34))}; said ${JSON.stringify(String(raced.message ?? '').slice(0, 90))}`)
+    // A success is only allowed to exist at all if the server digested the bytes
+    // this call sent, and the digest the tool quotes is the one on disk.
+    check(`same-length race ${String(attempt)}: no unverified success`, raced.ok !== true || (raced.contentVerified === true && raced.verdict === 'landed' && typeof raced.sha256 === 'string' && raced.sha256.length === 64 && (onDisk === '' || raced.sha256 === onDisk)), `ok ${String(raced.ok)} verified ${String(raced.contentVerified)} verdict ${String(raced.verdict)}`)
+    // Which whole file is acceptable here is knowable in advance: the original, this
+    // attempt's rival, or the edit's own body. Anything else — a splice of two — is a
+    // write that half landed and was not put back.
+    const allowed = new Set([base, rivalOf(attempt), base.replace('worker_processes 1;', `MINE_${String(attempt)}`)])
+    check(`same-length race ${String(attempt)}: the file stayed one whole body`, allowed.has(body) && !(body.includes('MINE_') && body.includes('processes')), `${JSON.stringify(body.slice(0, 40))} vs allowed ${JSON.stringify([...allowed].map(value => value.slice(0, 18)))}`)
+  }
+
+
   // An edit cut short in the middle of its body. The repair child runs on its own
   // clock — the reader stopped the *edit*, not the file's claim to be whole — and
   // this case is what proves that decision was not decoration.
@@ -620,6 +664,14 @@ cases.edit = async () => {
   check('a stopped edit does not report itself as a success', cut.ok !== true, `ok ${String(cut.ok)} / ${String(cut.status)}`)
   if (sizeNow === small.length && cut.status !== 'cancelled') {
     check('a repaired file is reported as repaired', cut.restored === true, `restored ${String(cut.restored)}`)
+    if (canDigest) {
+      // `restored: true` now means something stronger than the length matching: the
+      // server digested the file as the exact content this call read before it
+      // truncated anything, and the digest on disk agrees.
+      const originalDigest = createHash('sha256').update(small, 'utf8').digest('hex')
+      const onDisk = (await remote(`sha256sum ${q(cutPath)} | cut -c1-64`)).stdout.trim()
+      check('a repaired file digests as the content this call read', cut.contentVerified === true && cut.verdict === 'restored' && cut.sha256 === originalDigest && onDisk === originalDigest, `verdict ${String(cut.verdict)} verified ${String(cut.contentVerified)} tool ${String(cut.sha256).slice(0, 12)}… disk ${onDisk.slice(0, 12)}… wanted ${originalDigest.slice(0, 12)}…`)
+    }
   }
   const snaps = ((await remote(`ls ${q(REMOTE)} | grep -c 'dsh-snap-' || true`)).stdout ?? '0').trim()
   check('the edit left no stray snapshot behind', snaps === '0', `snapshots: ${snaps}`)
