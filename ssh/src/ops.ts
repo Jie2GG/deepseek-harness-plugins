@@ -19,7 +19,7 @@ import { transfer } from './transfer.ts'
 import { applyEdit, previewEdit } from './edit.ts'
 import { startRemoteJob } from './jobs.ts'
 import type { JobRegistry } from './jobs.ts'
-import { shellQuote, leadingProgram, classifyCollectedRun } from './transport.ts'
+import { remotePathArg, shellQuote, leadingProgram, classifyCollectedRun } from './transport.ts'
 import type { RemoteAuth, RemoteTarget, SshTransport } from './transport.ts'
 import type { TargetStore } from './store.ts'
 import type { TargetSecrets } from './secrets.ts'
@@ -805,7 +805,7 @@ export function createOps(deps: OpsDeps): Ops {
     const resolved = ceilings(globalSettings, record, { timeoutMs: input.timeoutMs, maxBytes: input.maxBytes })
     const settings = resolved.settings
     const auth = await authFor(record.id, record.auth)
-    const outcome = await transfer(runner, askpassSource(), targetOf(record), settings, auth, {
+    const outcome = await transfer(runner, targetOf(record), settings, auth, {
       direction,
       localPath: local,
       remotePath: input.path,
@@ -833,15 +833,25 @@ export function createOps(deps: OpsDeps): Ops {
       durationMs: outcome.durationMs,
       bytesLimit: settings.maxTransferBytes,
       timeoutMs: settings.transferTimeoutMs,
-      ...(resolved.notes.length === 0 ? {} : { notes: resolved.notes }),
+      // Which ceiling answered, and what the copy has to say about the numbers it
+      // quotes: a single file is held to the bytes that moved, a tree to what a
+      // `stat` or a walk said before they did. The notes travel with it, merged
+      // with the ones a capped ceiling produced, so a reader gets one list.
+      limitMode: outcome.limitMode,
+      ...((outcome.notes === undefined || outcome.notes.length === 0) && resolved.notes.length === 0
+        ? {}
+        : { notes: [...resolved.notes, ...(outcome.notes ?? [])] }),
       ...(outcome.bytes === undefined ? {} : { bytes: outcome.bytes }),
       ...(outcome.files === undefined ? {} : { files: outcome.files }),
       ...(input.recursive === true ? { recursive: true } : {}),
       ...(outcome.overwrote === true ? { overwrote: true } : {}),
       ...(outcome.message === undefined ? {} : { message: outcome.message }),
+      // A refusal that already knows what to suggest — a full transfer lane names
+      // `job_kill` and the ceiling to raise — is not improved by a generic hint.
+      ...(outcome.hint === undefined ? {} : { hint: outcome.hint }),
     }
     if (base.ok) return base
-    return { ...base, hint: transferHint(outcome.status, direction) }
+    return { ...base, ...(base.hint === undefined ? { hint: transferHint(outcome.status, direction) } : {}) }
   }
 
   /**
@@ -891,12 +901,6 @@ export function createOps(deps: OpsDeps): Ops {
     if (status === 'refused-exists') return direction === 'download' ? 'Pass overwrite to replace the local file.' : 'Pass overwrite to replace the remote file.'
     if (status === 'missing') return direction === 'download' ? 'List the remote directory first, or check the path.' : 'Check the local path, and make sure the remote directory exists (write with mkdir first).'
     return 'See the message; a transfer failure usually means the path, the credential, or the deadline.'
-  }
-
-  /** The askpass face, taken through the readiness check so transfers get it too. */
-  function askpassSource() {
-    const helper = askpass()
-    return { path: helper.ready ? helper.path : undefined, failure: helper.failure }
   }
 
   return {
@@ -1164,7 +1168,7 @@ export function createOps(deps: OpsDeps): Ops {
       // and everything after the first line is the answer itself. A reply with no
       // marker is taken as plain file text, which is what a shell that could not
       // run the test would have produced anyway.
-      const quoted = shellQuote(path)
+      const quoted = remotePathArg(path)
       const command = `if [ -d ${quoted} ]; then printf 'ssh-plugin: directory\\n'; ls -la -- ${quoted}; `
         + `elif [ -f ${quoted} ]; then printf 'ssh-plugin: file %s\\n' "$(wc -c < ${quoted} | tr -dc 0-9)"; cat -- ${quoted}; `
         + `elif [ -e ${quoted} ]; then printf 'ssh-plugin: other\\n'; ls -la -- ${quoted}; `
@@ -1197,7 +1201,7 @@ export function createOps(deps: OpsDeps): Ops {
       const { record, settings, notes, auth, path } = await fileCall(params, 'edit')
       const oldText = typeof params.oldText === 'string' ? params.oldText : ''
       const newText = typeof params.newText === 'string' ? params.newText : ''
-      const quoted = shellQuote(path)
+      const quoted = remotePathArg(path)
       const target = { id: record.id, label: record.label, host: record.host }
       const read = await runner.run(targetOf(record), settings, auth, `if [ ! -f ${quoted} ]; then exit 20; fi; cat -- ${quoted}`, {
         ...(signal === undefined ? {} : { signal }),
@@ -1286,7 +1290,7 @@ export function createOps(deps: OpsDeps): Ops {
       // read and this write is overwritten without a version check. This is a
       // preview-and-confirm flow, not a transaction.
       const backupPath = `${path}.dsh-bak`
-      const prepare = params.backup === false ? '' : `cp -p -- ${quoted} ${shellQuote(backupPath)} && `
+      const prepare = params.backup === false ? '' : `cp -p -- ${quoted} ${remotePathArg(backupPath)} && `
       const wrote = await runner.run(targetOf(record), settings, auth, `${prepare}cat > ${quoted}`, {
         stdin: outcome.text,
         maxOutputBytes: settings.maxOutputBytes,
@@ -1314,12 +1318,15 @@ export function createOps(deps: OpsDeps): Ops {
       const append = params.append === true
       const mkdir = params.mkdir !== false
       const overwrite = params.overwrite === true
-      const quoted = shellQuote(path)
+      const quoted = remotePathArg(path)
       const guard = overwrite || append
         ? ''
         : `if [ -e ${quoted} ]; then echo 'ssh-plugin: refusing to overwrite an existing file' >&2; exit 17; fi; `
       const parent = path.replace(/\\/gu, '/').replace(/\/+[^/]*$/u, '') || '/'
-      const prepare = mkdir && parent !== '' ? `mkdir -p -- ${shellQuote(parent)} && ` : ''
+      // `~` on its own is not a directory to make: the login already proved it
+      // exists, and a quoted `mkdir -p '~'` would create a file named tilde in
+      // whatever the session's working directory happens to be.
+      const prepare = mkdir && parent !== '' && parent !== '~' ? `mkdir -p -- ${remotePathArg(parent)} && ` : ''
       const run = await runner.run(targetOf(record), settings, auth, `${guard}${prepare}cat ${append ? '>>' : '>'} ${quoted}`, {
         stdin: content,
         ...(signal === undefined ? {} : { signal }),

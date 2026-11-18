@@ -500,37 +500,42 @@ function tempTree () {
   return dir
 }
 
-test('a sized-down download moves through scp with host:path both ends and the -P port seam', async () => {
+test('a single-file download rides a counted channel and lands by rename, not in place', async () => {
   const dir = tempTree()
   const local = join(dir, 'x')
   const { ops, state } = build()
   state.nextRun = () => ({ status: 'succeeded', at: iso, exitCode: 0, stdout: '5 regular file', stderr: '', durationMs: 1 })
-  // The stand-in for scp writes what it is given, wherever the destination
-  // argument points — which is how this test can see that the copy did *not*
-  // land on the final path directly.
-  state.executeImpl = argvTail => {
-    writeFileSync(argvTail[argvTail.length - 1], 'hello')
+  // The stand-in for the channel is handed the sink path the copy asked for: it
+  // writes there, and the test can see that the bytes did *not* land on the final
+  // path until the copy said it was whole.
+  state.streamImpl = (argvTail, copy) => {
+    writeFileSync(copy.localPath, 'hello')
+    return { outcome: 'exit', exitCode: 0, bytes: 5, stdout: '', stderr: '', durationMs: 4 }
   }
-  state.executeOut = { outcome: 'exit', exitCode: 0, stdout: '', stderr: '', durationMs: 4, truncated: false }
   const out = await ops.download({ path: '/srv/x', localPath: local })
   assert.equal(out.status, 'moved')
+  // The number the result quotes is the one the copy counted, and the payload says
+  // so: `in-flight` is a different promise from a pre-check, and the reader is told
+  // which one answered.
   assert.equal(out.bytes, 5)
+  assert.equal(out.limitMode, 'in-flight')
   assert.equal(out.overwrote, undefined)
-  const exec = state.calls.find(c => c.kind === 'execute')
-  assert.equal(exec.program, '/usr/bin/scp')
-  // scp gets the far end named host:path on one side and a local part-file on the
-  // other; the quiet flag and the -P port seam ride in front of them.
-  assert.equal(exec.argvTail.at(-2), 'deploy@10.0.0.9:/srv/x')
-  assert.match(exec.argvTail.at(-1), /x\.dsh-part-/)
-  assert.notEqual(exec.argvTail.at(-1), local)
-  assert.ok(exec.argvTail.includes('-q'))
-  assert.ok(exec.argvTail.includes('-P'))
+  const stream = state.calls.find(c => c.kind === 'streamFile')
+  assert.equal(stream.program, '/usr/bin/ssh')
+  // The far end is one `cat` of the quoted path; the sink is a sibling temp file
+  // with this process's id and three bytes of entropy in its name.
+  assert.equal(stream.argvTail.at(-1), `cat -- '/srv/x'`)
+  assert.match(stream.copy.localPath, /x\.dsh-part-/)
+  assert.notEqual(stream.copy.localPath, local)
+  assert.equal(stream.copy.direction, 'download')
+  assert.equal(stream.copy.maxBytes, DEFAULTS.transferBytes)
+  assert.deepEqual(stream.lane, { kind: 'file transfers', cap: DEFAULTS.maxConcurrentTransfers })
   // The copy ran on its own clock, not the command's 30 s default.
   assert.equal(out.timeoutMs, DEFAULTS.transferTimeoutMs)
-  assert.equal(exec.timeoutMs, DEFAULTS.transferTimeoutMs)
-  // scp names the port -P, and a transfer builds its own child, so it has to say
-  // which connection the copy is riding on rather than let the transport guess.
-  assert.deepEqual(state.optionsSeen[0].extra, { portFlag: '-P', poolFlags: [] })
+  assert.equal(stream.timeoutMs, DEFAULTS.transferTimeoutMs)
+  // A streamed copy speaks to `ssh`, so the port rides `-p` like every other
+  // command does — the `-P` seam belongs to scp, and only the tree path asks for it.
+  assert.deepEqual(state.optionsSeen[0].extra, { poolFlags: [] })
   const lease = state.shares.find(entry => entry.target.host === '10.0.0.9')
   assert.ok(lease, 'the copy leased a connection')
   assert.equal(lease.ticket.released, 1) // and handed it back once the bytes moved
@@ -540,26 +545,87 @@ test('a sized-down download moves through scp with host:path both ends and the -
   // An overwrite of an existing file says so honestly.
   const over = build({ localExists: true })
   over.state.nextRun = () => ({ status: 'succeeded', at: iso, exitCode: 0, stdout: '5 regular file', stderr: '', durationMs: 1 })
-  over.state.executeImpl = argvTail => {
-    writeFileSync(argvTail[argvTail.length - 1], 'hello2')
+  over.state.streamImpl = (argvTail, copy) => {
+    writeFileSync(copy.localPath, 'hello2')
+    return { outcome: 'exit', exitCode: 0, bytes: 6, stdout: '', stderr: '', durationMs: 2 }
   }
-  over.state.executeOut = { outcome: 'exit', exitCode: 0, stdout: '', stderr: '', durationMs: 2, truncated: false }
   const overOut = await over.ops.download({ path: '/srv/x', localPath: local, overwrite: true })
   assert.equal(overOut.overwrote, true)
   assert.equal(readFileSync(local, 'utf8'), 'hello2')
+})
+
+test('a recursive copy still rides scp, with host:path and the -P port seam', async () => {
+  const dir = tempTree()
+  const local = join(dir, 'dl')
+  const { ops, state } = build()
+  // A tree's pre-check is the one thing that changed: the server is asked for the
+  // file count and the sum of sizes before a byte moves.
+  state.nextRun = command => command.includes('find')
+    ? { status: 'succeeded', at: iso, exitCode: 0, stdout: 'ssh-plugin: 2 tree 8', stderr: '', durationMs: 1 }
+    : { status: 'succeeded', at: iso, exitCode: 0, stdout: '4096 directory', stderr: '', durationMs: 1 }
+  state.executeImpl = argvTail => {
+    // The tree lands in the part sibling; the measure pass then walks it.
+    const dst = argvTail[argvTail.length - 1]
+    mkdirSync(dst, { recursive: true })
+    writeFileSync(join(dst, 'a'), 'aaa')
+    writeFileSync(join(dst, 'b'), 'bbb')
+  }
+  state.executeOut = { outcome: 'exit', exitCode: 0, stdout: '', stderr: '', durationMs: 4, truncated: false }
+  const out = await ops.download({ path: '/srv/tree', localPath: local, recursive: true })
+  assert.equal(out.status, 'moved')
+  assert.equal(out.limitMode, 'pre-check')
+  // What landed is measured, not guessed: scp -q never reports a byte count, so the
+  // tree is walked once on the way in and the numbers come from that walk.
+  assert.equal(out.bytes, 6)
+  assert.equal(out.files, 2)
+  assert.equal(out.recursive, true)
+  const exec = state.calls.find(c => c.kind === 'execute')
+  assert.equal(exec.program, '/usr/bin/scp')
+  assert.equal(exec.argvTail.at(-2), 'deploy@10.0.0.9:/srv/tree')
+  assert.match(exec.argvTail.at(-1), /dl\.dsh-part-/)
+  assert.ok(exec.argvTail.includes('-q'))
+  assert.ok(exec.argvTail.includes('-r'))
+  assert.ok(exec.argvTail.includes('-P')) // scp names the port -P, and only scp does
+  assert.equal(exec.lane.kind, 'file transfers')
+  assert.equal(exec.lane.cap, DEFAULTS.maxConcurrentTransfers)
+  const scanned = state.calls.filter(c => c.kind === 'run' && String(c.command).includes('find'))
+  assert.equal(scanned.length, 1, 'the tree was enumerated exactly once, before the copy')
+  assert.ok(scanned[0].command.includes('-maxdepth 0'), 'a server without GNU find is told apart from an empty directory')
+  assert.equal(scanned[0].settings.statTimeoutMs, DEFAULTS.statTimeoutMs)
   // Upload: a real local source, and scp -r for a tree.
   const srcDir = tempTree()
   writeFileSync(join(srcDir, 'a'), 'aaa')
   const up = build()
+  up.state.nextRun = () => ({ status: 'succeeded', at: iso, exitCode: 0, stdout: '', stderr: '', durationMs: 1 })
   up.state.executeOut = { outcome: 'exit', exitCode: 0, stdout: '', stderr: '', durationMs: 2, truncated: false }
   const upOut = await up.ops.upload({ path: '/srv/x', localPath: srcDir, recursive: true })
   assert.equal(upOut.ok, true)
   assert.equal(upOut.recursive, true)
   assert.equal(upOut.files, 1)
+  assert.equal(upOut.limitMode, 'pre-check')
   const upExec = up.state.calls.find(c => c.kind === 'execute')
   assert.ok(upExec.argvTail.includes('-r'))
   assert.equal(upExec.argvTail.at(-2), srcDir) // upload: local first…
   assert.equal(upExec.argvTail.at(-1), 'deploy@10.0.0.9:/srv/x') // …far end last
+})
+
+test('a recursive download into a directory that is not empty is refused before anything moves', async () => {
+  // `scp -r` cannot land a tree on top of a directory that holds something: the
+  // part sibling is renamed to the final name, and a rename onto a non-empty
+  // directory is always ENOTEMPTY — which this plugin used to discover *after*
+  // copying the whole tree, and then it deleted the tree it had just copied.
+  const dir = tempTree()
+  const local = join(dir, 'dl')
+  mkdirSync(local)
+  writeFileSync(join(local, 'keep.txt'), 'mine')
+  const { ops, state } = build({ localExists: true })
+  state.nextRun = () => ({ status: 'succeeded', at: iso, exitCode: 0, stdout: 'ssh-plugin: 2 tree 8', stderr: '', durationMs: 1 })
+  const out = await ops.download({ path: '/srv/tree', localPath: local, recursive: true, overwrite: true })
+  assert.equal(out.status, 'refused-exists')
+  assert.match(out.message, /rather than into it/)
+  assert.equal(state.calls.filter(c => c.kind === 'execute').length, 0) // scp never ran
+  assert.equal(readFileSync(join(local, 'keep.txt'), 'utf8'), 'mine')
+  assert.deepEqual(readdirSync(local), ['keep.txt'])
 })
 
 test('an upload is guarded at both ends: a missing source, and an existing destination', async () => {
@@ -570,6 +636,7 @@ test('an upload is guarded at both ends: a missing source, and an existing desti
   assert.equal(goneOut.status, 'missing')
   assert.match(goneOut.message, /Nothing at .* to upload\./)
   assert.equal(gone.state.calls.filter(c => c.kind === 'execute').length, 0)
+  assert.equal(gone.state.calls.filter(c => c.kind === 'streamFile').length, 0)
   // An existing remote destination, no overwrite: the guard names it and refuses.
   const exists = build()
   exists.state.nextRun = () => ({ status: 'succeeded', at: iso, exitCode: 0, stdout: '9 regular file', stderr: '', durationMs: 1 })
@@ -579,12 +646,45 @@ test('an upload is guarded at both ends: a missing source, and an existing desti
   assert.equal(existsOut.status, 'refused-exists')
   assert.match(existsOut.message, /already exists on 10\.0\.0\.9/)
   assert.match(existsOut.hint, /Pass overwrite to replace the remote file/)
-  assert.equal(exists.state.calls.filter(c => c.kind === 'execute').length, 0) // untouched by scp
+  assert.equal(exists.state.calls.filter(c => c.kind === 'execute').length, 0) // the copy never started
+  assert.equal(exists.state.calls.filter(c => c.kind === 'streamFile').length, 0)
   // With overwrite the same copy proceeds and says it replaced something.
+  exists.state.streamImpl = (argvTail, copy) => ({ outcome: 'exit', exitCode: 0, bytes: 9, stdout: '', stderr: '', durationMs: 2 })
   exists.state.executeOut = { outcome: 'exit', exitCode: 0, stdout: '', stderr: '', durationMs: 2, truncated: false }
   const overOut = await exists.ops.upload({ path: '/srv/x', localPath: local, overwrite: true })
   assert.equal(overOut.status, 'moved')
   assert.equal(overOut.overwrote, true)
+  assert.equal(overOut.bytes, 9)
+})
+
+test('a single-file upload stops at a temp sibling and only then takes the final name', async () => {
+  const dir = tempTree()
+  const local = join(dir, 'x')
+  writeFileSync(local, 'payload')
+  const { ops, state } = build()
+  // The stat pre-check answers with an unparsable line: the destination is absent,
+  // so the copy runs and the publish step has the fresh-name branch to take.
+  state.nextRun = command => command.startsWith('stat ')
+    ? { status: 'succeeded', at: iso, exitCode: 0, stdout: '', stderr: '', durationMs: 1 }
+    : { status: 'succeeded', at: iso, exitCode: 0, stdout: '', stderr: '', durationMs: 1 }
+  let sent = null
+  state.streamImpl = (argvTail, copy) => {
+    sent = { argv: argvTail[argvTail.length - 1], sink: copy.localPath }
+    return { outcome: 'exit', exitCode: 0, bytes: 7, stdout: '', stderr: '', durationMs: 3 }
+  }
+  const out = await ops.upload({ path: '/srv/x', localPath: local })
+  assert.equal(out.status, 'moved')
+  // The copy was told to write a sibling of the destination, not the destination:
+  // that is the whole difference between “the copy failed” and “the copy failed and
+  // took the old file with it”.
+  assert.match(sent.argv, /^cat > '\/srv\/x\.dsh-part-/)
+  // The publish step is one small remote command over the same connection.
+  const publish = state.calls.filter(c => c.kind === 'run').map(c => c.command).find(command => command.includes('if [ -e'))
+  assert.ok(publish, 'the copy asked the server to move the temp into place')
+  assert.match(publish, /cat '\/srv\/x\.dsh-part-[^']*' > '\/srv\/x'/) // through the existing file
+  assert.match(publish, /rm -f/)
+  assert.match(publish, /mv -f/) // and the fresh-name branch, chosen by the server, not by a stale pre-check
+  assert.match(publish, /chmod/) // with the source's bits carried over
 })
 
 test('an upload whose remote directory vanished between guard and copy says so in the useful direction', async () => {
@@ -592,10 +692,15 @@ test('an upload whose remote directory vanished between guard and copy says so i
   const local = join(dir, 'x')
   writeFileSync(local, 'hi')
   const { ops, state } = build()
-  state.executeOut = { outcome: 'exit', exitCode: 1, stdout: '', stderr: 'scp: /srv/x: No such file or directory', durationMs: 2, truncated: false }
+  state.streamOut = { outcome: 'exit', exitCode: 1, bytes: 0, stdout: '', stderr: "sh: cannot create /srv/x.dsh-part-1-2f3a: No such file or directory", durationMs: 2 }
   const out = await ops.upload({ path: '/srv/x', localPath: local })
   assert.equal(out.status, 'missing')
   assert.match(out.message, /remote directory does not exist/)
+  // A stopped copy asks the server to forget its temp — one more small child, on
+  // the same connection, best-effort by design.
+  const cleanup = state.calls.filter(c => c.kind === 'run').map(c => c.command).find(command => command.startsWith('rm -f -- '))
+  assert.ok(cleanup, 'the temp file was named back to the server')
+  assert.match(cleanup, /\/srv\/x\.dsh-part-/)
 })
 
 test('a local path outside the declared workspace is refused before the copy', async () => {
@@ -827,19 +932,29 @@ test('the call cancellation reaches the transport for each remote action', async
   const editCalls = fileOps.state.calls.filter(c => c.kind === 'run')
   assert.ok(editCalls.length >= 2, 'edit is read plus write')
   assert.ok(editCalls.every(c => c.options.signal === controller.signal), 'both edit children are cancellable')
-  // Transfers carry the signal into the scp child — and into the stat pre-check
-  // that runs before it, so a cancel lands wherever the call happens to be.
+  // Transfers carry the signal into the copy child — whichever kind of copy it is
+  // — and into the stat pre-check that runs before it, so a cancel lands wherever
+  // the call happens to be standing.
   const dir = tempTree()
   const local = join(dir, 'x')
   writeFileSync(local, 'hello')
   const xfer = build()
+  xfer.state.streamOut = { outcome: 'exit', exitCode: 0, bytes: 5, stdout: '', stderr: '', durationMs: 2 }
   xfer.state.executeOut = { outcome: 'exit', exitCode: 0, stdout: '', stderr: '', durationMs: 2, truncated: false }
   await xfer.ops.upload({ path: '/srv/x', localPath: local }, controller.signal)
-  const execCall = xfer.state.calls.find(c => c.kind === 'execute')
-  assert.equal(execCall.signal, controller.signal)
-  assert.deepEqual(execCall.lane, { kind: 'file transfers', cap: DEFAULTS.maxConcurrentTransfers })
+  const streamed = xfer.state.calls.find(c => c.kind === 'streamFile')
+  assert.equal(streamed.signal, controller.signal)
+  assert.deepEqual(streamed.lane, { kind: 'file transfers', cap: DEFAULTS.maxConcurrentTransfers })
   const stats = xfer.state.calls.filter(c => c.kind === 'run' && /^stat /.test(c.command ?? ''))
   assert.ok(stats.length >= 1 && stats.every(c => c.options.signal === controller.signal))
+  // The tree path is the one that still hands the signal to scp.
+  const tree = build()
+  tree.state.nextRun = () => ({ status: 'succeeded', at: iso, exitCode: 0, stdout: 'ssh-plugin: 1 tree 5', stderr: '', durationMs: 1 })
+  tree.state.executeOut = { outcome: 'exit', exitCode: 0, stdout: '', stderr: '', durationMs: 2, truncated: false }
+  await tree.ops.upload({ path: '/srv/x', localPath: local, recursive: true }, controller.signal)
+  const execCall = tree.state.calls.find(c => c.kind === 'execute')
+  assert.equal(execCall.signal, controller.signal)
+  assert.deepEqual(execCall.lane, { kind: 'file transfers', cap: DEFAULTS.maxConcurrentTransfers })
 })
 
 test('a promoted hand-over stays cancellable while the call waits, and the started job is not', async () => {

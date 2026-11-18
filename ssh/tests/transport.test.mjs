@@ -3,6 +3,10 @@
 // a call is handed about sharing.
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Readable, Writable } from 'node:stream'
 import { shellQuote, leadingProgram, classifyProbe, classifyRun, tail, HOST_KEY_SETTING, SshTransport, probeArgvTail } from '../lib/transport.js'
 
 test('shellQuote makes any path one word for the remote shell', () => {
@@ -429,3 +433,291 @@ test('the ssh -G view carries the same IdentitiesOnly a real child gets', async 
   // would manufacture drift out of nothing.
   assert.match(argv, /-i \/home\/deploy\/\.ssh\/id_ed25519 -o IdentitiesOnly=yes/u)
 })
+
+// ── the counted channel: where the transfer ceiling is actually enforced ────
+/**
+ * A subprocess provider that speaks the stream half of the contract: one raw
+ * channel in the direction the call asked for, a collect face for the
+ * explanation, and a `terminate` that closes both the way the real provider's
+ * managed range does. The test drives the child through the handle it is handed
+ * at spawn, so a copy crossing its ceiling is measured, not asserted blind.
+ */
+function streamProvider (script, detail = '') {
+  const seen = []
+  const children = []
+  const reader = text => ({ readFrom: () => ({ text, nextOffset: Buffer.byteLength(text, 'utf8'), lossy: false }) })
+  return {
+    seen,
+    children,
+    subprocess: {
+      resolveExecutable: async () => '/usr/bin/ssh',
+      spawn (spec) {
+        seen.push(spec)
+        // A queue-backed readable, not a PassThrough: the async iterator reads
+        // without a size hint, which hands it everything buffered at that moment
+        // and quietly merges four chunks into one. A copy that stops at its
+        // ceiling has to be measured against chunk boundaries, so the fake keeps
+        // them the way a socket arriving one segment at a time would.
+        const queue = []
+        let wanted = null
+        const pumpQueue = () => {
+          for (;;) {
+            if (wanted === null || queue.length === 0) return
+            const take = wanted
+            wanted = null
+            take(queue.shift())
+          }
+        }
+        const stdout = spec.stdio.stdout === 'pipe'
+          ? new Readable({
+              read (size) {
+                const take = (chunk) => {
+                  if (chunk === null) this.push(null)
+                  else this.push(chunk)
+                  pumpQueue()
+                }
+                if (queue.length > 0) {
+                  const next = queue.shift()
+                  this.push(next === undefined ? null : next)
+                  pumpQueue()
+                  return
+                }
+                wanted = take
+              }
+            })
+          : undefined
+        const written = []
+        let stdinEnded = false
+        const stdin = spec.stdio.stdin === 'pipe'
+          ? new Writable({
+              write (chunk, _encoding, callback) {
+                written.push(Buffer.from(chunk))
+                callback()
+              }
+            })
+          : undefined
+        if (stdin !== undefined) stdin.on('finish', () => { stdinEnded = true })
+        let settled = false
+        let finish
+        const done = new Promise(resolve => { finish = resolve })
+        const child = {
+          stdout,
+          stdin,
+          written,
+          get stdinEnded () { return stdinEnded },
+          /** Push one chunk the way the far end would. */
+          push (text) {
+            if (stdout === undefined) return
+            queue.push(Buffer.from(text, 'utf8'))
+            pumpQueue()
+          },
+          /** End the channel and settle the child, the way a finished `cat` does. */
+          exit (code = 0) {
+            if (stdout !== undefined) { queue.push(null); pumpQueue() }
+            if (settled) return
+            settled = true
+            finish({ exitCode: code, signal: null })
+          },
+          get terminated () { return terminations },
+          done
+        }
+        let terminations = 0
+        const handle = {
+          stdin,
+          stdout,
+          collected: {
+            ...(spec.stdio.stdout === 'pipe' ? {} : { stdout: reader(detail.stdout ?? '') }),
+            stderr: reader(detail.stderr ?? '')
+          },
+          done,
+          terminate () {
+            terminations += 1
+            if (stdout !== undefined && !stdout.destroyed) stdout.destroy()
+            if (stdin !== undefined && !stdin.destroyed) stdin.destroy()
+            if (!settled) {
+              settled = true
+              finish({ exitCode: null, signal: 'SIGTERM' })
+            }
+          },
+          waitForExit: async () => true
+        }
+        // The provider's contract: an aborted signal starts the same termination
+        // the explicit call does, so the pump can never be left holding a channel
+        // nobody will close.
+        spec.signal.addEventListener('abort', () => handle.terminate(), { once: true })
+        children.push(child)
+        if (typeof script === 'function') script(child)
+        return handle
+      }
+    }
+  }
+}
+
+const COPY_SETTINGS = {
+  ...CEILINGS,
+  maxSpillBytes: 0,
+  transferTimeoutMs: 30_000,
+  maxConcurrentTransfers: 2,
+  graceMs: 100
+}
+
+function tempLocal (text = '') {
+  const dir = mkdtempSync(join(tmpdir(), 'dshssh-stream-'))
+  const path = join(dir, 'f')
+  writeFileSync(path, text)
+  return { dir, path, text }
+}
+
+test('a streamed download reads the channel into the sink and counts what arrived', async () => {
+  const local = tempLocal()
+  const provider = streamProvider(child => {
+    child.push('hello ')
+    child.push('world')
+    child.exit(0)
+  })
+  const transport = new SshTransport(provider)
+  const out = await transport.streamFile('/usr/bin/ssh', ['host', 'cat -- /srv/f'], COPY_SETTINGS, undefined, 5_000, 'file transfer', { direction: 'download', localPath: local.path, maxBytes: 1024 })
+  assert.equal(out.outcome, 'exit')
+  assert.equal(out.exitCode, 0)
+  assert.equal(out.bytes, 11)
+  assert.equal(readFileSync(local.path, 'utf8'), 'hello world')
+  // One raw channel, one small explanation, and no spill asked for: a 400 MiB
+  // copy must not also write a 400 MiB transcript to a provider file.
+  const spec = provider.seen[0]
+  assert.equal(spec.stdio.stdout, 'pipe')
+  assert.equal(spec.stdio.stdin, 'ignore')
+  assert.equal(spec.stdio.stderr.maxBytes, 8_192)
+  assert.equal('spill' in spec.stdio.stderr, false)
+  assert.equal(transport.transfersInFlight, 0)
+})
+
+test('a streamed download stops at the ceiling, writes only what fit, and ends its child', async () => {
+  const local = tempLocal()
+  const provider = streamProvider(child => {
+    // The chunk that crosses the line is counted as arrived but not written: the
+    // refusal quotes the wire, the half file stays inside the ceiling.
+    child.push('aaaa')
+    child.push('bbbb')
+    child.push('cccc')
+    child.push('dddd')
+  })
+  const transport = new SshTransport(provider)
+  const out = await transport.streamFile('/usr/bin/ssh', ['host', 'cat -- /srv/f'], COPY_SETTINGS, undefined, 5_000, 'file transfer', { direction: 'download', localPath: local.path, maxBytes: 8 })
+  assert.equal(out.outcome, 'over-limit')
+  assert.equal(out.bytes, 8) // two chunks fit; the third crossed the line and was not delivered
+  assert.equal(readFileSync(local.path, 'utf8'), 'aaaabbbb')
+  assert.equal(provider.children[0].terminated >= 1, true)
+  assert.equal(provider.children[0].stdout.destroyed, true)
+  assert.equal(transport.transfersInFlight, 0)
+})
+
+test('a download whose local file cannot be written is an error, not a silent short copy', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dshssh-stream-'))
+  const provider = streamProvider(child => {
+    child.push('data')
+    child.exit(0)
+  })
+  const transport = new SshTransport(provider)
+  // The sink sits inside a directory that does not exist: the channel is fine, the
+  // disk answer is not, and only the local side can say so.
+  const out = await transport.streamFile('/usr/bin/ssh', ['host', 'cat -- /srv/f'], COPY_SETTINGS, undefined, 5_000, 'file transfer', { direction: 'download', localPath: join(dir, 'gone', 'f'), maxBytes: 1024 })
+  assert.equal(out.outcome, 'error')
+  assert.match(String(out.error), /ENOENT|no such file/iu)
+  assert.equal(out.exitCode, 0) // the server did its part; saying so keeps the reader hunting in the right place
+})
+
+test('a streamed upload feeds the channel and closes it only once the file is done', async () => {
+  const local = tempLocal('payload-bytes')
+  const provider = streamProvider(child => {
+    // A Writable answers `end()` with `finish`: that is the moment the whole body
+    // has been handed over, which is what an upload's exit code may be read from.
+    child.stdin.on('finish', () => { child.exit(0) })
+  })
+  const transport = new SshTransport(provider)
+  const out = await transport.streamFile('/usr/bin/ssh', ['host', 'cat > /srv/f'], COPY_SETTINGS, undefined, 5_000, 'file transfer', { direction: 'upload', localPath: local.path, maxBytes: 1024 })
+  assert.equal(out.outcome, 'exit')
+  assert.equal(out.exitCode, 0)
+  assert.equal(out.bytes, 13)
+  assert.equal(Buffer.concat(provider.children[0].written).toString('utf8'), 'payload-bytes')
+  assert.equal(provider.children[0].stdinEnded, true) // the EOF is what tells the server the body is complete
+  const spec = provider.seen[0]
+  assert.equal(spec.stdio.stdin, 'pipe')
+  assert.equal(spec.stdio.stdout.maxBytes, 8_192)
+})
+
+test('a streamed upload over the ceiling stops before it promises the server a whole file', async () => {
+  const local = tempLocal('0123456789abcdef') // 16 bytes, one chunk at the default high-water mark
+  const provider = streamProvider(() => undefined)
+  const transport = new SshTransport(provider)
+  const out = await transport.streamFile('/usr/bin/ssh', ['host', 'cat > /srv/f'], COPY_SETTINGS, undefined, 5_000, 'file transfer', { direction: 'upload', localPath: local.path, maxBytes: 8 })
+  assert.equal(out.outcome, 'over-limit')
+  // Nothing was fed: the first chunk already crossed the line, and an upload that
+  // cannot promise a complete body must not start sending a partial one.
+  assert.equal(out.bytes, 0)
+  // Nothing crossed the line, so nothing was fed: an over-limit upload must not
+  // leave the far end with a plausible-looking truncated file and a closed stdin.
+  assert.equal(provider.children[0].written.length, 0)
+  assert.equal(provider.children[0].stdinEnded, false)
+  assert.equal(provider.children[0].terminated >= 1, true)
+})
+
+test('a copy that outlives its deadline is a timeout, and one the reader stopped is a cancellation', async () => {
+  const local = tempLocal()
+  const hanging = streamProvider(() => undefined) // the child never settles and never ends its channel
+  const transport = new SshTransport(hanging)
+  const timed = await transport.streamFile('/usr/bin/ssh', ['host', 'cat -- /srv/f'], COPY_SETTINGS, undefined, 30, 'file transfer', { direction: 'download', localPath: local.path, maxBytes: 1024 })
+  assert.equal(timed.outcome, 'timeout')
+  assert.equal(hanging.children[0].terminated >= 1, true)
+
+  const stoppedByReader = new AbortController()
+  stoppedByReader.abort(new Error('the conversation went away'))
+  const cancelled = await transport.streamFile('/usr/bin/ssh', ['host', 'cat -- /srv/f'], COPY_SETTINGS, undefined, 5_000, 'file transfer', { direction: 'download', localPath: join(mkdtempSync(join(tmpdir(), 'dshssh-stream-')), 'g'), maxBytes: 1024 }, stoppedByReader.signal)
+  assert.equal(cancelled.outcome, 'cancelled') // not a timeout: nobody should go blame the server
+})
+
+test('a copy whose child exits nonzero keeps the server’s explanation', async () => {
+  const local = tempLocal()
+  const provider = streamProvider(child => {
+    child.exit(1)
+  }, { stderr: "cat: /srv/f: Permission denied\n" })
+  const transport = new SshTransport(provider)
+  const out = await transport.streamFile('/usr/bin/ssh', ['host', 'cat -- /srv/f'], COPY_SETTINGS, undefined, 5_000, 'file transfer', { direction: 'download', localPath: local.path, maxBytes: 1024 })
+  assert.equal(out.outcome, 'exit')
+  assert.equal(out.exitCode, 1)
+  assert.match(out.stderr, /Permission denied/)
+})
+
+test('the copies over the ceiling are refused against the same lane the commands share', async () => {
+  // The ceiling a model hits is the one it is told about in words, and the count
+  // behind it has to be readable from outside: `transfersInFlight` is what a
+  // settings card and a real-host check both quote.
+  const provider = streamProvider(() => undefined)
+  const transport = new SshTransport(provider)
+  const lane = { kind: 'file transfers', cap: 2 }
+  const sink = () => join(mkdtempSync(join(tmpdir(), 'dshssh-stream-')), 'f')
+  const first = transport.streamFile('/usr/bin/ssh', ['host', 'cat -- /a'], COPY_SETTINGS, undefined, 0, 'file transfer', { direction: 'download', localPath: sink(), maxBytes: 1024 }, undefined, lane)
+  const second = transport.streamFile('/usr/bin/ssh', ['host', 'cat -- /b'], COPY_SETTINGS, undefined, 0, 'file transfer', { direction: 'download', localPath: sink(), maxBytes: 1024 }, undefined, lane)
+  assert.equal(transport.transfersInFlight, 2)
+  assert.equal(transport.laneUsage('background jobs'), 0) // the lanes are separate reservations
+  let err
+  try {
+    await transport.streamFile('/usr/bin/ssh', ['host', 'cat -- /c'], COPY_SETTINGS, undefined, 0, 'file transfer', { direction: 'download', localPath: sink(), maxBytes: 1024 }, undefined, lane)
+  } catch (error) { err = error }
+  assert.equal(err?.code, 'busy')
+  assert.match(err.message, /At most 2 file transfers may run at once/)
+  assert.equal(transport.transfersInFlight, 2, 'a refusal spends no slot')
+  // A plain command is not stopped by a crowded transfer lane: that reservation
+  // exists so a long copy can never busy-lock the plugin.
+  const room = await transport.run({ host: '10.0.0.9' }, { ...COPY_SETTINGS, maxSpillBytes: 0 }, {}, 'true', { timeoutMs: 30 })
+  assert.ok(room.durationMs >= 0)
+  // End the two held copies and the lane opens again — no count left behind.
+  provider.children.forEach(child => child.stdout?.destroy())
+  await Promise.all([first, second])
+  assert.equal(transport.transfersInFlight, 0)
+  const third = transport.streamFile('/usr/bin/ssh', ['host', 'cat -- /d'], COPY_SETTINGS, undefined, 30, 'file transfer', { direction: 'download', localPath: sink(), maxBytes: 1024 }, undefined, lane)
+  assert.equal(transport.transfersInFlight, 1)
+  provider.children.at(-1).stdout?.destroy()
+  await third
+  assert.equal(transport.transfersInFlight, 0)
+})
+

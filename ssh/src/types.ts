@@ -335,6 +335,14 @@ export interface RemoteTransferResult {
   files?: number
   /** The ceiling this copy ran under, after capping; stated because it is the answer to “why did that one refuse”. */
   bytesLimit?: number
+  /**
+   * Which kind of ceiling the copy was held to. `in-flight` means the number of
+   * bytes was counted as they moved and the copy was stopped at the line;
+   * `pre-check` means a tree was measured before it moved, which is a different
+   * and weaker promise, and the reason this is in the payload rather than in a
+   * README a reader may never open.
+   */
+  limitMode?: 'in-flight' | 'pre-check'
   /** The deadline this copy ran under, after capping. */
   timeoutMs?: number
   /** Objective sentences naming what a resolution corrected. */

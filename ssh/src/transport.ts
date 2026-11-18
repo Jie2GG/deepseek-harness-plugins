@@ -21,6 +21,10 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-subprocess'
+import { createReadStream, createWriteStream } from 'node:fs'
+import { Transform } from 'node:stream'
+import type { Readable, Writable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { MAX_CONCURRENT_OPS, SCP_EXECUTABLE, SCP_FALLBACK_PATHS, SSH_EXECUTABLE, SSH_FALLBACK_PATHS } from './storage.ts'
 import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
 
@@ -152,6 +156,17 @@ const NETWORK_PATTERNS: readonly RegExp[] = [
 const DETAIL_LIMIT = 2048
 
 /**
+ * The reservation kind one file copy counts against, and the name a refusal
+ * quotes. Named once because three places have to agree on it: the copy that
+ * asks for the slot, the ceiling that answers in words, and the getter that
+ * reports how full the lane is.
+ */
+export const TRANSFER_LANE = 'file transfers'
+
+/** The reservation kind one explicitly backgrounded command counts against. */
+export const JOB_LANE = 'background jobs'
+
+/**
  * How long to wait for the provider to drain the pipes after termination.
  *
  * Exported because the budget this plugin declares to the harness has to sit above
@@ -207,6 +222,29 @@ export const HOST_KEY_SETTING = 'StrictHostKeyChecking=accept-new'
  */
 export function shellQuote(value: string): string {
   return `'${value.replace(/'/gu, `'\\''`)}'`
+}
+
+/**
+ * Shape one remote path so the **remote shell** can open it.
+ *
+ * `~/x` is a documented path form (`remotePathSchema`, `storage.ts`), and a fully
+ * quoted `'~/x'` is not the same word to a shell: a tilde-prefix runs only to the
+ * first *unquoted* `/`, so quoting the whole path leaves a word that literally
+ * begins with a tilde. Measured on a live server in `sh`, `bash`, and `dash`, for
+ * a read and for a redirection alike:
+ *
+ * - `cat -- '~/f.txt'` → `No such file or directory` — the shape this plugin used
+ * - `cat -- ~'/f.txt'` → the same failure, because the slash sits inside the quotes
+ * - `cat -- ~/'f.txt'` → the file, and `cat > ~/'a b/f.txt'` writes one whose name
+ *   has a space in it
+ *
+ * So the `~/` stays outside the quotes where the shell can see it, and everything
+ * after it stays inside them. Absolute paths keep the single-quoted word they had.
+ * @param value - the path as the caller named it, absolute or `~/`-rooted.
+ * @returns one word the remote shell expands to exactly that path.
+ */
+export function remotePathArg(value: string): string {
+  return value.startsWith('~/') ? `~/${shellQuote(value.slice(2))}` : shellQuote(value)
 }
 
 /**
@@ -417,6 +455,10 @@ interface ChildHandle {
     stdout?: { readFrom(offset: number): { text: string; nextOffset: number; lossy: boolean; spillPath?: string | undefined } } | undefined
     stderr?: { readFrom(offset: number): { text: string; nextOffset: number; lossy: boolean; spillPath?: string | undefined } } | undefined
   }
+  /** The raw stdin of a child spawned with `stdin: 'pipe'`; absent otherwise. */
+  stdin?: Writable | undefined
+  /** The raw stdout of a child spawned with `stdout: 'pipe'`; absent otherwise. */
+  stdout?: Readable | undefined
   /** Starts the managed interrupt of the whole process range. */
   terminate(): void
   /** Waits out that range, bounded by the caller's signal. */
@@ -480,6 +522,137 @@ export interface Collected {
   error?: string
 }
 
+/** How many bytes a streamed copy has moved, and what stopped it moving them. */
+export interface PumpState {
+  /** Bytes counted at the local end — written by a download, read by an upload. */
+  bytes: number
+  /** True when the copy was stopped by the ceiling rather than by an ending. */
+  over: boolean
+  /** True when the local side reached the end of what it meant to move. */
+  ended: boolean
+  /** Why the pump could not move the bytes, when that is the answer. */
+  error?: string
+}
+
+/** What one streamed copy of a single file produced. */
+export interface StreamedCopy {
+  /**
+   * `exit` means the child ran to an ending and the pump stopped with it;
+   * `over-limit` means this plugin stopped a copy that was still moving bytes,
+   * which no pre-check of a `stat` number can tell from a copy that finished.
+   */
+  outcome: 'exit' | 'timeout' | 'cancelled' | 'error' | 'over-limit'
+  /** The child's exit code, `null` when it never produced one. */
+  exitCode: number | null
+  /** Bytes that crossed the local end before the copy stopped. */
+  bytes: number
+  /** Whatever the child said on stderr, for the failure explanation. */
+  stderr: string
+  /** Whatever the child said on stdout (an upload has none; a download has the payload). */
+  stdout: string
+  /** Milliseconds from the start of the wait to the settled answer. */
+  durationMs: number
+  /** Why the provider or the pump failed outright, when that is the outcome. */
+  error?: string
+}
+
+/** The face of one child a stream copy drives. */
+export interface StreamCopy {
+  /** Which way the bytes move, which decides which channel is raw. */
+  direction: 'download' | 'upload'
+  /** Absolute local path: written by a download, read by an upload. */
+  localPath: string
+  /** Hard ceiling on the bytes that may move, in bytes. */
+  maxBytes: number
+}
+
+/** How long one non-piped face of a streamed copy keeps in memory: an explanation, not a payload. */
+const STREAM_DETAIL_BYTES = 8_192
+
+/**
+ * Stop waiting once this signal is done, so a deadline can end a race that the
+ * child and the pump are otherwise holding open.
+ * @param signal - the fused deadline/cancellation signal.
+ * @returns a promise that resolves on the first abort and never before.
+ */
+function aborted(signal: AbortSignal): Promise<void> {
+  return new Promise(resolve => {
+    if (signal.aborted) {
+      resolve()
+      return
+    }
+    signal.addEventListener('abort', () => {
+      resolve()
+    }, { once: true })
+  })
+}
+
+/**
+ * Wait for one writable to take more, treating its death as an answer.
+ *
+ * A child whose channel closed is not an error this plugin should invent: the
+ * exit code and the child's own stderr already say what happened, and a pump that
+ * kept feeding a dead pipe would only read the whole local file for nothing.
+ * @param stream - the writable that refused the last chunk.
+ * @returns `true` when it asked for more, `false` when it died instead.
+ */
+function drained(stream: Writable): Promise<boolean> {
+  return new Promise(resolve => {
+    const stop = (value: boolean): void => {
+      stream.removeListener('drain', onDrain)
+      stream.removeListener('error', onDeath)
+      stream.removeListener('close', onDeath)
+      resolve(value)
+    }
+    const onDrain = (): void => stop(true)
+    const onDeath = (): void => stop(false)
+    stream.once('drain', onDrain)
+    stream.once('error', onDeath)
+    stream.once('close', onDeath)
+  })
+}
+
+/**
+ * Close the write side of one stream and wait for the bytes it holds.
+ *
+ * A download's part file is not finished until the last buffered byte is with the
+ * operating system, and a rename that beat that answer would move a short file
+ * into place and call it a copy. A write side that was already destroyed — a
+ * child the server closed, a sink that errored — never reports `finish`, so both
+ * of its endings are answers here, and only one of them counts as delivered.
+ * @param stream - the writable to end.
+ * @returns `true` when it flushed, `false` when it failed or was already gone.
+ */
+function ended(stream: Writable): Promise<boolean> {
+  return new Promise(resolve => {
+    if (stream.destroyed) {
+      resolve(false)
+      return
+    }
+    stream.once('finish', () => {
+      resolve(true)
+    })
+    stream.once('error', () => {
+      resolve(false)
+    })
+    stream.once('close', () => {
+      resolve(false)
+    })
+    stream.end()
+  })
+}
+
+/**
+ * The provider's own `EPIPE` phrasing, and the one Node uses once the stream is
+ * already destroyed — both mean the far end stopped listening.
+ * @param error - the failure the pump was handed.
+ * @returns true when no more bytes could move, for a reason the child explains.
+ */
+function channelGone(error: unknown): boolean {
+  const code = typeof error === 'object' && error !== null && 'code' in error ? String((error as { code: unknown }).code) : ''
+  return code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED' || code === 'ERR_STREAM_WRITE_AFTER_END'
+}
+
 /** Runs probes, remote commands, and transfers through `ctx.subprocess`. */
 export class SshTransport {
   readonly #ctx: Context
@@ -517,6 +690,25 @@ export class SshTransport {
   /** How many servers are holding an open shared connection right now. */
   get liveMasters(): number {
     return this.#pool?.liveMasters ?? 0
+  }
+
+  /**
+   * How many children of one reservation kind are holding a slot right now.
+   *
+   * The ceiling is only worth having if a reader can see it being reached: the
+   * settings card, the `get_connection` payload, and a real-host check all ask
+   * “how many copies are moving at this moment”, and until now the only answer
+   * this class could give was the count of *all* children.
+   * @param kind - the reservation name the calls asked for, e.g. {@link JOB_LANE}.
+   * @returns how many of them are in flight.
+   */
+  laneUsage(kind: string): number {
+    return this.#lanesByKind.get(kind) ?? 0
+  }
+
+  /** How many single-file or tree copies are holding a transfer slot right now. */
+  get transfersInFlight(): number {
+    return this.laneUsage(TRANSFER_LANE)
   }
 
   /** Whether this Host can share connections at all, and why not when it cannot. */
@@ -819,6 +1011,10 @@ export class SshTransport {
    * @param controller - the lane controller this child is bound to.
    * @param external - the caller's own signal, which outranks the deadline.
    * @param stdin - text fed to the child, or nothing when stdin stays closed.
+   * @param stream - which face of the child this call drives as a raw byte
+   *   channel: `download` takes stdout, `upload` feeds stdin. A stream copy asks
+   *   the provider for no spill on either face, because its payload is a file on
+   *   disk and its transcript is only ever an explanation.
    * @returns the live handle and the detacher for the caller's signal.
    */
   #spawn(
@@ -829,6 +1025,7 @@ export class SshTransport {
     controller: AbortController,
     external: AbortSignal | undefined,
     stdin: string | undefined,
+    stream?: 'download' | 'upload',
   ): { handle: ChildHandle; detach: () => void } {
     const handle = this.#ctx.subprocess.spawn({
       argv: [program, ...argvTail],
@@ -838,6 +1035,14 @@ export class SshTransport {
       // omitting it is what used to make "truncated" mean "the rest is gone" — so a
       // ceiling that clips a stream now costs a temp file instead of the answer.
       stdio: (() => {
+        if (stream !== undefined) {
+          // Exactly one raw channel, one small explanation, and nothing spilled:
+          // a copy that moved 400 MiB should not also have written 400 MiB of
+          // transcript into the provider's spill file to say so.
+          return stream === 'download'
+            ? { stdin: 'ignore', stdout: 'pipe', stderr: { maxBytes: STREAM_DETAIL_BYTES } }
+            : { stdin: 'pipe', stdout: { maxBytes: STREAM_DETAIL_BYTES }, stderr: { maxBytes: STREAM_DETAIL_BYTES } }
+        }
         const collect = () => ({
           maxBytes: settings.maxOutputBytes,
           ...(settings.maxSpillBytes > 0 ? { spill: { maxBytes: settings.maxSpillBytes } } : {}),
@@ -990,6 +1195,255 @@ export class SshTransport {
   }
 
   /**
+   * Move one file's bytes through one `ssh` child, counting them as they move.
+   *
+   * A ceiling that only reads a `stat` number before the copy starts is a
+   * statement about the past: a file that grows while it is being carried has
+   * already passed the number by the time anybody notices. Here the count is taken
+   * at the local end — the bytes a download wrote into its part file, the bytes an
+   * upload read out of the source — and the moment the next chunk would cross the
+   * ceiling the pump stops, the child is taken down through the same managed range
+   * every other child uses, and `over-limit` is the answer. Nothing about the
+   * destination is touched by a copy that never finished: a download leaves its
+   * part file to the caller's cleanup, and an upload never gets to its publish step.
+   * @param program - the resolved ssh executable.
+   * @param argvTail - the option flags, the authority, and the remote command.
+   * @param settings - the ceilings, the grace, and the option budget.
+   * @param env - the askpass entries, when a secret has to be answered.
+   * @param deadlineMs - the whole budget for the copy.
+   * @param label - what is running, for the concurrency refusal.
+   * @param copy - which way, to or from which local path, under what ceiling.
+   * @param external - the caller's own cancellation.
+   * @param lane - the per-kind ceiling the copy occupies a slot against.
+   * @returns the settled copy, with the byte count it stopped at.
+   */
+  async streamFile(
+    program: string,
+    argvTail: readonly string[],
+    settings: SshSettings,
+    env: NodeJS.ProcessEnv | undefined,
+    deadlineMs: number,
+    label: string,
+    copy: StreamCopy,
+    external?: AbortSignal,
+    lane?: { readonly kind: string; readonly cap: number },
+  ): Promise<StreamedCopy> {
+    const controller = this.#takeLane(label, lane)
+    const startedAt = Date.now()
+    const state: PumpState = { bytes: 0, over: false, ended: false }
+    try {
+      const { handle, detach } = this.#spawn(program, argvTail, settings, env, controller, external, undefined, copy.direction)
+      const d = deadline(external, deadlineMs, SSH_TIMEOUT)
+      // The pump and the child are waited on as one story: `#pump` never throws,
+      // so whichever ends first is an answer rather than an exception, and the
+      // other is still settled — with a bounded drain — before any byte count,
+      // exit code, or stderr tail is read.
+      const pumping = this.#pump(handle, copy, state)
+      let child: { exitCode: number | null; signal: NodeJS.Signals | null } | undefined
+      let spawnFailure: string | undefined
+      const watching = handle.done
+        .then(outcome => {
+          child = outcome
+        })
+        .catch((error: unknown) => {
+          spawnFailure = error instanceof Error ? error.message : String(error)
+        })
+      let fired: 'timeout' | 'cancelled' | undefined
+      try {
+        const first = await Promise.race([
+          pumping.then(() => 'pump' as const),
+          watching.then(() => 'child' as const),
+          aborted(d.signal).then(() => 'deadline' as const),
+        ])
+        if (first === 'deadline') {
+          fired = timeoutOf(d.signal, SSH_TIMEOUT) === undefined ? 'cancelled' : 'timeout'
+        }
+        if (state.over === true || fired !== undefined || state.ended === false) {
+          // A copy stopped by its ceiling, by the clock, or by a local end that
+          // gave out all leave a `cat` with somewhere to write to and nobody
+          // reading: end the range, and let the drain flush the pipes the way
+          // every other interrupted child's does. Against a child that already
+          // exited on its own the call is a no-op, which is why an unfinished
+          // *pump* is allowed to ask for it.
+          controller.abort()
+          handle.terminate()
+        }
+        // Both halves still have to come in before an exit code or a byte count is
+        // quoted, and neither is allowed to outlive a deadline that has already
+        // fired — so each is raced against the signal. The wait for the process
+        // range is then bounded by the kill grace the provider itself stages
+        // TERM→KILL over, plus the short drain every collected child gets: for a
+        // collected call the drain only has to make the answer readable, but for a
+        // copy the channel closing is what stops the *server* writing, and the
+        // caller's cleanup of a remote temp file is ordered behind that. Giving up
+        // earlier would return a copy whose far half was still running.
+        const drain = new AbortController()
+        const drainMs = DRAIN_MS + settings.graceMs
+        const drainTimer = setTimeout(() => { drain.abort() }, drainMs)
+        try {
+          await Promise.all([
+            Promise.race([pumping, aborted(d.signal)]),
+            Promise.race([watching, aborted(d.signal)]),
+            handle.waitForExit(drain.signal).catch(() => false),
+          ])
+        } finally {
+          clearTimeout(drainTimer)
+        }
+      } finally {
+        detach()
+        d[Symbol.dispose]()
+      }
+      // Only a copy that did not finish may be blamed on the clock: a deadline
+      // that fires a beat after a completed copy is not a timeout, and calling it
+      // one sends the reader off to fix a server that was answering normally.
+      const unfinished = child === undefined || state.ended === false
+      const stopped = unfinished && d.signal.aborted
+        ? (timeoutOf(d.signal, SSH_TIMEOUT) === undefined ? 'cancelled' : 'timeout')
+        : undefined
+      if (child === undefined && spawnFailure === undefined && state.over === false && stopped === undefined) {
+        // Neither the child nor the pump came back inside the drain: the copy is
+        // over, but nothing here can honestly quote an exit status.
+        spawnFailure = 'The ssh child did not settle before its pipes were given up on.'
+      }
+      const stdoutRead = handle.collected.stdout?.readFrom(0)
+      const stderrRead = handle.collected.stderr?.readFrom(0)
+      const outcome: StreamedCopy['outcome'] = state.over
+        ? 'over-limit'
+        : stopped === 'cancelled'
+          ? 'cancelled'
+          : stopped === 'timeout'
+            ? 'timeout'
+            : spawnFailure !== undefined
+              ? 'error'
+              : state.error !== undefined && state.ended === false
+                ? 'error'
+                : 'exit'
+      return {
+        outcome,
+        exitCode: child?.exitCode ?? null,
+        bytes: state.bytes,
+        stdout: stdoutRead?.text ?? '',
+        stderr: stderrRead?.text ?? '',
+        durationMs: Date.now() - startedAt,
+        ...(spawnFailure === undefined && state.error === undefined ? {} : { error: spawnFailure ?? state.error }),
+      }
+    } finally {
+      this.#releaseLane(controller, lane)
+    }
+  }
+
+  /**
+   * Push one file through one raw channel and stop it at the ceiling.
+   *
+   * Never throws: every failure lands in {@link PumpState} so the caller's race
+   * has one vocabulary. A write side that died — an `ssh` the server closed, a
+   * disk that filled — ends the pump instead of letting it read a whole local file
+   * into a channel nobody is holding, and the child's own exit status is what then
+   * explains the copy.
+   * @param handle - the spawned child, with one raw face.
+   * @param copy - which way, which local path, and the ceiling.
+   * @param state - the running count this pump owns.
+   * @returns resolution once the bytes stopped moving, for any reason.
+   */
+  async #pump(handle: ChildHandle, copy: StreamCopy, state: PumpState): Promise<void> {
+    /** The byte length of one chunk, whoever produced it. */
+    const size = (chunk: string | Buffer): number => typeof chunk === 'string' ? Buffer.byteLength(chunk, 'utf8') : chunk.length
+    if (copy.direction === 'download') {
+      const source = handle.stdout
+      if (source === undefined) {
+        state.error = 'The provider gave this copy no stdout to read.'
+        return
+      }
+      const sink = createWriteStream(copy.localPath)
+      // The sink's own failure — a disk that filled, a directory that is not
+      // there — is the answer the reader needs, so it is kept rather than being
+      // swallowed by the no-op listener that only exists to stop an unhandled
+      // 'error' from ending the process.
+      let sinkFailure: string | undefined
+      sink.on('error', (error: Error) => {
+        sinkFailure = error.message
+      })
+      let whole = true
+      try {
+        for await (const chunk of source) {
+          const bytes = size(chunk as string | Buffer)
+          if (state.bytes + bytes > copy.maxBytes) {
+            // The chunk that crossed the line is not delivered: the count this
+            // copy quotes is the bytes that arrived *and were accounted for*, and
+            // the refusal says the ceiling was passed rather than padding the
+            // number with a chunk the ceiling refused.
+            state.over = true
+            whole = false
+            break
+          }
+          state.bytes += bytes
+          if (!sink.write(chunk as Buffer) && !(await drained(sink))) {
+            state.error = `The local file ${copy.localPath} could not be written to${sinkFailure === undefined ? '' : `: ${sinkFailure}`}.`
+            whole = false
+            break
+          }
+        }
+      } catch (error: unknown) {
+        whole = false
+        if (state.over === false) state.error = error instanceof Error ? error.message : String(error)
+      }
+      const flushed = await ended(sink)
+      if (!flushed && state.error === undefined) {
+        state.error = `The copy reached ${copy.localPath} but could not be flushed to disk${sinkFailure === undefined ? '' : `: ${sinkFailure}`}.`
+      }
+      // `readableEnded` is the difference between a server that ran out of file
+      // and a channel this side stopped: a destroyed stream ends without it, and a
+      // copy that was cut short must never be reported as a completed one.
+      state.ended = whole && flushed && source.readableEnded === true
+      return
+    }
+    const sink = handle.stdin
+    if (sink === undefined) {
+      state.error = 'The provider gave this copy no stdin to write.'
+      return
+    }
+    sink.on('error', () => undefined)
+    const source = createReadStream(copy.localPath)
+    source.on('error', () => undefined)
+    let whole = true
+    try {
+      for await (const chunk of source) {
+        const bytes = size(chunk)
+        if (state.bytes + bytes > copy.maxBytes) {
+          state.over = true
+          whole = false
+          break
+        }
+        state.bytes += bytes
+        if (!sink.write(chunk) && !(await drained(sink))) {
+          whole = false
+          break
+        }
+      }
+    } catch (error: unknown) {
+      whole = false
+      if (!channelGone(error)) state.error = error instanceof Error ? error.message : String(error)
+    }
+    void source.destroy()
+    if (state.over === true) {
+      // The end of file is what tells the far side a body is complete, so a copy
+      // stopped by its ceiling never sends one: the partial temp stays partial,
+      // and the child goes down with its write still open.
+      state.ended = false
+      return
+    }
+    // An upload that carried everything it meant to carries an explicit end of
+    // file, which is what lets the far side close its write and exit 0 — and
+    // `readableEnded` is what says the local file was read to its end rather than
+    // abandoned half way.
+    const delivered = await ended(sink)
+    if (state.error === undefined) {
+      if (whole && source.readableEnded === true && delivered) state.ended = true
+      else state.error = `The copy of ${copy.localPath} could not be delivered to the server.`
+    }
+  }
+
+  /**
    * Probe one target: connect and authenticate — `-N` on a shared connection, and
    * `true` on a call that is dialing its own.
    * @param target - the identity fields to connect with.
@@ -1113,7 +1567,7 @@ export class SshTransport {
     } = {},
   ): Promise<RemoteJob | undefined> {
     const deadline = options.timeoutMs ?? settings.remoteTimeoutMs
-    const lane = options.job === true ? { kind: 'background jobs', cap: settings.maxRunningJobs } : undefined
+    const lane = options.job === true ? { kind: JOB_LANE, cap: settings.maxRunningJobs } : undefined
     const controller = this.#takeLane('background command', lane)
     const ticket = this.share(target, auth)
     const program = await this.resolveSsh(controller.signal)

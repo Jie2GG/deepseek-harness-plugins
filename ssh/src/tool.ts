@@ -21,6 +21,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { ApprovalAnswer } from './approval.ts'
+import { transferCallCeiling } from './transfer.ts'
 
 /**
  * The pending-call fields this module reads, taken structurally: two copies of the
@@ -555,10 +556,18 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
   // classification arrive before the wrapper would overwrite it. Transfers
   // need naming here because they run on their own clock now: a budget that
   // only covered the 30 s command path would cut a permitted 25-minute copy.
-  const callBudgetMs = Math.max(
-    bounds.maxTimeoutMs,
-    bounds.statTimeoutMs + bounds.maxTransferTimeoutMs,
-  ) + bounds.graceMs + DRAIN_MS + BUDGET_SLACK_MS
+  const commandPathMs = bounds.maxTimeoutMs
+  // The transfer path is quoted as the sum of its own steps rather than as one
+  // deadline: a call that pre-checks the far end, moves the bytes, asks the server
+  // to take the temp file's place, and then cleans up after a stopped copy needs a
+  // budget that covers all four, or the harness answers before this plugin does
+  // and the reader loses the classified sentence for a generic timeout one.
+  const transferPathMs = transferCallCeiling({
+    statTimeoutMs: bounds.statTimeoutMs,
+    transferTimeoutMs: bounds.maxTransferTimeoutMs,
+    graceMs: bounds.graceMs,
+  })
+  const callBudgetMs = Math.max(commandPathMs, transferPathMs) + bounds.graceMs + DRAIN_MS + BUDGET_SLACK_MS
   return defineTool({
     name: REMOTE_TOOL_NAME,
     description: describeRemote(deps.targetsOf?.() ?? []),
@@ -603,7 +612,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           {
             type: 'object',
             additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', enum: ['upload', 'download'], required: true }, localPath: { type: 'string' }, remotePath: { type: 'string' }, bytes: { type: 'integer' }, files: { type: 'integer' }, recursive: { type: 'boolean' }, overwrote: { type: 'boolean' }, bytesLimit: { type: 'integer' }, timeoutMs: { type: 'integer' }, notes: { type: 'array', items: { type: 'string' } } },
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', enum: ['upload', 'download'], required: true }, localPath: { type: 'string' }, remotePath: { type: 'string' }, bytes: { type: 'integer' }, files: { type: 'integer' }, recursive: { type: 'boolean' }, overwrote: { type: 'boolean' }, bytesLimit: { type: 'integer' }, timeoutMs: { type: 'integer' }, limitMode: { type: 'string', enum: ['in-flight', 'pre-check'] }, notes: { type: 'array', items: { type: 'string' } } },
           },
           {
             type: 'object',
@@ -1105,6 +1114,13 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
       if (value.overwrote === true) lines.push('an existing destination was replaced')
       if (typeof value.message === 'string') lines.push(String(value.message))
       if (typeof value.hint === 'string') lines.push(`hint: ${String(value.hint)}`)
+      // The notes belong in the transcript, not just the payload: which ceiling
+      // answered, whether the tree was measured before or after the copy, and what
+      // a stopped upload left on the server to clean up are the three things a model
+      // decides with after a transfer comes back odd.
+      if (Array.isArray(value.notes)) {
+        for (const note of value.notes) if (typeof note === 'string' && note !== '') lines.push(`[${note}]`)
+      }
       lines.push(`status=${String(value.status)}${typeof value.durationMs === 'number' ? ` · ${String(value.durationMs)} ms` : ''}`)
       return lines.join('\n')
     }

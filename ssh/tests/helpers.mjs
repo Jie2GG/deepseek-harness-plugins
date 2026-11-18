@@ -1,6 +1,7 @@
 // Shared helpers for the offline suites. Plain node:test + the shipped
 // lib/ artifacts: run `pnpm run build` first, then `pnpm test`.
 import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
+import { SshError } from '../lib/types.js'
 
 /** The oneOf branch whose action const/enum matches the payload. */
 export function branchFor (schema, action) {
@@ -89,6 +90,27 @@ export function fakeRunner () {
         if (fromImpl !== undefined) return fromImpl
       }
       return state.executeOut ?? { outcome: 'exit', exitCode: 0, stdout: '', stderr: '', durationMs: 3, truncated: false }
+    },
+    /**
+     * The single-file channel: a stand-in for the counted copy the real transport
+     * drives with `cat` on the far end. `streamImpl` plays the wire — it is handed
+     * the argv tail and the copy request, and it may write the sink file (a
+     * download) or read it (an upload) and answer with the byte count and outcome
+     * the copy would have produced.
+     */
+    async streamFile (program, argvTail, settings, env, deadlineMs, label, copy, signal, lane) {
+      state.calls.push({ kind: 'streamFile', program, argvTail, settings, env, timeoutMs: deadlineMs, label, copy, signal, lane })
+      // A stand-in for the lane ceiling: the transport throws, and this lets a
+      // test prove the transfer layer turns that into an outcome.
+      if (state.streamFail !== undefined) {
+        const refusal = state.streamFail
+        throw new SshError(refusal.code, refusal.message, { hint: refusal.hint })
+      }
+      if (typeof state.streamImpl === 'function') {
+        const fromImpl = await state.streamImpl(argvTail, copy)
+        if (fromImpl !== undefined) return fromImpl
+      }
+      return state.streamOut ?? { outcome: 'exit', exitCode: 0, bytes: 0, stdout: '', stderr: '', durationMs: 3 }
     },
     // The real transport joins `[user@]host` the same way; transfers ask it
     // instead of hand-rolling the join, so the stand-in answers too.

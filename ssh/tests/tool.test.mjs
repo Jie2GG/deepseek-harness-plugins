@@ -18,6 +18,7 @@ import {
 import { defaultBounds } from '../lib/bounds.js'
 import { DRAIN_MS } from '../lib/transport.js'
 import { createOps } from '../lib/ops.js'
+import { transferCallCeiling } from '../lib/transfer.js'
 import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import { assertPayloadValid, fakeRunner, fakeStore, fakeSecrets, record } from './helpers.mjs'
 
@@ -507,10 +508,66 @@ test('presentationMeta and presentCall read only the canonical value', () => {
   // collision the shipped 300s/300s pair used to have.
   const bounds = defaultBounds()
   assert.ok(definition.timeoutMs > bounds.maxTimeoutMs + bounds.graceMs + DRAIN_MS)
-  const longestTransfer = bounds.statTimeoutMs + bounds.maxTransferTimeoutMs
-  assert.ok(definition.timeoutMs > longestTransfer + bounds.graceMs + DRAIN_MS)
-  const expected = Math.max(bounds.maxTimeoutMs, longestTransfer) + bounds.graceMs + DRAIN_MS + 5_000
+  // The transfer side is quoted from the same helper the tool builds its budget
+  // from: pre-check, channel, publish, and the cleanup a stopped copy asks the
+  // server for. An inline sum here is how the two drifted apart last time.
+  const transferPath = transferCallCeiling({
+    statTimeoutMs: bounds.statTimeoutMs,
+    transferTimeoutMs: bounds.maxTransferTimeoutMs,
+    graceMs: bounds.graceMs,
+  })
+  assert.ok(transferPath > bounds.statTimeoutMs + bounds.maxTransferTimeoutMs)
+  const expected = Math.max(bounds.maxTimeoutMs, transferPath) + bounds.graceMs + DRAIN_MS + 5_000
   assert.equal(definition.timeoutMs, expected)
+  // And the promise the budget makes to the model stays honest at the cap: the
+  // longest copy this plugin will wait for fits inside the call it declared.
+  assert.ok(definition.timeoutMs > transferPath, 'the declared budget must outlast the longest transfer call')
+})
+
+test('a transfer result tells the model which ceiling answered, in the transcript', async () => {
+  const { definition } = toolHarness(fakeOps())
+  const target = { id: 'ssh-a1b2c3d4e5', label: 'Proxy', host: '10.0.0.9' }
+  const stopped = {
+    action: 'download',
+    ok: false,
+    status: 'refused-size',
+    target,
+    localPath: '/ws/x',
+    remotePath: '/srv/x',
+    bytes: 4096,
+    bytesLimit: 4096,
+    timeoutMs: 300_000,
+    limitMode: 'in-flight',
+    message: "/srv/x crossed the 4096 byte ceiling while it was being carried: 4096 bytes had arrived, and the file measured 10 bytes when the copy started — it grew while it ran. The destination was left as it was.",
+    notes: ['A recursive copy is bounded before it moves, not while it does.'],
+    durationMs: 120
+  }
+  assertPayloadValid(definition.output.schema, stopped)
+  const rendered = definition.output.render({ action: 'download', path: '/srv/x', localPath: '/ws/x' }, stopped)
+  const text = rendered.map(line => line.text).join('\n')
+  // The transcript is what the model reads. A ceiling it cannot see is a ceiling
+  // it will argue with, and a note that only lives in the payload is invisible.
+  assert.match(text, /crossed the 4096 byte ceiling while it was being carried/)
+  assert.match(text, /it grew while it ran/)
+  assert.match(text, /\[A recursive copy is bounded before it moves, not while it does\.\]/)
+  const tree = {
+    action: 'upload',
+    ok: true,
+    status: 'moved',
+    target,
+    localPath: '/ws/dir',
+    remotePath: '/srv/dir',
+    bytes: 6,
+    files: 2,
+    recursive: true,
+    limitMode: 'pre-check',
+    bytesLimit: 33_554_432,
+    timeoutMs: 300_000,
+    durationMs: 30
+  }
+  assertPayloadValid(definition.output.schema, tree)
+  const treeText = definition.output.render({ action: 'upload', path: '/srv/dir', localPath: '/ws/dir', recursive: true }, tree).map(line => line.text).join('\n')
+  assert.match(treeText, /6 bytes \(directory\)/)
 })
 
 test('only the reads are declared concurrency-safe, and the description says so too', () => {
