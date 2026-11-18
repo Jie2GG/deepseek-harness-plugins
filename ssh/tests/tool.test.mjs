@@ -706,26 +706,113 @@ test('a promoted exec renders as a hand-over, not as a failure, and validates', 
 // `ops.editRemote` on a fake transport that plays the server — the file's
 // contents, the backup, and the write count are assertable facts — and capture
 // the params at the tool-to-ops seam, where the boolean was being dropped.
-function remoteEditHarness (initial, path = '/srv/x') {
+/**
+ * A fake that plays a remote file through the three children one guarded edit
+ * runs: the read that also states a version, the write that copies, replaces and
+ * re-checks in one shell, and the repair child that puts the previous content
+ * back. The knobs are the failures the acceptance list asks about — a file that
+ * changed under the read, a body that stopped arriving, a copy that could not be
+ * made, a repair that itself failed — and every one of them is answered the way
+ * the real command answers it, by an exit code this plugin maps to a sentence.
+ */
+function remoteEditHarness (initial, path = '/srv/x', knobs = {}) {
   const { runner, state } = fakeRunner()
   const store = fakeStore({ records: [record()] })
-  const server = { files: new Map([[path, initial]]), writes: 0, backups: [] }
+  const bytes = (text) => Buffer.byteLength(text ?? '', 'utf8')
+  const server = {
+    files: new Map([[path, initial]]),
+    versions: new Map([[path, `7|${bytes(initial)}|2026-01-01 00:00:00.000000000 +0800`]]),
+    writes: 0,
+    backups: [],
+    commands: [],
+    /** Change the file the way another process would, without the guard seeing it. */
+    touch (next) {
+      server.files.set(path, next)
+      const [, , mtime] = (server.versions.get(path) ?? '').split('|')
+      server.versions.set(path, `7|${bytes(next)}|${knobs.staleMtime ?? '2026-01-01 00:00:01.000000000 +0800'}`)
+      void mtime
+    }
+  }
   const at = () => new Date().toISOString()
+  const answer = (exitCode, over = {}) => ({ status: exitCode === 0 ? 'succeeded' : 'exit-nonzero', at: at(), exitCode, stdout: '', stderr: '', durationMs: 2, ...over })
   state.nextRun = (command, options) => {
-    if (command.startsWith('if [ ! -f')) {
-      return server.files.has(path)
-        ? { status: 'succeeded', at: at(), exitCode: 0, stdout: server.files.get(path), stderr: '', durationMs: 2 }
-        : { status: 'exit-nonzero', at: at(), exitCode: 20, stdout: '', stderr: '', durationMs: 1 }
+    server.commands.push({ command, stdin: options.stdin })
+    const gone = !server.files.has(path)
+    if (command.includes("printf 'ssh-plugin:")) {
+      // The read: the marker carries the version this server can state, and the
+      // body follows it — or the file is missing, which is exit 20.
+      if (gone) return answer(20)
+      const version = knobs.noVersion === true ? '' : server.versions.get(path)
+      return answer(0, { stdout: `ssh-plugin: ${version ?? ''}\n${server.files.get(path) ?? ''}` })
     }
-    // The real write round trip is an optional `cp -p` chained to an in-place
-    // `cat >`; playing both is what lets a test check the promise instead of
-    // trusting it.
-    if (command.includes('cp -p')) server.backups.push({ backupPath: `${path}.dsh-bak`, content: server.files.get(path) })
-    if (command.includes('cat >')) {
+    if (command.includes('cp -p --') && command.includes('cat >')) {
+      if (gone) return answer(20)
+      // A writer outside this call, landing in the window between the read and the
+      // write: the guard exists to notice exactly this.
+      if (knobs.changedBeforeWrite !== undefined) {
+        server.files.set(path, knobs.changedBeforeWrite)
+        const stampVersion = `9|${bytes(knobs.changedBeforeWrite)}|2026-01-01 00:00:01.500000000 +0800`
+        server.versions.set(path, stampVersion)
+      }
+      // 1. the version guard, in the same shell that is about to truncate
+      const wanted = /!= '([^']*)'/u.exec(command)?.[1]
+      if (wanted !== undefined && wanted !== (server.versions.get(path) ?? '')) {
+        return answer(21, { stderr: 'ssh-plugin: the file changed after it was read' })
+      }
+      // 2. the safety copy, which must succeed before anything is written
+      if (knobs.failCopy === true) return answer(22, { stderr: 'cp: cannot create regular file: No space left' })
+      const backupArg = /cp -p -- '[^']*' ('[^']*)'/u.exec(command)?.[1] ?? "\'/srv/x.dsh-bak\'"
+      const backupPath = backupArg.replaceAll(/^'|'$/gu, '')
+      const previous = server.files.get(path) ?? ''
+      server.backups.push({ backupPath, content: previous })
+      // 3. the body, through the file's own inode
+      const body = options.stdin ?? ''
+      // The size the write command promises to leave behind is stated in the
+      // command itself, so the fake reads its own marching orders rather than
+      // being told the answer by the test.
+      const expected = Number(/if \[ "\$size" != (\d+) \]/u.exec(command)?.[1] ?? bytes(body))
+      if (knobs.lostAnswer === true) {
+        // The bytes all arrived and the server was done with them; only the exit
+        // status failed to come home. Restoring here would undo a finished edit.
+        server.writes += 1
+        server.files.set(path, body)
+        server.versions.set(path, `7|${bytes(body)}|2026-01-01 00:00:02.000000000 +0800`)
+        return answer(23, { stderr: '' })
+      }
+      if (knobs.childDied === true) {
+        server.files.set(path, body.slice(0, Math.floor(body.length / 2)))
+        server.writes += 1
+        return answer(23, { stderr: 'ssh: kex_exchange_identification: Connection closed by remote host' })
+      }
       server.writes += 1
-      server.files.set(path, options.stdin ?? '')
+      server.files.set(path, knobs.shortWrite === true ? body.slice(0, Math.max(0, body.length - 3)) : body)
+      server.versions.set(path, `7|${bytes(knobs.shortWrite === true ? body.slice(0, Math.max(0, body.length - 3)) : body)}|2026-01-01 00:00:02.000000000 +0800`)
+      // 4. the size the write had to leave behind
+      if (bytes(server.files.get(path)) !== expected) return answer(24, { stderr: '' })
+      // 5. the snapshot goes away when the reader never asked for a backup
+      if (command.includes('rm -f --')) server.backups = server.backups.filter(entry => entry.backupPath !== backupPath)
+      return answer(0)
     }
-    return { status: 'succeeded', at: at(), exitCode: 0, stdout: '', stderr: '', durationMs: 3 }
+    if (command.startsWith('size=$(wc -c')) {
+      // The repair child: it reads the file before it touches anything, then says
+      // which of four things turned out to be true. The markers are part of the
+      // contract `ops.ts` writes its sentences from, so the fake answers with them.
+      const intended = Number(/= (\d+) \]; then echo .ssh-plugin: landed/u.exec(command)?.[1] ?? -1)
+      if (bytes(server.files.get(path)) === intended) return answer(27, { stdout: 'ssh-plugin: landed\n' })
+      const backup = server.backups.at(-1)
+      if (backup === undefined) return answer(0, { stdout: `ssh-plugin: intact ${bytes(server.files.get(path))}\n` })
+      if (knobs.failRestore === true) {
+        return answer(25, { stdout: `ssh-plugin: unrecoverable ${bytes(server.files.get(path))}\n`, stderr: 'cp: /dev/sda: Read-only file system' })
+      }
+      server.files.set(path, backup.content)
+      const original = Number(/\$after" != (\d+) \]/u.exec(command)?.[1] ?? bytes(backup.content))
+      if (bytes(backup.content) !== original) {
+        return answer(26, { stdout: `ssh-plugin: partial ${bytes(backup.content)}\n` })
+      }
+      if (command.includes('rm -f --')) server.backups = server.backups.filter(entry => entry.backupPath !== backup.backupPath)
+      return answer(0, { stdout: 'ssh-plugin: restored\n' })
+    }
+    return answer(0)
   }
   const real = createOps({
     runner,
@@ -749,6 +836,7 @@ function remoteEditHarness (initial, path = '/srv/x') {
 test('edit dryRun reaches ops through the executor and previews without touching the server', async () => {
   const h = remoteEditHarness('one\nbeta two\n')
   const payload = await h.definition.execute({ action: 'edit', path: h.path, oldText: 'beta', newText: 'BETA', dryRun: true }, h.exec)
+  if (process.env.DEBUG_EDIT !== undefined) console.error('payload', JSON.stringify(payload), 'commands', JSON.stringify(h.server.commands.map(c => c.command.slice(0, 40))))
   // ① The seam that was broken: ops must receive the flag the model sent.
   assert.equal(h.seen.length, 1)
   assert.equal(h.seen[0].dryRun, true, 'the executor must forward dryRun to ops')
@@ -828,6 +916,139 @@ test('backup false, all, and replaceFirst ride the same path unbroken', async ()
   assert.equal(once.seen[0].replaceFirst, true)
   assert.equal(first.replaced, 1)
   assert.equal(once.server.files.get(once.path), 'y x x')
+})
+
+// ── the guarded write: what happens when the edit does not go quietly ───────
+test('an edit that finds the file changed under its read stops before writing anything', async () => {
+  const initial = 'one\nbeta two\n'
+  const h = remoteEditHarness(initial, '/srv/x', { changedBeforeWrite: 'someone else here\n' })
+  const payload = await h.definition.execute({ action: 'edit', path: h.path, oldText: 'beta', newText: 'BETA' }, h.exec)
+  assert.equal(payload.ok, false)
+  assert.equal(payload.stale, true)
+  assert.equal(payload.versionChecked, true)
+  assert.match(payload.message, /changed on 10\.0\.0\.9 between reading it and editing it/)
+  assert.match(payload.hint, /Read the file again/)
+  assertPayloadValid(h.definition.output.schema, payload)
+  // The other writer's bytes stand untouched: the guard ran in the same shell that
+  // would have truncated the file, before the copy and before the write.
+  assert.equal(h.server.files.get(h.path), 'someone else here\n')
+  assert.equal(h.server.writes, 0)
+  assert.deepEqual(h.server.backups, [])
+})
+
+test('a write that dies half way leaves the file exactly as it was, and says so', async () => {
+  const initial = 'one\nbeta two\n'
+  const h = remoteEditHarness(initial, '/srv/x', { childDied: true })
+  const payload = await h.definition.execute({ action: 'edit', path: h.path, oldText: 'beta', newText: 'A MUCH LONGER REPLACEMENT' }, h.exec)
+  assert.equal(payload.ok, false)
+  assert.equal(payload.restored, true)
+  assert.equal(payload.backup, '/srv/x.dsh-bak')
+  assert.match(payload.message, /the write child ended|kex_exchange_identification/)
+  assert.match(payload.message, /previous content was put back/)
+  // The point of the exercise: the server holds the original bytes, not half a
+  // replacement, and not a truncated file the reader has to discover later.
+  assert.equal(h.server.files.get(h.path), initial)
+  assert.equal(h.server.writes, 1, 'one write child ran before the repair')
+  assertPayloadValid(h.definition.output.schema, payload)
+})
+
+test('a write that arrives short is caught by the byte check and repaired', async () => {
+  const initial = 'one\nbeta two\n'
+  const h = remoteEditHarness(initial, '/srv/x', { shortWrite: true })
+  const payload = await h.definition.execute({ action: 'edit', path: h.path, oldText: 'beta', newText: 'BETA' }, h.exec)
+  assert.equal(payload.ok, false)
+  assert.equal(payload.restored, true)
+  assert.equal(h.server.files.get(h.path), initial)
+})
+
+test('a write whose answer was lost is not undone, because the bytes did arrive', async () => {
+  const h = remoteEditHarness('one\nbeta two\n', '/srv/x', { lostAnswer: true })
+  const payload = await h.definition.execute({ action: 'edit', path: h.path, oldText: 'beta', newText: 'BETA' }, h.exec)
+  assert.equal(payload.ok, false)
+  assert.equal(payload.restored, undefined)
+  assert.match(payload.message, /the change is on the server/)
+  // Restoring a completed edit would be its own kind of damage: the repair child
+  // looks at the size first, and this is that promise being kept.
+  assert.equal(h.server.files.get(h.path), 'one\nBETA two\n')
+  assertPayloadValid(h.definition.output.schema, payload)
+})
+
+test('an edit that cannot make its safety copy never touches the file', async () => {
+  const initial = 'one\nbeta two\n'
+  const h = remoteEditHarness(initial, '/srv/x', { failCopy: true })
+  const payload = await h.definition.execute({ action: 'edit', path: h.path, oldText: 'beta', newText: 'BETA' }, h.exec)
+  assert.equal(payload.ok, false)
+  assert.equal(payload.backup, undefined)
+  assert.match(payload.message, /could not make its safety copy/)
+  assert.match(payload.hint, /Free space/)
+  assert.equal(h.server.writes, 0)
+  assert.equal(h.server.files.get(h.path), initial)
+  assert.deepEqual(h.server.backups, [])
+})
+
+test('a failed repair says where the previous content is instead of claiming success', async () => {
+  const initial = 'one\nbeta two\n'
+  const h = remoteEditHarness(initial, '/srv/x', { childDied: true, failRestore: true })
+  const payload = await h.definition.execute({ action: 'edit', path: h.path, oldText: 'beta', newText: 'BETA' }, h.exec)
+  assert.equal(payload.ok, false)
+  assert.equal(payload.restored, false)
+  assert.equal(payload.backup, '/srv/x.dsh-bak')
+  assert.match(payload.message, /putting the file back did not succeed/)
+  assert.match(payload.message, /holds \d+ bytes; the previous content was 13/)
+  assert.match(payload.hint, /Read \/srv\/x\.dsh-bak to recover the previous content by hand/)
+  assertPayloadValid(h.definition.output.schema, payload)
+})
+
+test('an edit with backup off still copies the file first, and cleans the copy up after', async () => {
+  const initial = 'one\nbeta two\n'
+  const h = remoteEditHarness(initial, '/srv/x')
+  const payload = await h.definition.execute({ action: 'edit', path: h.path, oldText: 'beta', newText: 'BETA', backup: false }, h.exec)
+  assert.equal(payload.ok, true)
+  assert.equal(payload.backup, undefined)
+  assert.equal(h.server.writes, 1)
+  // The snapshot existed long enough to be the undo, then went away with the
+  // success: the reader asked for no backup and got none left on their server.
+  assert.deepEqual(h.server.backups, [])
+  const write = h.server.commands.find(entry => entry.command.includes('cat >'))
+  assert.match(write.command, /cp -p -- '\/srv\/x' '\/srv\/x\.dsh-snap-/)
+  assert.match(write.command, /rm -f -- '\/srv\/x\.dsh-snap-/)
+  assert.equal(h.server.files.get(h.path), 'one\nBETA two\n')
+})
+
+test('a server that states no version still edits, and says the guard was off', async () => {
+  const h = remoteEditHarness('one\nbeta two\n', '/srv/x', { noVersion: true })
+  const payload = await h.definition.execute({ action: 'edit', path: h.path, oldText: 'beta', newText: 'BETA' }, h.exec)
+  assert.equal(payload.ok, true)
+  assert.equal(payload.versionChecked, false)
+  const write = h.server.commands.find(entry => entry.command.includes('cat >'))
+  // No comparison against a token it never got — and the copy and the size check
+  // are still there, which is what makes the sentence honest.
+  assert.equal(write.command.includes("!= '"), false)
+  assert.match(write.command, /cp -p --/)
+  assert.match(write.command, /if \[ "\$size" != \d+ \]/u)
+  // A preview on such a server warns the reader rather than implying a guard it
+  // cannot offer.
+  const preview = await h.definition.execute({ action: 'edit', path: h.path, oldText: 'BETA', newText: 'beta', dryRun: true }, h.exec)
+  assert.equal(preview.versionChecked, false)
+  const rendered = h.definition.output.render({ action: 'edit', path: h.path }, preview).map(line => line.text).join('\n')
+  assert.match(rendered, /this server stated no file version/)
+})
+
+test('the guarded write replaces through the inode, never around it', async () => {
+  const h = remoteEditHarness('one\nbeta two\n', '/srv/x')
+  await h.definition.execute({ action: 'edit', path: h.path, oldText: 'beta', newText: 'BETA' }, h.exec)
+  const write = h.server.commands.find(entry => entry.command.includes('cat >'))
+  // The order the promise rests on: guard, copy, write, check, then cleanup.
+  const order = [
+    write.command.indexOf(')" != '),
+    write.command.indexOf('cp -p --'),
+    write.command.indexOf('cat >'),
+    write.command.indexOf('$size" !='),
+  ]
+  assert.ok(order.every(at => at > 0), `every step must be present: ${JSON.stringify(order)}`)
+  assert.deepEqual(order, [...order].sort((a, b) => a - b), 'the steps must run in that order, in one child')
+  assert.equal(write.command.includes('mv '), false, 'a rename would change the inode and break the links')
+  assert.equal(write.command.includes('rm -rf'), false)
 })
 
 test('readArgs maps dryRun like every other field the interface declares', () => {

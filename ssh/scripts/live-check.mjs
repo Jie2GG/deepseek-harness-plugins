@@ -100,6 +100,9 @@ async function mountProvider () {
   return { subprocess: runtime, logger: ctx.logger }
 }
 
+const { createOps } = await import('../lib/ops.js')
+const { fakeStore, fakeSecrets, record } = await import('../tests/helpers.mjs')
+
 const bounds = defaultBounds()
 const { settings } = resolveSettings(bounds)
 const LOCAL = mkdtempSync(join(tmpdir(), 'dsh-ssh-live-local-'))
@@ -126,6 +129,18 @@ const askpass = new AskPassHelper()
 const mux = new MuxPool()
 const transport = new SshTransport(host, askpass, mux)
 mux.attach((socketPath, authority) => transport.exitMaster(socketPath, authority))
+
+// The page and the tool both reach the server through this one object, so the
+// live check drives the same code path the model drives rather than a parallel
+// hand-written one: the store and the secret are fakes, everything past `ops` is
+// the real thing.
+const ops = createOps({
+  runner: transport,
+  store: async () => fakeStore({ records: [record({ id: target.id, label: target.label, host: target.host, ...(target.user === undefined ? {} : { user: target.user }), ...(target.port === undefined ? {} : { port: target.port }), auth: auth.mode, pool: 'on', port: target.port, identityFile: target.identityFile, proxyJump: target.proxyJump })] }),
+  secrets: () => fakeSecrets({ password: auth.password !== undefined, passphrase: false, root: false }, { password: auth.password }),
+  askpass: () => ({ ready: askpass.ready, ...(askpass.path === undefined ? {} : { path: askpass.path }), ...(askpass.failure === undefined ? {} : { failure: askpass.failure }) }),
+  bounds: () => bounds,
+})
 
 /** One remote command, with its output collected the way `exec` collects it. */
 async function remote (command, options = {}) {
@@ -227,7 +242,10 @@ cases.grow = async () => {
   // pre-check said 0 bytes, the server had 2.5 MiB to say, and the copy stopped
   // with the ceiling unbroken rather than carrying all of it.
   check('a file that grew after the pre-check is refused by what it moved', out.status === 'refused-size' && (out.bytes ?? 0) > 0 && (out.bytes ?? 0) <= 1_048_576, `${String(out.status)} at ${String(out.bytes)} bytes, ceiling 1048576`)
-  check('the refusal proves the source produced more than the pre-check saw', (out.bytes ?? 0) > 1_015_000 && /with more where they came from/.test(String(out.message)), `${String(out.bytes)} bytes and the ceiling was reached`)
+  // Where the ceiling was reached is a matter of chunk sizes, so the claim that is
+  // actually being proven is the one in the message: bytes moved past what the
+  // pre-check had seen, and the server still had more to send.
+  check('the refusal proves the source produced more than the pre-check saw', (out.bytes ?? 0) > 1_015_000 - 65_536 && /with more where they came from/.test(String(out.message)), `${String(out.bytes)} bytes delivered and the ceiling was reached`)
   check('the refusal names the copy as in-flight, not as a stat', out.limitMode === 'in-flight', String(out.limitMode))
   check('the stopped copy leaves no half file beside the destination', readdirSync(LOCAL).filter(name => name.includes('.dsh-part-')).length === 0)
   check('the destination still holds what it held before', readFileSync(local, 'utf8') === 'the answer that was there before')
@@ -474,8 +492,101 @@ cases.release = async () => {
   check('the lane admits the next copy after both interruptions', next.status === 'moved', next.status)
 }
 
-// ── run ─────────────────────────────────────────────────────────────────────
-const order = ['plain', 'grow', 'overwrite', 'modes', 'tilde', 'lane', 'tree', 'release']
+/**
+ * The guarded edit, against a file that has attributes worth keeping.
+ *
+ * The unit suite proves the *sequence* — guard, copy, replace, re-check, repair.
+ * What only a real server can prove is what the replacement does to the file's
+ * identity: that writing `cat >` through it leaves the inode, the mode, the
+ * owner, and a second hardlink pointing at the same bytes, and that an edit cut
+ * short in the middle of its body comes back at exactly the size it started at
+ * rather than somewhere in between.
+ */
+cases.edit = async () => {
+  const path = `${REMOTE}/edit.txt`
+  const link = `${REMOTE}/edit.link`
+  const original = 'worker_processes 1;\n# keep this line\n'
+  await remote(`mkdir -p ${q(REMOTE)} && printf 'worker_processes 1;\\n# keep this line\\n' > ${q(path)} && chmod 640 ${q(path)} && chown root:root ${q(path)} && ln -f ${q(path)} ${q(link)}`)
+  const canXattr = (await remote('command -v setfattr >/dev/null && echo yes || echo no')).stdout.trim() === 'yes'
+  if (canXattr) await remote(`setfattr -n user.live-check -v 1 ${q(path)} 2>/dev/null || true`)
+  const before = (await remote(`stat -c 'inode=%i mode=%a links=%h owner=%U:%G size=%s' ${q(path)}`)).stdout.trim()
+  const edited = await ops.editRemote({ target: TARGET_LABEL, path, oldText: 'worker_processes 1;', newText: 'worker_processes auto;' })
+  const after = (await remote(`stat -c 'inode=%i mode=%a links=%h owner=%U:%G size=%s' ${q(path)}`)).stdout.trim()
+  const now = (await remote(`cat -- ${q(path)}`)).stdout
+  const throughLink = (await remote(`cat -- ${q(link)}`)).stdout
+  evidence(`edit before: ${before}`)
+  evidence(`edit after:  ${after}`)
+  evidence(`first edit payload: ${JSON.stringify({ ok: edited.ok, status: edited.status, message: edited.message, hint: edited.hint, exitCode: edited.exitCode, versionChecked: edited.versionChecked, backup: edited.backup, bytesBefore: edited.bytesBefore })}`)
+  check('a real edit changes the bytes it was asked to change', edited.ok === true && now === 'worker_processes auto;\n# keep this line\n', JSON.stringify(now.slice(0, 40)))
+  check('the guarded write kept the inode', before.split(' ')[0] === after.split(' ')[0], `${before.split(' ')[0]} → ${after.split(' ')[0]}`)
+  check('the guarded write kept the mode and the owner', before.split(' ')[1] === after.split(' ')[1] && before.split(' ')[3] === after.split(' ')[3], `${before.split(' ')[1]} ${before.split(' ')[3]}`)
+  check('the hardlink still points at the same file, and sees the new bytes', before.split(' ')[2] === after.split(' ')[2] && throughLink === now, `links ${before.split(' ')[2]} → ${after.split(' ')[2]}`)
+  check('the edit stated a version guard, or said it could not', edited.versionChecked === true, `versionChecked ${String(edited.versionChecked)}`)
+  check('the backup names where the previous content is', edited.backup === `${path}.dsh-bak` && (await remote(`cat -- ${q(`${path}.dsh-bak`)}`)).stdout === original, String(edited.backup))
+  if (canXattr) {
+    const carried = (await remote(`getfattr -n user.live-check --only-values ${q(path)} 2>/dev/null`)).stdout.trim()
+    check('an extended attribute survives the edit', carried === '1', `getfattr said ${JSON.stringify(carried)}`)
+  } else {
+    evidence('observation: this server has no setfattr, so extended attributes were not exercised here')
+  }
+
+  // The window the guard exists for: another writer landing between this call's
+  // read and its write. Repeated, so the number says how open the window really
+  // is on a live connection rather than only that the code path exists — the
+  // deterministic per-branch coverage is the offline suite's job.
+  let staleSeen = 0
+  let wroteSeen = 0
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    await remote(`printf 'worker_processes 1;\n# keep this line\n' > ${q(path)}`)
+    const racing = ops.editRemote({ target: TARGET_LABEL, path, oldText: 'worker_processes 1;', newText: `MINE_${String(attempt)}` })
+    await new Promise(resolve => setTimeout(resolve, 40 + attempt * 30))
+    await remote(`printf '%s' ${q(`tampered ${String(attempt)}\n`)} >> ${q(path)}`)
+    const raced = await racing
+    if (raced.stale === true) staleSeen += 1
+    else if (raced.ok === true) wroteSeen += 1
+    const body = (await remote(`cat -- ${q(path)}`)).stdout ?? ''
+    evidence(`race ${String(attempt)}: ${raced.ok === true ? 'wrote' : raced.stale === true ? 'guard refused' : `refused (${String(raced.status)})`}; body ${JSON.stringify(body.slice(0, 30))}`)
+    // The invariant that holds whichever way the race fell: the file ends as one
+    // whole body, never a splice of the edit and the rival.
+    // Three outcomes are all whole files: the edit won, the guard refused it and
+    // the rival's bytes stand, or the original stands with the rival appended to
+    // it. A splice — part of the edit's body sitting inside someone else's file —
+    // is the one shape that must never appear.
+    const whole = /^(worker_processes|MINE_|tampered |$)/u.test(body)
+    const spliced = body.includes('MINE_') && body.includes('worker_processes')
+    check(`race ${String(attempt)}: the file ended as a whole body, not a splice`, whole && !spliced, JSON.stringify(body.slice(0, 30)))
+  }
+  evidence(`race outcomes: ${String(staleSeen)} refused by the version guard, ${String(wroteSeen)} wrote`)
+  check('the version guard fired against a real concurrent writer at least once', staleSeen >= 1, `${String(staleSeen)} of 6 attempts refused`)
+
+  // An edit cut short in the middle of its body. The repair child runs on its own
+  // clock — the reader stopped the *edit*, not the file's claim to be whole — and
+  // this case is what proves that decision was not decoration.
+  const cutPath = `${REMOTE}/cut-edit.txt`
+  const small = 'HEAD line\n'
+  await remote(`printf '%s' ${q(small)} > ${q(cutPath)}`)
+  const controller = new AbortController()
+  const interrupt = setTimeout(() => { controller.abort() }, 250)
+  const cut = await ops.editRemote({
+    target: TARGET_LABEL,
+    path: cutPath,
+    oldText: 'HEAD line',
+    newText: `NEW_${stamp}_${'y'.repeat(400 * 1024)}`,
+  }, controller.signal)
+  clearTimeout(interrupt)
+  const sizeNow = Number((((await remote(`wc -c < ${q(cutPath)} | tr -dc 0-9`)).stdout ?? '0').trim()) || '0')
+  evidence(`interrupted edit: status ${String(cut.status)}, ok ${String(cut.ok)}, restored ${String(cut.restored)}, started at ${String(small.length)} bytes, file now ${String(sizeNow)} bytes, backup ${String(cut.backup ?? 'none')}`)
+  check('an interrupted edit leaves a whole file, not a half-written one', sizeNow === small.length || sizeNow === (cut.bytesAfter ?? -1), `original ${String(small.length)}, intended ${String(cut.bytesAfter ?? -1)}, actual ${String(sizeNow)}`)
+  check('a stopped edit does not report itself as a success', cut.ok !== true, `ok ${String(cut.ok)} / ${String(cut.status)}`)
+  if (sizeNow === small.length && cut.status !== 'cancelled') {
+    check('a repaired file is reported as repaired', cut.restored === true, `restored ${String(cut.restored)}`)
+  }
+  const snaps = ((await remote(`ls ${q(REMOTE)} | grep -c 'dsh-snap-' || true`)).stdout ?? '0').trim()
+  check('the edit left no stray snapshot behind', snaps === '0', `snapshots: ${snaps}`)
+}
+
+
+const order = ['plain', 'grow', 'overwrite', 'modes', 'tilde', 'lane', 'tree', 'edit', 'release']
 process.stdout.write(`\n@jie2gg/dsh-plugin-ssh live check against "${TARGET_LABEL}"\nscratch: ${LOCAL} ⇄ ${REMOTE}\n\n`)
 
 let failure = null

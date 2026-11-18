@@ -245,8 +245,30 @@ test('edit replaces one exact match, backs up with cp -p, and writes with cat >'
   assert.equal(out.bytesBefore, 15) // one\nTARGET two\n
   assert.equal(out.bytesAfter, 13) // one\nKEPT two\n
   const run = built.state.calls.find(call => call.command.includes('cp -p'))
-  assert.match(run.command, /^cp -p -- '\/etc\/f' '\/etc\/f\.dsh-bak' && cat > '\/etc\/f'$/)
+  // The write is one child that guards, copies, replaces, and re-checks in that
+  // order — and the replacement goes *through* the file, not around it.
+  assert.match(run.command, /cp -p -- '\/etc\/f' '\/etc\/f\.dsh-bak' \|\| exit 22/)
+  assert.match(run.command, /cat > '\/etc\/f'; rc=\$\?/)
+  assert.match(run.command, /if \[ "\$size" != 13 \]; then exit 24; fi/)
+  assert.equal(run.command.includes('mv '), false)
   assert.equal(run.options.stdin, 'one\nKEPT two\n') // the whole new file, through stdin
+  // This fake server states no version (its read answer carries no marker line),
+  // and the result says the guard was off rather than pretending it ran.
+  assert.equal(out.versionChecked, false)
+  assert.equal(run.command.includes('stat -c'), false)
+})
+
+test('edit guards the write with the version the read was told, on a server that states one', async () => {
+  const built = editRunner(`ssh-plugin: 7|15|2026-01-01 00:00:00.000000000 +0800\none\nTARGET two\n`)
+  const out = await built.ops.editRemote({ path: '/etc/f', oldText: 'TARGET', newText: 'KEPT' })
+  assert.equal(out.ok, true)
+  assert.equal(out.versionChecked, true)
+  assert.equal(out.bytesBefore, 15, 'the marker line is not part of the file')
+  assert.equal(out.bytesAfter, 13)
+  const run = built.state.calls.find(call => call.command.includes('cp -p'))
+  assert.match(run.command, /if \[ "\$\(stat -c '%i\|%s\|%y' -- '\/etc\/f' 2>\/dev\/null\)" != '7\|15\|2026-01-01 00:00:00\.000000000 \+0800' \]/)
+  // The read and the write are the only two children a clean guarded edit needs.
+  assert.equal(built.state.calls.filter(call => call.kind === 'run').length, 2)
 })
 
 test('an ambiguous match reports the count and writes nothing', async () => {
@@ -280,7 +302,13 @@ test('edit refuses what it cannot see whole, and skips the backup on request', a
   const out = await noBackup.ops.editRemote({ path: '/f', oldText: 'b', newText: 'z', backup: false })
   assert.equal(out.backup, undefined)
   const run = noBackup.state.calls.find(c => c.command.includes('cat >'))
-  assert.equal(run.command.startsWith('cat > '), true) // no cp prefix
+  // `backup: false` is a promise about what is *left behind*, not about whether
+  // the edit kept a way back: the copy is still taken, under a private name, and
+  // removed only once the write has been verified. An edit that cannot make that
+  // copy refuses rather than betting the file on the channel.
+  assert.match(run.command, /cp -p -- '\/f' '\/f\.dsh-snap-/)
+  assert.match(run.command, /rm -f -- '\/f\.dsh-snap-/)
+  assert.equal(run.command.includes('.dsh-bak'), false)
 })
 
 // ── elevation: as (sudo) and su (root's own secret) ────────────────────────

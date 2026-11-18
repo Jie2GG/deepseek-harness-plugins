@@ -11,6 +11,8 @@
  * @module @jie2gg/dsh-plugin-ssh/edit
  */
 
+import { shellQuote } from './transport.ts'
+
 /** What the caller asked to replace. */
 export interface EditRequest {
   /** The file's current text. */
@@ -174,4 +176,153 @@ export function previewEdit(before: string, after: string, maxLines = 80): EditP
   const shown = truncated ? body.slice(0, maxLines) : body
   if (truncated) shown.push(`… ${String(body.length - maxLines)} more line(s) not shown`)
   return { text: after, diff: shown.join('\n'), bytesBefore, bytesAfter, truncated }
+}
+
+/**
+ * The exit codes one remote edit answers with, and what each one means about the
+ * server's file. They are stated apart from the shell text so `ops.ts` can map
+ * each to a sentence without re-reading the command, and so a test can name the
+ * branch it is driving.
+ */
+/** The file was gone by the time the child looked at it. */
+export const EDIT_MISSING = 20
+/** Another writer had already changed it, so this edit stopped. */
+export const EDIT_STALE = 21
+/** The safety copy could not be made, so nothing was written. */
+export const EDIT_BACKUP_FAILED = 22
+/** The body stopped arriving, or the child died with it half way in. */
+export const EDIT_WRITE_FAILED = 23
+/** The write ended but left a different number of bytes than were sent. */
+export const EDIT_SIZE_MISMATCH = 24
+/** The previous content could not be put back. */
+export const EDIT_RESTORE_FAILED = 25
+/** The copy came back, but not at the size it started at. */
+export const EDIT_RESTORE_UNVERIFIED = 26
+/** The answer never arrived, but the bytes did: there is nothing to put back. */
+export const EDIT_LANDED_UNCONFIRMED = 27
+
+/**
+ * The read an edit begins from: the file's bytes, and what the server says about
+ * those bytes at the same moment.
+ *
+ * The first line is a marker holding `stat`'s inode, size, and nanosecond
+ * modification time; everything after it is the file. Asking in the same round
+ * trip is deliberate — a second `stat` after the read would describe a file that
+ * had another trip's worth of time to change under it. A server whose `stat`
+ * cannot answer leaves the marker empty, and the edit then runs **without** the
+ * version guard rather than refusing: the safety copy and the byte check still
+ * stand, and the result says plainly that no version was compared.
+ * @param pathArg - the remote path, already shaped for the remote shell.
+ * @returns one POSIX command whose stdout is the marker line and the file.
+ */
+export function buildEditRead (pathArg: string): string {
+  return `if [ ! -f ${pathArg} ]; then exit ${EDIT_MISSING}; fi; `
+    + `printf 'ssh-plugin: %s\\n' "$(stat -c '%i|%s|%y' -- ${pathArg} 2>/dev/null)"; `
+    + `cat -- ${pathArg}`
+}
+
+/**
+ * Split the version marker a read answered with from the file itself.
+ * @param text - the raw stdout of {@link buildEditRead}.
+ * @returns the token to guard a write with (`undefined` when this server could
+ *   not state one), and the file's text.
+ */
+export function splitEditVersion (text: string): { version: string | undefined; content: string } {
+  const newline = text.indexOf('\n')
+  const head = (newline === -1 ? text : text.slice(0, newline)).trim()
+  const match = /^ssh-plugin:\s*(.*)$/u.exec(head)
+  if (match === null) {
+    // No marker at all: a shell that could not run `printf` the way the command
+    // asked, or an old server. The whole body is the file, and no guard applies.
+    return { version: undefined, content: text }
+  }
+  const token = (match[1] ?? '').trim()
+  return {
+    version: token === '' ? undefined : token,
+    content: newline === -1 ? '' : text.slice(newline + 1),
+  }
+}
+
+/**
+ * The write child: guard, copy, replace, and check — in that order, in one child.
+ *
+ * The order is the design. The version guard runs *inside* the same shell that
+ * truncates the file, so the window between noticing a change and making one is
+ * a shell builtin apart rather than a network round trip apart (and it is a
+ * window still, not a closed door: say so rather than implying a transaction).
+ * The safety copy comes before any write, because an edit that cannot make one
+ * has no way back, and an edit that writes anyway is betting someone else's
+ * file on a channel staying open. The body goes in through stdin, into the file
+ * itself — `cat >` through the existing inode, which is what keeps the owner,
+ * the mode, and every hardlink pointed at it. The size check at the end is what
+ * tells a completed write from a short one, which is the difference between
+ * reporting an edit and reporting a truncation.
+ * @param guards - the paths, the token from the read, the byte count the write
+ *   must leave behind, and whether the copy of the previous content stays for
+ *   the reader to find.
+ * @returns one POSIX command; the payload is its stdin.
+ */
+export function buildEditWrite (guards: {
+  pathArg: string
+  backupArg: string
+  version: string | undefined
+  expectedBytes: number
+  keepBackup: boolean
+}): string {
+  const { pathArg, backupArg, version, expectedBytes, keepBackup } = guards
+  const guard = version === undefined
+    ? ''
+    : `if [ "$(stat -c '%i|%s|%y' -- ${pathArg} 2>/dev/null)" != ${shellQuote(version)} ]; then echo 'ssh-plugin: the file changed after it was read' >&2; exit ${EDIT_STALE}; fi; `
+  const drop = keepBackup ? '' : ` rm -f -- ${backupArg};`
+  return `if [ ! -f ${pathArg} ]; then exit ${EDIT_MISSING}; fi; `
+    + guard
+    + `cp -p -- ${pathArg} ${backupArg} || exit ${EDIT_BACKUP_FAILED}; `
+    + `cat > ${pathArg}; rc=$?; `
+    + `if [ "$rc" -ne 0 ]; then exit ${EDIT_WRITE_FAILED}; fi; `
+    + `size=$(wc -c < ${pathArg} | tr -dc 0-9); `
+    + `if [ "$size" != ${String(expectedBytes)} ]; then exit ${EDIT_SIZE_MISMATCH}; fi;`
+    + drop
+}
+
+/**
+ * The child that looks at the file after a write went wrong, and puts right what
+ * it can.
+ *
+ * It answers with a marker line rather than only an exit code, because there are
+ * four different things that can be true at this moment and a caller that guesses
+ * between them will write a sentence the server does not support:
+ *
+ * - `landed` — the new bytes are there and only the answer was lost, so restoring
+ *   would undo an edit that finished;
+ * - `intact` — the file still holds the size it had before this call, which means
+ *   the write never truncated it and there is nothing to put back;
+ * - `restored` — the copy was still there, and the file came back at the size it
+ *   started at;
+ * - an exit of 25 or 26 — the copy is gone or the write back failed, and the file
+ *   is whatever half a body it happens to hold.
+ *
+ * Restoring goes *through* the file, not around it: `cp -p` onto an existing inode
+ * keeps the owner, the mode, and the hardlinks the edit itself was careful to
+ * keep.
+ * @param restore - the paths, the copy to restore from, the size the file had
+ *   before this edit, the size the edit meant to leave, and whether the copy of
+ *   the previous content stays where the reader can find it.
+ * @returns one POSIX command.
+ */
+export function buildEditRestore (restore: {
+  pathArg: string
+  backupArg: string
+  originalBytes: number
+  intendedBytes: number
+  keepBackup: boolean
+}): string {
+  const { pathArg, backupArg, originalBytes, intendedBytes, keepBackup } = restore
+  const finish = keepBackup ? 'true' : `rm -f -- ${backupArg}`
+  return `size=$(wc -c < ${pathArg} 2>/dev/null | tr -dc 0-9); `
+    + `if [ "$size" = ${String(intendedBytes)} ]; then echo 'ssh-plugin: landed'; exit ${EDIT_LANDED_UNCONFIRMED}; fi; `
+    + `if [ ! -f ${backupArg} ]; then echo "ssh-plugin: intact $size"; exit 0; fi; `
+    + `cp -p -- ${backupArg} ${pathArg} || { echo "ssh-plugin: unrecoverable $(wc -c < ${pathArg} 2>/dev/null | tr -dc 0-9)"; exit ${EDIT_RESTORE_FAILED}; }; `
+    + `after=$(wc -c < ${pathArg} | tr -dc 0-9); `
+    + `if [ "$after" != ${String(originalBytes)} ]; then echo "ssh-plugin: partial $after"; exit ${EDIT_RESTORE_UNVERIFIED}; fi; `
+    + `echo 'ssh-plugin: restored'; ${finish}`
 }

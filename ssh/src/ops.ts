@@ -16,7 +16,22 @@ import type { Bounds, CeilingLayers, ResolvedSettings } from './bounds.ts'
 import { SshError } from './types.ts'
 import type { AuthMode, ConnectionRecord, ConnectionView, ProbeOutcome, ResolvedConfig, RemoteRunResult, RemoteTransferResult, SshSettings, StoredSettings } from './types.ts'
 import { transfer } from './transfer.ts'
-import { applyEdit, previewEdit } from './edit.ts'
+import {
+  applyEdit,
+  previewEdit,
+  buildEditRead,
+  buildEditWrite,
+  buildEditRestore,
+  splitEditVersion,
+  EDIT_MISSING,
+  EDIT_STALE,
+  EDIT_BACKUP_FAILED,
+  EDIT_WRITE_FAILED,
+  EDIT_SIZE_MISMATCH,
+  EDIT_RESTORE_FAILED,
+  EDIT_RESTORE_UNVERIFIED,
+  EDIT_LANDED_UNCONFIRMED,
+} from './edit.ts'
 import { startRemoteJob } from './jobs.ts'
 import type { JobRegistry } from './jobs.ts'
 import { remotePathArg, shellQuote, leadingProgram, classifyCollectedRun } from './transport.ts'
@@ -111,8 +126,24 @@ export interface RemoteFileResult {
   bytesBefore?: number
   /** For `edit`: the size after the change. */
   bytesAfter?: number
-  /** For `edit`: the backup copy left behind, when one was taken. */
+  /**
+   * For `edit`: where a copy of the previous content survived this call — the
+   * `<path>.dsh-bak` the reader asked for, or the internal snapshot that had to
+   * stay because the write went wrong and could not be undone. Absent means no
+   * copy exists, which on a failed edit is the sentence worth reading.
+   */
   backup?: string
+  /** For `edit`: true when the write stopped because the file had changed under the read. */
+  stale?: boolean
+  /** For `edit`: true when a failed write was undone from the copy, and the size says so. */
+  restored?: boolean
+  /**
+   * For `edit`: whether this server stated an inode, size, and nanosecond mtime
+   * for the file, which is what a write is checked against before anything is
+   * truncated. False means the copy and the byte check still ran and no version
+   * was compared — not that the edit was unprotected, and not that it was.
+   */
+  versionChecked?: boolean
   /** For `edit`: true when the call previewed the change instead of writing it. */
   dryRun?: boolean
   /** For a `dryRun` edit: the line view of what would change, possibly cut short. */
@@ -272,6 +303,13 @@ export interface OpsDeps {
  * @param source - a record, or a draft target as the page submitted it.
  * @returns the probe fields.
  */
+/**
+ * How long a failed edit's repair child may take. It is not the edit's own
+ * deadline: the copy it reads back is already on the server, and the wait is a
+ * local one.
+ */
+const EDIT_REPAIR_BUDGET_MS = 30_000
+
 function targetOf(source: RemoteTarget): RemoteTarget {
   return {
     host: source.host,
@@ -1207,12 +1245,12 @@ export function createOps(deps: OpsDeps): Ops {
       const newText = typeof params.newText === 'string' ? params.newText : ''
       const quoted = remotePathArg(path)
       const target = { id: record.id, label: record.label, host: record.host }
-      const read = await runner.run(targetOf(record), settings, auth, `if [ ! -f ${quoted} ]; then exit 20; fi; cat -- ${quoted}`, {
+      const read = await runner.run(targetOf(record), settings, auth, buildEditRead(quoted), {
         ...(signal === undefined ? {} : { signal }),
       })
       stampCeilings(read, settings, notes)
       if (read.status !== 'succeeded') {
-        const missing = read.exitCode === 20
+        const missing = read.exitCode === EDIT_MISSING
         return {
           action: 'edit',
           ok: false,
@@ -1239,8 +1277,13 @@ export function createOps(deps: OpsDeps): Ops {
           hint: 'Raise the output ceiling in Settings → Remote connections, or replace the file with write.',
         }
       }
+      // The read answered with a version marker and then the file. A server whose
+      // `stat` could not state one leaves the marker empty, and the edit runs
+      // without the guard rather than refusing to run — the safety copy and the
+      // byte check still stand, and the result says no version was compared.
+      const { version, content } = splitEditVersion(read.stdout ?? '')
       const outcome = applyEdit({
-        content: read.stdout ?? '',
+        content,
         oldText,
         newText,
         ...(params.all === undefined ? {} : { all: params.all === true }),
@@ -1266,7 +1309,7 @@ export function createOps(deps: OpsDeps): Ops {
         // backup is taken, and the only thing dialed was the read this call
         // needed anyway. `matches` semantics on refusal are unchanged: a dry
         // run refuses an ambiguous match exactly like the real edit would.
-        const preview = previewEdit(read.stdout ?? '', outcome.text)
+        const preview = previewEdit(content, outcome.text)
         return {
           action: 'edit',
           ok: true,
@@ -1280,39 +1323,169 @@ export function createOps(deps: OpsDeps): Ops {
           bytesAfter: preview.bytesAfter,
           ...(preview.diff === '' ? {} : { diff: preview.diff }),
           ...(preview.truncated ? { diffTruncated: true } : {}),
+          // The preview tells the reader whether the write the same call would do
+          // is guarded: a dry run on a server that cannot state a version would
+          // overwrite whatever else has touched the file, and that is worth knowing
+          // before deciding the preview is enough.
+          versionChecked: version !== undefined,
           ...(read.durationMs === undefined ? {} : { durationMs: read.durationMs }),
           hint: 'Dry run: nothing was written and no backup was taken. The same call without dryRun applies this change.',
         }
       }
-      // Written back through the same inode with `cat >`, so the file keeps its
-      // owner and mode; a `cp` of a temp file over it would not. The optional
-      // backup is a `cp -p` first, which is cheap next to a remote round trip and
-      // is the only undo available on a server this plugin does not version.
-      // The trade, stated rather than hidden: the write is in place, not atomic.
-      // A child killed between truncation and the last byte leaves the file cut
-      // short — the backup is the undo — and a server-side change between the
-      // read and this write is overwritten without a version check. This is a
-      // preview-and-confirm flow, not a transaction.
-      const backupPath = `${path}.dsh-bak`
-      const prepare = params.backup === false ? '' : `cp -p -- ${quoted} ${remotePathArg(backupPath)} && `
-      const wrote = await runner.run(targetOf(record), settings, auth, `${prepare}cat > ${quoted}`, {
+      // The write is guarded, copied, checked, and — if any of that goes wrong
+      // after the copy — put back.
+      //
+      // What does not change is *how* the bytes land: `cat >` through the existing
+      // inode, so the owner, the mode, and every hardlink pointed at the file
+      // survive the overwrite. A temp file and a rename would be tidier to reason
+      // about and would quietly break all three (measured on a live server: an
+      // overwrite kept `inode 584, mode 640, links 2`, and the second name saw the
+      // new content because it is the same file). So the integrity comes from the
+      // copy taken before the truncation and the byte count taken after it, not
+      // from an atomic swap this plugin would have to apologise for later.
+      //
+      // What that buys, and what it does not: the version guard runs in the same
+      // shell that truncates the file, which shrinks the window between noticing a
+      // change and making one to a couple of shell builtins — it does not close
+      // it. This is still a preview-and-confirm flow, not a transaction.
+      const keepBackup = params.backup !== false
+      const backupPath = keepBackup
+        ? `${path}.dsh-bak`
+        : `${path}.dsh-snap-${process.pid.toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+      const backupArg = remotePathArg(backupPath)
+      const wrote = await runner.run(targetOf(record), settings, auth, buildEditWrite({
+        pathArg: quoted,
+        backupArg,
+        version,
+        expectedBytes: outcome.bytesAfter,
+        keepBackup,
+      }), {
         stdin: outcome.text,
         maxOutputBytes: settings.maxOutputBytes,
         ...(signal === undefined ? {} : { signal }),
       })
-      return {
-        action: 'edit',
-        ok: wrote.status === 'succeeded',
-        status: wrote.status,
+      const durationMs = (wrote.durationMs ?? 0) + (read.durationMs ?? 0)
+      const base = {
+        action: 'edit' as const,
         target,
         path,
-        type: 'file',
+        type: 'file' as const,
         replaced: outcome.count,
         bytesBefore: outcome.bytesBefore,
         bytesAfter: outcome.bytesAfter,
-        ...(params.backup === false ? {} : { backup: backupPath }),
-        ...(wrote.durationMs === undefined && read.durationMs === undefined ? {} : { durationMs: (wrote.durationMs ?? 0) + (read.durationMs ?? 0) }),
-        ...(wrote.status === 'succeeded' ? {} : { message: wrote.stderr ?? 'The remote write failed after the match was found.', hint: 'The file is unchanged only if the backup copy also failed; check with read.' }),
+        versionChecked: version !== undefined,
+        durationMs,
+      }
+      if (wrote.status === 'succeeded') {
+        // The write command removes the copy itself when the reader did not ask
+        // for one, so a success that says `backup` is a success whose previous
+        // content really is where the sentence says it is.
+        return { ...base, ok: true, status: 'succeeded' as const, ...(keepBackup ? { backup: backupPath } : {}) }
+      }
+      // A refusal that stopped before the file was touched needs no repair, and
+      // says so in the same breath it gives the reason.
+      if (wrote.exitCode === EDIT_STALE) {
+        return {
+          ...base,
+          ok: false,
+          status: 'exit-nonzero' as const,
+          stale: true,
+          message: `The file changed on ${record.host} between reading it and editing it, so this edit stopped before writing anything${version === undefined ? '' : ` (it was ${version} at the read)`}.`,
+          hint: 'Read the file again, then re-run the edit against what is there now.',
+        }
+      }
+      if (wrote.exitCode === EDIT_MISSING) {
+        return {
+          ...base,
+          ok: false,
+          status: 'exit-nonzero' as const,
+          type: 'missing' as const,
+          message: `${path} was gone by the time the write child reached for it.`,
+          hint: 'Read the path to see where it went, or write it fresh.',
+        }
+      }
+      if (wrote.exitCode === EDIT_BACKUP_FAILED) {
+        return {
+          ...base,
+          ok: false,
+          status: 'exit-nonzero' as const,
+          message: `The edit could not make its safety copy of ${path}, so nothing was written: ${(wrote.stderr ?? 'the server refused the copy').slice(0, 400)}`,
+          hint: 'Free space or fix the directory permissions on the server, then try again.',
+        }
+      }
+      // Past this point the file may hold a partial body: find out which, and put
+      // the previous content back through the same inode when it does.
+      // The repair does not ride the caller's signal. A reader who stopped the
+      // write stopped *the edit*; the file being whole again is not a thing they
+      // asked to cancel, and a repair child killed by the same abort that just cut
+      // the write short would leave the truncation with the undo sitting one path
+      // away, unapplied. It runs on its own short budget instead — the copy is on
+      // the server's own disk, so thirty seconds is generous, and the wait is
+      // bounded whatever the caller chose.
+      const repaired = await runner.run(targetOf(record), settings, auth, buildEditRestore({
+        pathArg: quoted,
+        backupArg,
+        originalBytes: outcome.bytesBefore,
+        intendedBytes: outcome.bytesAfter,
+        keepBackup,
+      }), {
+        maxOutputBytes: settings.maxOutputBytes,
+        timeoutMs: Math.min(settings.remoteTimeoutMs, EDIT_REPAIR_BUDGET_MS),
+      })
+      const reason = wrote.stderr === undefined || wrote.stderr === ''
+        ? `the write child ended ${String(wrote.exitCode ?? wrote.status)}`
+        : wrote.stderr
+      // The repair child says which of four things is true. Reading its answer,
+      // rather than assuming the write left a mess, is what keeps the sentences
+      // below supportable: a cancelled call that stopped before the truncation
+      // must not be reported as a repair, and a lost answer is not a failure to
+      // write.
+      const marker = /^ssh-plugin: (landed|intact|restored|unrecoverable|partial)( \d+)?/u.exec((repaired.stdout ?? '').trim())
+      const found = marker?.[1]
+      const atBytes = marker?.[2] === undefined ? undefined : Number(marker[2])
+      if (found === 'landed' || repaired.exitCode === EDIT_LANDED_UNCONFIRMED) {
+        return {
+          ...base,
+          ok: false,
+          status: wrote.status,
+          backup: backupPath,
+          message: `The answer from the write never arrived, but ${path} now holds the ${String(outcome.bytesAfter)} bytes this edit meant to send — the change is on the server, and the previous content is at ${backupPath}.`,
+          hint: 'Read the file to confirm it, rather than editing it again from memory.',
+        }
+      }
+      if (found === 'intact') {
+        // Nothing was truncated: the call stopped before the write reached the
+        // file, so there was nothing to put back and no copy to promise.
+        return {
+          ...base,
+          ok: false,
+          status: wrote.status,
+          message: `The edit stopped (${reason.slice(0, 300)}) before the write reached ${path}; the file still holds ${String(atBytes ?? outcome.bytesBefore)} bytes, as it did before.`,
+          hint: 'Run the same edit again, or read the file first if other writers are on it.',
+        }
+      }
+      if (found === 'restored' && repaired.status === 'succeeded') {
+        return {
+          ...base,
+          ok: false,
+          status: wrote.status,
+          ...(keepBackup ? { backup: backupPath } : {}),
+          restored: true,
+          message: `The write failed (${reason.slice(0, 300)}), so the previous content was put back at ${path}.`,
+          hint: 'Read the file to see it as it was, then try the edit again.',
+        }
+      }
+      // Everything else is the bad news, said with the byte count the server just
+      // reported rather than a guess about it.
+      const where = repaired.status === 'succeeded' ? 'the repair reported no copy of the previous content' : `the repair child ended ${String(repaired.exitCode ?? repaired.status)}`
+      return {
+        ...base,
+        ok: false,
+        status: wrote.status,
+        backup: backupPath,
+        restored: false,
+        message: `The write failed (${reason.slice(0, 300)}) and putting the file back did not succeed (${where}). ${path} holds ${String(atBytes ?? 'an unknown number of')} bytes; the previous content was ${String(outcome.bytesBefore)}.`,
+        hint: `Read ${backupPath} to recover the previous content by hand, then retry the edit.`,
       }
     },
 

@@ -607,7 +607,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           {
             type: 'object',
             additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'edit', required: true }, path: { type: 'string' }, type: { type: 'string', enum: ['file', 'directory', 'other', 'missing'] }, replaced: { type: 'integer' }, matches: { type: 'integer' }, bytesBefore: { type: 'integer' }, bytesAfter: { type: 'integer' }, backup: { type: 'string' }, dryRun: { type: 'boolean' }, diff: { type: 'string' }, diffTruncated: { type: 'boolean' }, size: { type: 'integer' }, durationMs: { type: 'integer' }, timeoutMs: { type: 'integer' }, outputBytes: { type: 'integer' }, notes: { type: 'array', items: { type: 'string' } }, stdoutSpillPath: { type: 'string' }, stderrSpillPath: { type: 'string' }, },
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'edit', required: true }, stale: { type: 'boolean' }, restored: { type: 'boolean' }, versionChecked: { type: 'boolean' }, path: { type: 'string' }, type: { type: 'string', enum: ['file', 'directory', 'other', 'missing'] }, replaced: { type: 'integer' }, matches: { type: 'integer' }, bytesBefore: { type: 'integer' }, bytesAfter: { type: 'integer' }, backup: { type: 'string' }, dryRun: { type: 'boolean' }, diff: { type: 'string' }, diffTruncated: { type: 'boolean' }, size: { type: 'integer' }, durationMs: { type: 'integer' }, timeoutMs: { type: 'integer' }, outputBytes: { type: 'integer' }, notes: { type: 'array', items: { type: 'string' } }, stdoutSpillPath: { type: 'string' }, stderrSpillPath: { type: 'string' }, },
           },
           {
             type: 'object',
@@ -1143,6 +1143,11 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
         if (typeof value.diff === 'string' && value.diff !== '') {
           for (const row of value.diff.split('\n')) lines.push(`| ${row}`)
           if (value.diffTruncated === true) lines.push('| (the diff above is cut short; the counts and byte sizes are complete)')
+          // A preview is only as strong as the write it previews. On a server that
+          // cannot state a version, the write that follows is not guarded against
+          // somebody else changing the file, and the preview should say so rather
+          // than let the reader assume both halves matched.
+          if (value.versionChecked === false) lines.push('| (this server stated no file version: the write would not be checked against a change made after this read)')
         }
       } else if (typeof value.matches === 'number') {
         // A refusal counts matches, not changes: nothing was written.
