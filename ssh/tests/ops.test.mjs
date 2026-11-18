@@ -902,6 +902,41 @@ test('a single-file upload stops at a temp sibling and only then takes the final
   assert.match(publish, /chmod/) // with the source's bits carried over
 })
 
+test('a copy the lane refused reaches the model as an ordinary failure, and touches nothing', async () => {
+  const dir = tempTree()
+  const local = join(dir, 'x')
+  writeFileSync(local, 'ORIGINAL')
+  const { ops, state } = build()
+  // The far end is there and the local end is writable, so the refusal the test is
+  // about has to be the one that arrives: an unreachable path would have been
+  // answered before the channel was ever asked for.
+  state.nextRun = () => ({ status: 'succeeded', at: iso, exitCode: 0, stdout: '8 regular file', stderr: '', durationMs: 1 })
+  // The transport throws when a third copy asks for the two-slot lane; the
+  // transfer layer turns that into the same shape every other refusal has. This
+  // is the compatibility question the design draft left open: a caller that only
+  // reads `status` must still learn why nothing moved, and must not have to catch
+  // an exception the way it would have to against the real transport.
+  state.streamFail = {
+    code: 'busy',
+    message: 'At most 2 file transfers may run at once, and all 2 slots are taken.',
+    hint: 'Wait for one to finish (it also frees room for other calls), stop a job with `job_kill`, or raise the ceiling in the plugin’s configuration.',
+  }
+  const out = await ops.download({ path: '/srv/x', localPath: local })
+  assert.equal(out.ok, false)
+  assert.equal(out.status, 'failed')
+  assert.match(out.message, /At most 2 file transfers may run at once/)
+  assert.match(String(out.hint), /raise the ceiling/u, 'and the answer says where the number comes from')
+  // The refusal is counted as in-flight-limit work, the same way a copy stopped by
+  // its byte ceiling is, so a reader sorting failures finds them together.
+  assert.equal(out.limitMode, 'in-flight')
+  assert.equal(out.overwrote, undefined, 'and it never claims to have replaced anything')
+  // The pre-flight question was still asked — a `stat` child costs one round trip
+  // and is what tells the caller the path is even there — but the copy itself was
+  // refused, so the local file kept the bytes it had and no part file was left.
+  assert.equal(state.calls.filter(c => c.kind === 'streamFile').length, 1, 'one copy child was asked for, and it was refused')
+  assert.equal(readFileSync(local, 'utf8'), 'ORIGINAL')
+  assert.deepEqual(readdirSync(dir).filter(name => name.includes('dsh-part')), [], 'and nothing was left behind to clean up')
+})
 test('an upload whose remote directory vanished between guard and copy says so in the useful direction', async () => {
   const dir = tempTree()
   const local = join(dir, 'x')

@@ -492,6 +492,28 @@ test('a spent spill budget stops asking the provider for a file, and says so', a
   assert.equal(second.stdoutSpillPath, '/tmp/dsh-subprocess-9-1-aaaa-stdout.log')
 })
 
+test('one transport carries one ledger for all its children, and a second transport starts clean', async () => {
+  const { SpillBudget } = await import('../lib/spill.js')
+  const budget = new SpillBudget(20, 64)
+  const provider = spillProvider({
+    stdout: '/tmp/dsh-subprocess-9-1-aaaa-stdout.log',
+    stderr: '/tmp/dsh-subprocess-9-1-bbbb-stderr.log'
+  })
+  const transport = new SshTransport(provider, undefined, undefined, budget)
+  const settings = { ...CEILINGS, maxSpillBytes: 16 }
+  const first = await transport.execute('/usr/bin/ssh', ['true'], settings, undefined, 5_000, 'test call')
+  assert.equal(first.spillNote, undefined, 'the first child is asked for a file')
+  const second = await transport.execute('/usr/bin/ssh', ['true'], settings, undefined, 5_000, 'test call')
+  // Not a per-server or per-conversation question: the ledger belongs to the
+  // transport, and the production wiring builds one transport per activation, so
+  // one Host process — however many targets it reaches — answers from one number.
+  assert.match(String(second.spillNote), /spill budget is spent/u, 'the second child on the same transport hears the refusal')
+  const alone = new SshTransport(provider, undefined, undefined)
+  assert.equal(alone.spill.used, 0)
+  assert.equal(alone.spill.max, 1_073_741_824, 'the shipped default, not the test’s small one')
+  const clean = await alone.execute('/usr/bin/ssh', ['true'], settings, undefined, 5_000, 'test call')
+  assert.equal(clean.spillNote, undefined, 'and a second activation is not punished for the first one’s output')
+})
 test('a stream copy never asks for a spill file, whatever the budget says', async () => {
   const { SpillBudget } = await import('../lib/spill.js')
   const budget = new SpillBudget(1024, 8)
@@ -793,6 +815,48 @@ test('a copy that outlives its deadline is a timeout, and one the reader stopped
   assert.equal(cancelled.outcome, 'cancelled') // not a timeout: nobody should go blame the server
 })
 
+test('the transfer lane comes back whole after success, failure, a timeout, and a cancellation', async () => {
+  // A slot that leaked on one of these four endings would look like a healthy
+  // plugin until the copy count crept to the ceiling and stayed there, so each
+  // ending is checked the same way: the copy is over, the counters read zero, and
+  // the next copy is admitted rather than refused.
+  const lane = { kind: 'file transfers', cap: 1 }
+  const sink = () => join(mkdtempSync(join(tmpdir(), 'dshssh-whole-')), 'f')
+  const endings = [
+    ['a clean exit', child => { child.push('hello'); child.exit(0) }],
+    ['a failing exit', child => { child.exit(1) }],
+    ['a deadline it outlived', () => undefined],
+    ['a reader that stopped', () => undefined],
+  ]
+  for (const [name, firstChild] of endings) {
+    let spawned = 0
+    const provider = streamProvider(child => {
+      spawned += 1
+      // The first copy plays the ending; the copy that follows has to answer, or
+      // the test would only be proving that a refusal was late.
+      if (spawned === 1) firstChild(child)
+      else { child.push('next'); child.exit(0) }
+    })
+    const transport = new SshTransport(provider)
+    const settings = { ...COPY_SETTINGS, graceMs: 10 }
+    const controller = new AbortController()
+    // A reader that had already gone when the call was made is the case that can
+    // leak: the slot was taken before the child was asked for anything, and only
+    // the `finally` around the copy gives it back. The cancellation that lands
+    // mid-copy, with bytes on the wire, is the live check's question, not this one.
+    if (name === 'a reader that stopped') controller.abort(new Error('the conversation went away'))
+    const deadlineMs = name === 'a deadline it outlived' ? 30 : 5_000
+    const out = await transport.streamFile('/usr/bin/ssh', ['host', 'cat -- /a'], settings, undefined, deadlineMs, 'file transfer', { direction: 'download', localPath: sink(), maxBytes: 1024 }, controller.signal, lane)
+    const expected = name === 'a deadline it outlived' ? 'timeout' : name === 'a reader that stopped' ? 'cancelled' : 'exit'
+    assert.equal(out.outcome, expected, `${name}: ended as ${expected}`)
+    assert.equal(transport.transfersInFlight, 0, `${name}: the lane was handed back`)
+    assert.equal(transport.inFlight, 0, `${name}: and so was the operation slot`)
+    const next = await transport.streamFile('/usr/bin/ssh', ['host', 'cat -- /b'], settings, undefined, 5_000, 'file transfer', { direction: 'download', localPath: sink(), maxBytes: 1024 }, undefined, lane)
+    assert.equal(next.outcome, 'exit', `${name}: the copy after it got in`)
+    assert.equal(transport.transfersInFlight, 0)
+  }
+})
+
 test('a copy whose child exits nonzero keeps the server’s explanation', async () => {
   const local = tempLocal()
   const provider = streamProvider(child => {
@@ -824,6 +888,11 @@ test('the copies over the ceiling are refused against the same lane the commands
   assert.equal(err?.code, 'busy')
   assert.match(err.message, /At most 2 file transfers may run at once/)
   assert.equal(transport.transfersInFlight, 2, 'a refusal spends no slot')
+  // The refusal lands where the lane is taken, before the child exists: the third
+  // copy asked the provider for nothing, so it moved no bytes, opened no part
+  // file, and left the server untouched. A ceiling that refused only after
+  // spawning would still be a ceiling, but it would be paying for the answer.
+  assert.equal(provider.children.length, 2, 'the refused copy never reached the wire')
   // A plain command is not stopped by a crowded transfer lane: that reservation
   // exists so a long copy can never busy-lock the plugin.
   const room = await transport.run({ host: '10.0.0.9' }, { ...COPY_SETTINGS, maxSpillBytes: 0 }, {}, 'true', { timeoutMs: 30 })

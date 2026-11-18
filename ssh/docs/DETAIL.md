@@ -251,11 +251,11 @@ call rather than the next restart:
 | `transferTimeoutMs` / `maxTransferTimeoutMs` | 5 min | 30 min | The whole budget of one copy, on its own clock: a transfer never borrows the command's 30 s, and a call's `timeoutMs` on the transfer actions reads as "how long to wait for the copy" |
 | `maxTransferFiles` | 500 | — | Pre-check cap on how many files one recursive upload may carry, counted at walk time |
 | `maxTransferTotalBytes` | 512 MiB | — | Pre-check cap on the cumulative bytes of one recursive upload, also at walk time |
-| `maxConcurrentTransfers` | 2 | 16 | How many copies may hold one of the 16 operation slots at once, so transfers cannot starve commands |
+| `maxConcurrentTransfers` | 2 | 16 | How many copies may hold one of the 16 operation slots at once, so transfers cannot starve commands; a copy turned away by a full lane answers as an ordinary `failed` result, with the lane quoted in `message` |
 | `maxRunningJobs` | 8 | 16 | How many explicitly backgrounded jobs may hold a slot at once; the rest stay reserved for foreground calls |
 | `probeTimeoutMs` | 30 s | — | How long a connectivity test waits; the page has no field for it |
 | `statTimeoutMs` | 10 s | — | The size, type, and tree-counting questions a copy asks before moving bytes |
-| `maxSpillBytes` | 64 MiB | — | How large a spill file may grow; `0` writes none, and the result says there is no file to look for |
+| `maxSpillBytes` | 64 MiB | — | How large a spill file may grow; `0` writes none, and the result says there is no file to look for. The whole-process budget below can also stop the asking, and says so |
 | `promoteOnTimeout` | on | — | Hand a command that runs out of time to the job registry instead of killing it |
 | `graceMs` | 2 s | — | SIGTERM to SIGKILL grace for a child |
 
@@ -285,6 +285,16 @@ classified result.
   configures no file at all and the result says so, and a stream larger than
   `maxSpillBytes` has its spill abandoned and keeps only the in-memory tail. Those
   files live in the system temp directory, not in this conversation's workspace.
+  What this plugin owns is the asking: one budget per Host process — 1 GiB of
+  spilled bytes across 64 files — carried by the transport and shared by every
+  target that process reaches, not per server and not per conversation. It is a
+  **stopping threshold, not a hard cap**: a grant is never cut down to what is left
+  (a file the provider runs out of room for gets deleted, which is worse than never
+  having one), so the total is allowed past the number by the child whose report
+  tipped it plus whatever else was in flight — one child may fill both of its faces
+  up to `maxSpillBytes`, which puts the reachable worst case near 3 GiB at the
+  defaults. Once the number is passed the next child keeps only its in-memory tail,
+  and the answer says out loud that the budget decided it.
 - A downloaded file is listed among the conversation's changes, the same way an edited
   workspace file is, because the plugin asks the file pipeline for permission before the
   copy starts. Two honest caveats: only the first change to a path within a turn keeps a
@@ -335,7 +345,11 @@ classified result.
   much a `stat` once said. A **tree** rides `scp -r` for its layout and symlink
   behaviour, and is measured before it moves: the local walk for an upload, one
   enumeration on the server for a download, and the result says which kind of
-  ceiling answered (`limitMode`). Both directions land where they belong: a
+  ceiling answered (`limitMode`). A copy turned away because the lane was full is
+  the same kind of answer: the transport throws `busy`, the copy layer turns that
+  into a failed result quoting the lane and the way out, and no byte is moved;
+  the settings surface and a direct transport caller still see the thrown error.
+  Both directions land where they belong: a
   download in a temporary sibling renamed in only on a clean finish, an upload in
   a sibling on the server that then takes its final name *through* an existing
   file — keeping its inode, mode, owner and hardlinks — or by rename with the

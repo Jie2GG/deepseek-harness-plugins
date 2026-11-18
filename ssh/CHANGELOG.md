@@ -44,6 +44,26 @@ count is not an answer about content.
   be written back, a tampered copy, a concurrent same-length rewrite — and the
   ops- and tool-layer fakes now speak the marker protocol instead of being told
   the answer.
+- **Pinned in words — what the spill budget promises, and what it does not.** The
+  per-Host-process ledger (1 GiB across 64 files) is a stopping condition on the
+  *asking*, not a cap on bytes already on their way: a grant is never trimmed to
+  what is left, and one child's two faces draw on the same grant, so the total is
+  allowed to pass the threshold by the faces in flight when it tipped — near
+  3 GiB at the shipped defaults rather than exactly 1 GiB. No number moved this
+  round (the design draft's 256 MiB never reached the code, and changing a budget
+  without a product decision is not this round's job); the prose around it did,
+  and the constants, the refusal after the tip, and the fact that a second
+  transport starts with a clean ledger are now anchored by tests.
+- **Pinned in words — a copy turned away by a full transfer lane.** An `upload`
+  or `download` that finds all its slots taken answers in the same vocabulary as
+  any other refused copy — `status: 'failed'`, the lane quoted in `message`, the
+  way out in `hint`, nothing moved — rather than throwing, and that has been the
+  behaviour since 0.0.34 without being written down. It is tested at each surface
+  that can answer differently: the transport refuses before a child is asked for
+  bytes and gives the lane back whole after success, failure, a timeout and a
+  cancellation; the copy layer carries the busy sentence through intact; the
+  settings surface and a direct transport caller still get the thrown `busy`
+  error (409 over rpc).
 
 ## 0.0.34
 

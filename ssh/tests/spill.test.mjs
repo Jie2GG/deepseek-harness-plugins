@@ -99,3 +99,66 @@ test('the summary line quotes both budgets and the refusals, for the settings ca
   assert.equal(budget.ask(64).maxBytes, 0, 'the file limit answered before the byte limit did')
   assert.equal(budget.summary(), '70 of 1000 bytes spilled in 2 of 2 file(s), 1 child(ren) asked without')
 })
+
+// ── the shipped numbers: what a Host process is actually holding itself to ────
+test('the shipped spill budget is one gigabyte and sixty-four files, stated as constants', () => {
+  // Nothing else in the suite anchors the default, and this is the number the
+  // design draft, the README and the delivery report have each quoted differently.
+  // A silent change here is a policy change, so it has to break a test.
+  assert.equal(spill.SPILL_BUDGET_BYTES, 1_073_741_824)
+  assert.equal(spill.SPILL_BUDGET_FILES, 64)
+  const budget = new spill.SpillBudget()
+  assert.deepEqual([budget.max, budget.fileMax], [spill.SPILL_BUDGET_BYTES, spill.SPILL_BUDGET_FILES])
+  // The single-stream ceiling a profile may set (64 MiB by default) is smaller
+  // than the whole-process budget, which is the arithmetic the constant is
+  // derived from: sixteen slots, two faces each, at that per-stream default.
+  assert.equal(budget.ask(67_108_864).maxBytes, 67_108_864, 'a default child is granted its whole configured ceiling')
+  assert.equal(budget.ask(2 * spill.SPILL_BUDGET_BYTES).maxBytes, spill.SPILL_BUDGET_BYTES, 'and a profile above the budget is held to it')
+})
+
+test('the threshold is a stopping condition: one settled child is allowed past it, and the next is refused', () => {
+  // The claim the prose has to keep honest. A grant is never cut to the
+  // remainder, and bytes are charged when a child settles, so the total passes
+  // the number by the faces of the child whose report tipped it — and stops.
+  const budget = new spill.SpillBudget(100, 64)
+  const wanted = 60
+  for (let child = 0; child < 5; child += 1) {
+    if (budget.ask(wanted).maxBytes === 0) break
+    budget.observe([
+      { path: `/tmp/dsh-subprocess-1-${String(child)}-aaaa-stdout.log`, bytes: wanted },
+      { path: `/tmp/dsh-subprocess-1-${String(child)}-bbbb-stderr.log`, bytes: wanted },
+    ])
+  }
+  assert.equal(budget.used, 120, 'passed the threshold by one child, not clamped to it')
+  assert.ok(budget.used - 100 <= 2 * wanted, 'and a serial run overshoots by at most one child’s two faces')
+  assert.equal(budget.refusals, 1, 'the next child is the one that hears about it')
+  assert.match(budget.ask(wanted).note ?? '', /spill budget is spent \(120 of 100 bytes already written\)/u)
+})
+
+test('one budget instance says nothing to another, which is what per Host process means', () => {
+  // The ledger belongs to the object, not to the module: two transports — two
+  // plugin activations in one process, or this suite and a running Host — do not
+  // see each other's spend. The production wiring builds exactly one transport
+  // per activation, so one Host process carries exactly one of these.
+  const first = new spill.SpillBudget(10, 64)
+  const second = new spill.SpillBudget(10, 64)
+  first.observe([{ path: '/tmp/a.log', bytes: 40 }])
+  assert.equal(first.used, 40)
+  assert.equal(second.used, 0)
+  assert.equal(second.ask(8).maxBytes, 8, 'and the second still grants its child a spill file')
+})
+
+test('a path reported twice is charged once, and a refusal names which limit answered', () => {
+  // A backgrounded job's stream grows between reports; counting it again would
+  // empty the budget out of one long log. The conservative direction is to
+  // understate spend nobody can re-measure, not to punish the next child.
+  const budget = new spill.SpillBudget(1_000, 2)
+  budget.observe([{ path: '/tmp/j.log', bytes: 400 }])
+  budget.observe([{ path: '/tmp/j.log', bytes: 900 }])
+  assert.equal(budget.used, 400)
+  assert.equal(budget.files, 1)
+  budget.observe([{ path: '/tmp/k.log', bytes: 300 }])
+  const refused = budget.ask(64)
+  assert.equal(refused.maxBytes, 0)
+  assert.match(String(refused.note), /2 of 2 files already written/u)
+})

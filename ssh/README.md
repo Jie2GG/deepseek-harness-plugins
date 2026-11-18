@@ -188,7 +188,15 @@ gone, and the job lives until it settles, is killed, loses its owner, or the Hos
 exits, holding one of the 16 operation slots the while. Of those 16, at most
 `maxConcurrentTransfers` (default 2) may be held by file copies, so two large
 transfers can never starve every command; a copy refused by that ceiling is told
-which ceiling it hit. A transfer runs on its own clock —
+which ceiling it hit, in the shape that call already answers in. An `upload` or
+`download` comes back as the ordinary failure a too-large copy produces —
+`status: "failed"`, the lane quoted in `message`, the way out in `hint`, and
+nothing moved — because a reader of those actions should meet one vocabulary
+whether the copy was too big, too late, or simply not welcome while two others
+were already moving. A caller that reaches the transport directly, and the
+settings surface, still get the thrown `busy` error (409 over rpc), and an
+explicitly backgrounded command that cannot get a job slot is refused in the same
+frame it was asked in. A transfer runs on its own clock —
 `transferTimeoutMs` (default 5 minutes, capped at `maxTransferTimeoutMs`,
 30 minutes) — never the command's 30 s, because a permitted copy over a slow
 link legitimately runs for minutes, and `scp` itself has no size limit of its
@@ -778,11 +786,16 @@ still open:
   a stream passes its ceiling — stay the **provider's**. It owns the directory,
   closes them, keeps completed ones until something outside the process cleans
   them, and no consumer in this harness unlinks them, so this plugin unlinks none
-  of them either. What it does own is the asking: one budget per Host process
-  (1 GiB, 64 files), grants never cut down to the remainder (a spill file the
-  provider runs out of room for is *deleted*), the total allowed to pass the
-  ceiling by at most the stream in flight, and an answer that says out loud when
-  the budget is why there is no file.
+  of them either. What it does own is the asking: one budget per Host process (1 GiB total, 64 files), held by the
+  transport and shared by every target that process reaches — not per server, not
+  per conversation. Grants are never cut down to the remainder (a spill file the
+  provider runs out of room for is *deleted*, which is worse than no file at all),
+  so the number is a **stopping condition rather than a hard cap**: it bounds when
+  the asking stops, not how large the directory gets. What can pass it is the child
+  whose report tipped it plus whatever else was in flight — one child may write on
+  both of its faces, up to `maxSpillBytes` each — so at the defaults the reachable
+  ceiling is nearer 3 GiB than 1 GiB, and a profile that raises `maxSpillBytes`
+  raises that too. An answer says out loud when the budget is why there is no file.
 - The plugin's own temp directories — the askpass helper's and the control
   sockets' — are named after the process that made them, and a sweep at startup
   collects what a dead id left. A name from before the id is judged by three days

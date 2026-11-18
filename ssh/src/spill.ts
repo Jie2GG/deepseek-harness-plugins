@@ -13,24 +13,33 @@
  * streams each, and a per-stream ceiling of 64 MiB is a theoretical two gigabytes
  * of recovery files that one busy stretch could produce, and the number arrives
  * only if somebody multiplies three constants in a different file. So the ceiling
- * is stated here as one budget per Host process: streams are granted spill out of
- * what is left, and when the budget is spent the next child is asked to keep only
- * its in-memory tail — which is exactly the pre-spill behaviour, and the reason
- * the answer says so rather than reporting a bare `truncated`.
+ * is stated here as one budget per Host process: each child is offered spill up to
+ * the ceiling it asked for, the offer is withdrawn once the budget has been passed,
+ * and the next child is then asked to keep only its in-memory tail — which is
+ * exactly the pre-spill behaviour, and the reason the answer says so rather than
+ * reporting a bare `truncated`.
  *
  * A grant is not a reservation, and it is never cut down. Bytes leave the budget
- * when the provider *reports* a spill — after the child has settled — so the
- * moment a grant could be sized to what is left, the stream that receives it could
- * outgrow the grant and have its file deleted by the provider again, which is the
- * one outcome worse than no spill file: a truncated answer, a writer who tried,
- * and no path to read. So each stream is handed the ceiling it asked for (held to
- * the whole-process number), and the total is allowed to pass the ceiling by at
- * most one stream. The budget stops the *next* child, and the note it gets says
- * which of the two limits — bytes or files — was already spent.
+ * when the provider *reports* a spill — after the child has settled — so at the
+ * moment a grant is handed out, nothing here can know how long the stream that
+ * receives it will turn out to be. Sizing a grant to the remainder would risk the
+ * one outcome worse than no spill file: a stream outgrowing the number it was
+ * handed, its file deleted by the provider again, and the reader left with a
+ * truncated answer, a writer who tried, and no path to read. So each child is
+ * handed the ceiling it asked for (held to the whole-process number) and both of
+ * its faces may write up to that, and the total is allowed to pass the number: by
+ * the two faces of the child whose report tipped it, and by the faces of every
+ * child already in flight at the moment it tipped.
  *
- * That makes the number a stopping condition rather than a hard cap, and the
- * difference matters enough to state: a profile that sets `maxSpillBytes` above the
- * budget will see exactly one stream larger than the budget, and no more.
+ * Which is to say the number is a **stopping condition, not a hard cap**: the
+ * guarantee is that the asking stops, not that the provider's directory stays
+ * under a size. At the defaults the worst case is the 2 GiB the arithmetic above
+ * describes arriving on top of what had already been reported when the threshold
+ * tipped, so a Host process is bounded near 3 GiB rather than at 1 GiB, and a
+ * profile that raises `maxSpillBytes` raises that ceiling too — the per-stream
+ * value is a configuration knob, the whole-process budget is a constant. The
+ * budget stops the *next* child, and the note it gets says which of the two
+ * limits — bytes or files — was already passed.
  *
  * The count is taken from what the provider reports back (the whole-stream offset
  * of a read that named a spill file), not from a `stat` of somebody else's
@@ -56,7 +65,7 @@ export const SPILL_BUDGET_BYTES = 1_073_741_824
  */
 export const SPILL_BUDGET_FILES = 64
 
-/** What the budget hands out for one stream of one child. */
+/** What the budget hands out for one child — both of its faces draw on this. */
 export interface SpillGrant {
   /** Bytes of spill this child may create; `0` means ask the provider for none. */
   maxBytes: number
@@ -65,7 +74,11 @@ export interface SpillGrant {
 }
 
 /**
- * One Host process's spill accounting.
+ * One ledger of spilled bytes. It belongs to a transport instance, and the
+ * production wiring creates one transport per plugin activation, so in the product
+ * this is one accounting per Host process — shared by every target that process
+ * reaches, not per server and not per conversation. A profile that assembles two
+ * transports gets two ledgers, and neither knows what the other has spent.
  *
  * Deliberately stateless about *where* the files live: the provider owns the
  * paths, and this class only counts the ones it asked for. It is not a resource
@@ -116,8 +129,11 @@ export class SpillBudget {
   }
 
   /**
-   * What one stream may ask the provider for.
-   * @param wanted - the configured per-stream ceiling, in bytes.
+   * What one child may ask the provider for.
+   * @param wanted - the configured per-child ceiling, in bytes (the
+   *   `maxSpillBytes` a target resolved to). A child's stdout and stderr draw on
+   *   this one grant together, which is why the total can pass the budget by two
+   *   faces rather than one.
    * @returns the ceiling to hand down, and the note to say out loud when the
    *   budget was what decided it.
    */
@@ -128,11 +144,11 @@ export class SpillBudget {
     // once the child has settled — so a grant cannot be cut to the remainder
     // without risking the worse outcome: a file written and then *discarded*
     // because the stream outgrew the number it was handed, leaving the reader with
-    // a truncated answer and no path at all. Each stream is therefore granted what
-    // it asked for, held to the whole-process ceiling, and the total is allowed to
-    // pass the ceiling by at most one stream — which is stated here rather than
-    // hidden, because it is the price of the difference between "bounded" and
-    // "hoped for".
+    // a truncated answer and no path at all. Each child is therefore granted what
+    // it asked for, held to the whole-process ceiling, and both faces of that child
+    // draw on the one grant; the total is allowed to pass the ceiling by the faces
+    // in flight when it tipped. Stated rather than hidden, because it is the price
+    // of the difference between "bounded" and "hoped for".
     const spent = this.#used >= this.#max
     const full = this.#files.size >= this.#fileMax
     if (spent || full) {
