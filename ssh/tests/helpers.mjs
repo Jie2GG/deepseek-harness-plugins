@@ -27,6 +27,8 @@ export function fakeRunner () {
     // What the pool looks like from ops.ts: ready, and holding nothing.
     liveMasters: 0,
     transfersInFlight: 0,
+    // The shape the real transport reports through its `spill` getter.
+    spill: { used: 0, files: 0, refusals: 0, max: 0 },
     mux: { ready: true, failure: undefined, liveMasters: 0 },
     /** A lease that shares nothing but records that a call asked. */
     share (target, auth) {

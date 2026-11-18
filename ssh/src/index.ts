@@ -26,7 +26,9 @@ import type { JobRegistry } from './jobs.ts'
 import { effectiveApprovalPolicy } from './approval.ts'
 import { TargetStore } from './store.ts'
 import { TargetSecrets } from './secrets.ts'
+import { tmpdir } from 'node:os'
 import { AskPassHelper } from './askpass.ts'
+import { sweep } from './tmpgc.ts'
 import { MuxPool } from './pool.ts'
 import { SshTransport } from './transport.ts'
 import { createOps } from './ops.ts'
@@ -115,6 +117,10 @@ export function apply(ctx: Context, config: SshConfig): void {
     // Read per call, never snapshotted: a volatile config value that was copied at
     // activation would keep last week's cap until the Host restarted.
     bounds: () => readBounds(config),
+    // What this process asked the provider to keep on disk, and what the last
+    // startup collected: both are answers a reader needs when a result says
+    // “truncated” or a directory they expected is gone.
+    observability: () => ({ spill: runner.spill, temp: collected }),
     // The model chooses between the saved aliases, and the tool's description is
     // frozen at definition time, so an inventory change means re-registering.
     onInventoryChanged: () => { rerenderRemoteTool() },
@@ -213,6 +219,37 @@ export function apply(ctx: Context, config: SshConfig): void {
   rerenderRemoteTool()
   const handler = createRpcHandler(ops)
 
+  // What the last startup collected from the temp namespace, kept only so the
+  // settings card can say what it did rather than leave the reader to grep a log.
+  // Summarised down to the path and the reason: the age and the process id behind
+  // a decision are the sweep's working, not the page's answer.
+  let collected: { scanned: number; removed: { path: string; reason: string }[]; kept: { path: string; reason: string }[]; errors: { path: string; message: string }[] } | undefined
+
+  /**
+   * Take back what earlier generations of this plugin could not, because they were
+   * killed instead of unloaded.
+   *
+   * Runs after this activation has its own directories, so the ones still in use
+   * are recognised as ours instead of being judged by their age — and never
+   * awaited by the first call: a crashed generation's empty directory is worth
+   * collecting, and is not worth delaying a connection for.
+   */
+  async function collectResidue(): Promise<void> {
+    const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+    if (uid === undefined) return
+    const mine = [askpass.directory, mux.directory].filter((path): path is string => path !== undefined)
+    const scanned = await sweep({ root: tmpdir(), uid, self: mine })
+    collected = {
+      scanned: scanned.scanned,
+      removed: scanned.removed.map(entry => ({ path: entry.path, reason: entry.verdict.reason })),
+      kept: scanned.kept.map(entry => ({ path: entry.path, reason: entry.verdict.reason })),
+      errors: scanned.errors,
+    }
+    if (collected.removed.length > 0 || collected.errors.length > 0) {
+      ctx.logger.info(`ssh: collected ${String(collected.removed.length)} abandoned temp director${collected.removed.length === 1 ? 'y' : 'ies'} of ${String(collected.scanned)} in the namespace (${String(collected.kept.length)} left: ${collected.kept.map(entry => entry.reason).join(', ') || 'nothing'}${collected.errors.length === 0 ? '' : `, ${String(collected.errors.length)} error(s)`})`)
+    }
+  }
+
   ctx.effect(async () => {
     const helper = await askpass.prepare()
     if (helper === undefined) {
@@ -222,6 +259,11 @@ export function apply(ctx: Context, config: SshConfig): void {
     if (sockets === undefined) {
       ctx.logger.warn(`ssh: no private directory for control sockets, so calls will not share connections: ${mux.failure ?? 'unknown reason'}`)
     }
+    // Fire-and-forget, and loud when it fails: the sweep is housekeeping a
+    // started Host does not need before it can answer its first call.
+    void collectResidue().catch((error: unknown) => {
+      ctx.logger.warn(`ssh: the temp-namespace sweep did not run: ${error instanceof Error ? error.message : String(error)}`)
+    })
     return async () => {
       // Close the masters first: the exits are children, and the askpass helper is
       // the last thing any of them could still need.

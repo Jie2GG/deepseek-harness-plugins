@@ -7,7 +7,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
-import { shellQuote, leadingProgram, classifyProbe, classifyRun, tail, HOST_KEY_SETTING, SshTransport, probeArgvTail } from '../lib/transport.js'
+import { shellQuote, leadingProgram, classifyProbe, classifyRun, classifyCollectedRun, tail, HOST_KEY_SETTING, SshTransport, probeArgvTail, remotePathArg, TRANSFER_LANE } from '../lib/transport.js'
 
 test('shellQuote makes any path one word for the remote shell', () => {
   assert.equal(shellQuote('/tmp/a b'), "'/tmp/a b'")
@@ -432,6 +432,65 @@ test('the ssh -G view carries the same IdentitiesOnly a real child gets', async 
   // A resolve card that showed a different configuration than the children run
   // would manufacture drift out of nothing.
   assert.match(argv, /-i \/home\/deploy\/\.ssh\/id_ed25519 -o IdentitiesOnly=yes/u)
+})
+
+// ── the spill budget: what this process will ask the provider to keep ───────
+test('a spent spill budget stops asking the provider for a file, and says so', async () => {
+  const { SpillBudget } = await import('../lib/spill.js')
+  // A budget two of these streams fit into and a third does not.
+  const budget = new SpillBudget(20, 64)
+  const wanted = 16  // 8 bytes of stdout + 13 of stderr outgrows it on the first child
+  const provider = spillProvider({
+    stdout: '/tmp/dsh-subprocess-9-1-aaaa-stdout.log',
+    stderr: '/tmp/dsh-subprocess-9-1-bbbb-stderr.log'
+  })
+  const transport = new SshTransport(provider, undefined, undefined, budget)
+  const settings = { ...CEILINGS, maxSpillBytes: wanted }
+  const first = await transport.execute('/usr/bin/ssh', ['true'], settings, undefined, 5_000, 'test call')
+  // The first child is handed the ceiling it configured, and the provider's answer
+  // is charged against the process: 8 bytes of stdout reported with a spill path.
+  assert.deepEqual(provider.seen[0].stdio.stdout, { maxBytes: 65_536, spill: { maxBytes: wanted } })
+  assert.equal(first.stdoutSpillPath, '/tmp/dsh-subprocess-9-1-aaaa-stdout.log')
+  assert.equal(first.spillNote, undefined)
+  // Both faces of one child are counted: the whole-stream offset the provider
+  // reported with each path is the number that left the budget, 8 bytes of stdout
+  // and 13 of stderr.
+  assert.equal(budget.used, 21, 'the whole-stream offsets are what get counted')
+  assert.equal(budget.files, 2, 'one child can account for two files')
+  assert.equal(transport.spill.files, 2)
+  assert.equal(transport.spill.max, 20)
+
+  const second = await transport.execute('/usr/bin/ssh', ['true'], settings, undefined, 5_000, 'test call')
+  // The budget is spent, so this child is asked for no file at all — and the
+  // result carries the reason instead of a bare truncation.
+  assert.equal('spill' in provider.seen[1].stdio.stdout, false)
+  assert.equal('spill' in provider.seen[1].stdio.stderr, false)
+  assert.match(String(second.spillNote), /spill budget is spent/u)
+  const shaped = classifyCollectedRun(second, {})
+  assert.ok(Array.isArray(shaped.notes), 'the note reaches the payload the reader sees')
+  assert.match(shaped.notes.join(' '), /keeps only its in-memory tail and no full-output file/u)
+  assert.equal(budget.refusals, 1)
+
+  // The files the provider already wrote are still reported: refusing to ask for
+  // more is not the same as pretending the earlier answer was shorter.
+  assert.equal(second.truncated, true)
+  assert.equal(second.stdoutSpillPath, '/tmp/dsh-subprocess-9-1-aaaa-stdout.log')
+})
+
+test('a stream copy never asks for a spill file, whatever the budget says', async () => {
+  const { SpillBudget } = await import('../lib/spill.js')
+  const budget = new SpillBudget(1024, 8)
+  const provider = streamProvider(child => {
+    child.push('data')
+    child.exit(0)
+  })
+  const transport = new SshTransport(provider, undefined, undefined, budget)
+  const dir = mkdtempSync(join(tmpdir(), 'dshssh-spill-'))
+  await transport.streamFile('/usr/bin/ssh', ['host', 'cat -- /f'], { ...COPY_SETTINGS, maxSpillBytes: 1024 }, undefined, 5_000, 'file transfer', { direction: 'download', localPath: join(dir, 'f'), maxBytes: 64 })
+  // The payload of a copy is the file on disk; spilling its transcript to a second
+  // file would double the very thing the ceiling exists to bound.
+  assert.equal('spill' in provider.seen[0].stdio.stderr, false)
+  assert.equal(budget.used, 0)
 })
 
 // ── the counted channel: where the transfer ceiling is actually enforced ────

@@ -34,15 +34,23 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, statSync } from 'node:fs'
 import { chmod, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { CONTROL_PERSIST_SECONDS, MAX_LIVE_MASTERS } from './storage.ts'
+import { MUX_DIRECTORY } from './tmpgc.ts'
 
-/** Directory prefix inside the system temp directory, one per activation. */
-const DIRECTORY_PREFIX = 'dsh-ssh-mux-'
+/**
+ * The directory prefix, carrying this process's id — the same reasoning the
+ * askpass helper gives itself, and for the same reason: a directory this pool
+ * leaves behind when the process is killed is residue a later generation has to
+ * be able to tell from a live one.
+ */
+export function muxPrefix (): string {
+  return `${MUX_DIRECTORY}p${process.pid.toString()}-`
+}
 
 /** Suffix on every control socket this pool names. */
 const SOCKET_SUFFIX = '.sock'
@@ -192,6 +200,25 @@ function fingerprintOf(target: ShareableTarget, auth: ShareableAuth): string {
  * Owns the control sockets, the master ledger, and the ceiling on how many masters
  * are open at once.
  */
+/**
+ * Whether one path is a directory this pool can bind sockets inside.
+ *
+ * `existsSync` alone is not the question: whatever collected this directory may
+ * have left something else in its place — a file, or a directory the account
+ * cannot write — and a control path whose parent is a file is an ssh error a user
+ * has to read, not a pool state.
+ * @param path - the directory the pool believes it owns.
+ * @returns true when sockets can be created inside it as things stand.
+ */
+function usableDirectory (path: string): boolean {
+  if (!existsSync(path)) return false
+  try {
+    return statSync(path).isDirectory()
+  } catch {
+    return false
+  }
+}
+
 export class MuxPool implements MuxSource {
   #directory: string | undefined
   #failure: string | undefined
@@ -281,7 +308,7 @@ export class MuxPool implements MuxSource {
   async prepare(): Promise<string | undefined> {
     if (this.#directory !== undefined) return this.#directory
     try {
-      const directory = await mkdtemp(join(tmpdir(), DIRECTORY_PREFIX))
+      const directory = await mkdtemp(join(tmpdir(), muxPrefix()))
       await chmod(directory, 0o700)
       this.#directory = directory
       this.#failure = undefined
@@ -307,7 +334,21 @@ export class MuxPool implements MuxSource {
     const name = `${target.id ?? 'draft'}-${fingerprintOf(target, auth)}${SOCKET_SUFFIX}`
     const path = join(this.#directory, name)
     // A system temp directory with an unusual name can eat the whole socket budget.
-    return path.length <= SOCKET_PATH_LIMIT ? path : undefined
+    if (path.length > SOCKET_PATH_LIMIT) return undefined
+    // A sweep by a newer generation may have collected this directory while it
+    // looked idle. Put it back rather than hand a client a control path inside a
+    // directory that does not exist; when even that fails, the call runs without
+    // sharing, which is the degradation this pool was designed to be able to take.
+    if (!usableDirectory(this.#directory)) {
+      try {
+        mkdirSync(this.#directory, { recursive: true, mode: 0o700 })
+      } catch {
+        // A directory this process cannot make is a reason to dial this call on its
+        // own connection, not a reason to fail it.
+        return undefined
+      }
+    }
+    return path
   }
 
   /**
@@ -410,7 +451,7 @@ export class MuxPool implements MuxSource {
     if (this.#directory === undefined) {
       return this.#failure === undefined ? 'pool: not prepared yet' : `pool: ${this.#failure}`
     }
-    return 'pool: this Host\u2019s temp path leaves no room for a socket name'
+    return 'pool: this Host\u2019s socket directory is not usable (its path is too long, or something else stands at it)'
   }
 
   /**

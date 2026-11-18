@@ -1063,7 +1063,12 @@ function renderCall(args: RemoteCallArgs, value: Record<string, unknown>): strin
       if (value.truncated === true) {
         lines.push(spills.length > 0
           ? `[output truncated; full output — ${spills.join(', ')}]`
-          : '[output truncated; full output: (no spill file configured — raise maxSpillBytes, or ask for more with `maxBytes`)]')
+          : Array.isArray(value.notes) && value.notes.some(note => typeof note === 'string' && note.includes('spill budget'))
+            // The reason there is no file differs, and so does the move the reader
+            // has: one is a ceiling to raise, the other is a budget this Host
+            // process has already spent.
+            ? '[output truncated; full output: (the plugin\u2019s spill budget for this Host process is spent — the note above says so; a smaller `maxBytes`, or less output, is the way)]'
+            : '[output truncated; full output: (no spill file configured — raise maxSpillBytes, or ask for more with `maxBytes`)]')
       }
       // A ceiling the plugin moved is told the same way: the structured field carries
       // the effective number, but a model reads this text, and "I asked for 900000ms

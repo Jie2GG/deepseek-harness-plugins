@@ -48,6 +48,11 @@ test('list carries the views, the limits, the pool state, and the askpass health
   assert.equal(out.limits.maxLiveMasters, 8)
   assert.equal(out.limits.controlPersistSeconds, 300)
   assert.deepEqual(out.pool, { ready: true, liveMasters: 0, transfers: 0 })
+  // The resource answers the page needs when an answer says "truncated" or a file
+  // it expected is gone: what the spill budget holds, and what this Host's startup
+  // collected from its own temp namespace.
+  assert.deepEqual(out.spill, { used: 0, files: 0, refusals: 0, max: 0 })
+  assert.equal(out.temp, undefined, 'an assembly that never swept says nothing rather than zero')
   assert.equal(out.askpass, 'ready')
   assert.equal(out.sessionTarget, 'ssh-a1b2c3d4e5')
   assert.equal(out.probing, 0)

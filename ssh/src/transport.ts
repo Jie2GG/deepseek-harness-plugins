@@ -39,6 +39,7 @@ const SSH_TIMEOUT = 'SSH_TIMEOUT'
 /** The local-only budget for one `ssh -G` print; see {@link SshTransport.resolve}. */
 const RESOLVE_BUDGET_MS = 5_000
 import { NO_SHARE_FLAGS, type MuxSource, type PoolTicket } from './pool.ts'
+import { SpillBudget } from './spill.ts'
 import { SshError } from './types.ts'
 import type { AuthMode, ProbeOutcome, ProbeStatus, RemoteRunResult, RemoteStatus, SshSettings } from './types.ts'
 
@@ -307,8 +308,11 @@ export function classifyCollectedRun(
       : collected.outcome === 'error'
         ? 'failed'
         : classifyRun(collected.exitCode, text)
+  const notes: string[] = []
+  if (collected.spillNote !== undefined) notes.push(collected.spillNote)
   return {
     at: new Date().toISOString(),
+    ...(notes.length === 0 ? {} : { notes }),
     status,
     durationMs: collected.durationMs,
     ...(facts.tty === true ? { tty: true } : {}),
@@ -492,13 +496,18 @@ export interface RemoteJobSource {
  * @param handle - the spawned child.
  * @returns the two sources the registry can pump.
  */
-function streamSources(handle: ChildHandle): RemoteJobSource[] {
+function streamSources(handle: ChildHandle, budget?: SpillBudget): RemoteJobSource[] {
   const source = (channel: 'stdout' | 'stderr'): RemoteJobSource => ({
     channel,
     read: (fromByte: number) => {
       const reader = handle.collected[channel]
       if (reader === undefined) return { text: '', nextOffset: fromByte, lossy: false }
       const read = reader.readFrom(fromByte)
+      // A background command's output is pumped repeatedly, so the budget sees the
+      // same path over and over; `SpillBudget.observe` counts each one once.
+      if (budget !== undefined && read.spillPath !== undefined) {
+        budget.observe([{ path: read.spillPath, bytes: read.nextOffset }])
+      }
       return { text: read.text, nextOffset: read.nextOffset, lossy: read.lossy, ...(read.spillPath === undefined ? {} : { spillPath: read.spillPath }) }
     },
   })
@@ -520,6 +529,12 @@ export interface Collected {
   stderrSpillPath?: string
   /** Why the provider could not run the child, when that is the outcome. */
   error?: string
+  /**
+   * Set when this plugin's spill budget decided a stream would keep only its
+   * in-memory tail. A reader told “truncated” without this is being told a fact
+   * and hidden the reason.
+   */
+  spillNote?: string
 }
 
 /** How many bytes a streamed copy has moved, and what stopped it moving them. */
@@ -658,6 +673,7 @@ export class SshTransport {
   readonly #ctx: Context
   readonly #askpass: AskPassSource | undefined
   readonly #pool: MuxSource | undefined
+  readonly #spill: SpillBudget
   #inFlight = 0
   readonly #controllers = new Set<AbortController>()
   // Slots counted per reservation kind (file transfers for now, background jobs
@@ -675,11 +691,19 @@ export class SshTransport {
    * @param ctx - Host context that carries `subprocess`.
    * @param askpass - the helper that answers a password or passphrase prompt.
    * @param pool - the per-target connection pool, when this profile has one.
+   * @param spill - this process's spill budget; a profile that assembles its own
+   *   transport can share one budget across them, and the shipped assembly does.
    */
-  constructor(ctx: Context, askpass?: AskPassSource, pool?: MuxSource) {
+  constructor(ctx: Context, askpass?: AskPassSource, pool?: MuxSource, spill?: SpillBudget) {
     this.#ctx = ctx
     this.#askpass = askpass
     this.#pool = pool
+    this.#spill = spill ?? new SpillBudget()
+  }
+
+  /** What this process has asked the provider to keep on disk, and what it refused. */
+  get spill (): { used: number; files: number; refusals: number; max: number } {
+    return { used: this.#spill.used, files: this.#spill.files, refusals: this.#spill.refusals, max: this.#spill.max }
   }
 
   /** How many children this transport has running right now. */
@@ -1026,7 +1050,11 @@ export class SshTransport {
     external: AbortSignal | undefined,
     stdin: string | undefined,
     stream?: 'download' | 'upload',
-  ): { handle: ChildHandle; detach: () => void } {
+  ): { handle: ChildHandle; detach: () => void; spillNote: string | undefined } {
+    // The budget is consulted per child, at the moment the child is assembled, so
+    // a profile that raised `maxSpillBytes` is still held to one whole-process
+    // number rather than to sixteen times its own ceiling.
+    const grant = this.#spill.ask(stream === undefined ? settings.maxSpillBytes : 0)
     const handle = this.#ctx.subprocess.spawn({
       argv: [program, ...argvTail],
       cwd: process.env.HOME ?? process.cwd(),
@@ -1045,7 +1073,7 @@ export class SshTransport {
         }
         const collect = () => ({
           maxBytes: settings.maxOutputBytes,
-          ...(settings.maxSpillBytes > 0 ? { spill: { maxBytes: settings.maxSpillBytes } } : {}),
+          ...(grant.maxBytes > 0 ? { spill: { maxBytes: grant.maxBytes } } : {}),
         })
         return {
           stdin: stdin === undefined ? 'ignore' : { data: stdin },
@@ -1062,7 +1090,7 @@ export class SshTransport {
       if (external.aborted) controller.abort()
       else external.addEventListener('abort', onExternalAbort, { once: true })
     }
-    return { handle, detach: () => { external?.removeEventListener('abort', onExternalAbort) } }
+    return { handle, spillNote: grant.note, detach: () => { external?.removeEventListener('abort', onExternalAbort) } }
   }
 
   /**
@@ -1084,6 +1112,7 @@ export class SshTransport {
     deadlineMs: number,
     external: AbortSignal | undefined,
     startedAt: number,
+    spillNote?: string,
   ): Promise<Collected> {
     type Settled =
       | { kind: 'exit'; exitCode: number | null; signal: NodeJS.Signals | null }
@@ -1132,7 +1161,15 @@ export class SshTransport {
     const stderrRead = handle.collected.stderr?.readFrom(0)
     const stdout = stdoutRead?.text ?? ''
     const stderr = stderrRead?.text ?? ''
+    // The provider reports a spill path only for a stream it wrote whole, so the
+    // whole-stream offset it hands back with it is the number to charge the
+    // budget — no `stat` of a directory this plugin does not own.
+    this.#spill.observe([
+      { path: stdoutRead?.spillPath, bytes: stdoutRead?.nextOffset ?? 0 },
+      { path: stderrRead?.spillPath, bytes: stderrRead?.nextOffset ?? 0 },
+    ])
     return {
+      ...(spillNote === undefined ? {} : { spillNote }),
       outcome: settled.kind === 'error' ? 'error' : settled.kind,
       ...(settled.kind === 'error' ? { error: settled.message } : {}),
       exitCode: settled.kind === 'exit' ? settled.exitCode : null,
@@ -1157,9 +1194,9 @@ export class SshTransport {
     stdin?: string,
   ): Promise<Collected> {
     const startedAt = Date.now()
-    const { handle, detach } = this.#spawn(program, argvTail, settings, env, controller, external, stdin)
+    const { handle, detach, spillNote } = this.#spawn(program, argvTail, settings, env, controller, external, stdin)
     try {
-      return await this.#settleAndDrain(handle, controller, deadlineMs, external, startedAt)
+      return await this.#settleAndDrain(handle, controller, deadlineMs, external, startedAt, spillNote)
     } finally {
       detach()
     }
@@ -1587,10 +1624,11 @@ export class SshTransport {
       const { flags, env } = this.sshOptions(target, settings, auth, deadline, { poolFlags: ticket?.flags })
       const ttyFlags = options.tty === true ? ['-tt'] : []
       const startedAt = Date.now()
-      const { handle, detach } = this.#spawn(program, [...flags, ...ttyFlags, this.authority(target), command], settings, env, controller, options.signal, options.stdin)
+      const { handle, detach, spillNote } = this.#spawn(program, [...flags, ...ttyFlags, this.authority(target), command], settings, env, controller, options.signal, options.stdin)
+      const budget = this.#spill
       // A backgrounded command holds its lease for its whole life, the same way it
       // holds an operation slot: the channel over the master is open until it ends.
-      const finished = this.#settleAndDrain(handle, controller, deadline, options.signal, startedAt)
+      const finished = this.#settleAndDrain(handle, controller, deadline, options.signal, startedAt, spillNote)
         .then((result: Collected) => {
           detach()
           this.noteShared(ticket, result.outcome === 'exit' && !this.sessionBroken(`${result.stderr}\n${result.stdout}`))
@@ -1615,7 +1653,7 @@ export class SshTransport {
           this.#releaseLane(controller, lane)
         })
       job = {
-        sources: streamSources(handle),
+        sources: streamSources(handle, budget),
         kill: (): void => {
           controller.abort()
           handle.terminate()

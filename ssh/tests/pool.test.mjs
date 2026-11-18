@@ -4,6 +4,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, unlinkSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { MuxPool, NO_SHARE_FLAGS, SOCKET_PATH_LIMIT } from '../lib/pool.js'
 import { CONTROL_PERSIST_SECONDS, MAX_LIVE_MASTERS } from '../lib/storage.js'
 
@@ -268,5 +269,49 @@ test('an in-flight master is never swept, expired-looking or not', async () => {
   held.release()
   now += (CONTROL_PERSIST_SECONDS + 60) * 1000
   assert.equal(pool.sweep(), 1)
+  await pool.dispose()
+})
+
+test('a socket directory collected while the pool was idle is put back on the next claim', async () => {
+  // The sweep judges legacy names by idleness, and a pool that has not dialed in a
+  // while looks idle. The claim has to survive its own directory being gone:
+  // sharing is an optimisation, and the call in front of it is a user waiting.
+  const { rmSync, existsSync, mkdirSync } = await import('node:fs')
+  const pool = new MuxPool()
+  const directory = await pool.prepare()
+  assert.ok(typeof directory === 'string')
+  const target = { id: 'ssh-a1b2c3d4e5', host: '10.0.0.9', user: 'deploy', pool: 'on' }
+  const before = pool.socketPathFor(target, { mode: 'key' })
+  assert.ok(typeof before === 'string')
+  rmSync(directory, { recursive: true, force: true })
+  const after = pool.socketPathFor(target, { mode: 'key' })
+  assert.equal(after, before, 'the same socket name comes back, so the ledger still matches')
+  assert.equal(existsSync(directory), true, 'and the directory exists to bind it in')
+  // Something else standing at the path is a reason not to share, never a failed
+  // call: the claim falls back to a private connection and the user still gets an
+  // answer — which is the whole reason this pool calls itself an optimisation.
+  rmSync(directory, { recursive: true, force: true })
+  writeFileSync(directory, 'a file where the directory should be')
+  const blocked = pool.socketPathFor(target, { mode: 'key' })
+  assert.equal(blocked, undefined, 'no socket is offered when its parent is a file')
+  const ticket = pool.claim(target, { mode: 'key' })
+  assert.equal(ticket.pooled, false, 'and the call is handed the no-share flags instead')
+  assert.deepEqual([...ticket.flags], [...NO_SHARE_FLAGS])
+  assert.match(String(ticket.note), /socket directory is not usable/u)
+  rmSync(directory, { force: true })
+  await pool.dispose()
+})
+
+test('the socket directory names the process that owns it', async () => {
+  const pool = new MuxPool()
+  const directory = await pool.prepare()
+  assert.ok(typeof directory === 'string')
+  assert.ok(directory.includes(`dsh-ssh-mux-p${String(process.pid)}-`), directory)
+  // A control path has 108 bytes to live in; the id in the name is not allowed to
+  // push a long target name past the limit the pool refuses at.
+  const target = { id: 'ssh-0123456789', host: 'a-very-long-example-host-name.internal.example.com', user: 'a-deploy-user', pool: 'on' }
+  const path = pool.socketPathFor(target, { mode: 'key', passphrase: 'p' })
+  assert.ok(typeof path === 'string')
+  assert.ok(path.length <= SOCKET_PATH_LIMIT, `the socket path is ${String(path.length)} bytes`)
   await pool.dispose()
 })

@@ -203,6 +203,10 @@ export interface ListResult {
   }
   /** Whether calls on this Host can share a connection, and how many masters do. */
   pool: { ready: boolean; liveMasters: number; transfers: number; failure?: string }
+  /** This process's spill accounting: what it asked the provider to keep, and what the budget refused. */
+  spill: { used: number; files: number; refusals: number; max: number }
+  /** What this Host's startup collected from its own temp namespace, if it looked. */
+  temp?: TempSummary | undefined
   /** Whether this Host can answer a password or passphrase prompt at all. */
   askpass: 'ready' | 'unavailable'
   /** Why the helper is unavailable, when it is. */
@@ -296,6 +300,29 @@ export interface OpsDeps {
    * the height of its own default.
    */
   bounds?: (() => Bounds) | undefined
+  /**
+   * What this Host process can say about its own resources: the spill budget it
+   * is holding itself against, and the temp-namespace collection its startup made.
+   * Read per call, like the bounds — a number frozen at activation would be a
+   * number that stopped being true the moment a stream overflowed.
+   */
+  observability?: (() => {
+    spill: { used: number; files: number; refusals: number; max: number }
+    temp: TempSummary | undefined
+  }) | undefined
+}
+
+/** What one startup's temp-namespace sweep reported. */
+export interface TempSummary {
+  /** Directories in this plugin's namespace that were looked at. */
+  scanned: number
+  /** Paths collected, each with the reason it was collectable. */
+  removed: { path: string; reason: string }[]
+  /** Paths left, with their reasons, counted rather than listed: a live Host's
+   own two directories are the ordinary answer. */
+  kept: { path: string; reason: string }[]
+  /** Paths that could not be read or removed. */
+  errors: { path: string; message: string }[]
 }
 
 /**
@@ -428,6 +455,10 @@ function pickTarget(state: TargetStore, params: Params): ConnectionRecord {
 export function createOps(deps: OpsDeps): Ops {
   const { runner, store, secrets, askpass } = deps
   const liveBounds = deps.bounds ?? defaultBounds
+  /** The resource answers this Host can give that a ceiling in the config cannot,
+   * read per call like the bounds: a spill count frozen at activation would be a
+   * number that stopped being true with the first overflowing stream. */
+  const observed = deps.observability
   const localExists = deps.localExists
   const inventoryChanged = deps.onInventoryChanged
   const jobs = deps.jobs
@@ -468,7 +499,11 @@ export function createOps(deps: OpsDeps): Ops {
   function stampCeilings(run: RemoteRunResult, settings: SshSettings, notes: readonly string[]): RemoteRunResult {
     run.timeoutMs = settings.remoteTimeoutMs
     run.outputBytes = settings.maxOutputBytes
-    if (notes.length > 0) run.notes = notes
+    // Merged, not replaced: a capped ceiling and a spill the budget refused are
+    // two different sentences about the same call, and the run may already carry
+    // the second one when this is called.
+    const merged = [...notes, ...(run.notes ?? [])].filter((entry, index, list) => list.indexOf(entry) === index)
+    if (merged.length > 0) run.notes = merged
     return run
   }
 
@@ -988,6 +1023,8 @@ export function createOps(deps: OpsDeps): Ops {
           ...(runner.mux.failure === undefined ? {} : { failure: runner.mux.failure.slice(0, 512) }),
         },
         probing: runner.inFlight,
+        spill: runner.spill,
+        ...(observed === undefined ? {} : { temp: observed().temp }),
       }
     },
 

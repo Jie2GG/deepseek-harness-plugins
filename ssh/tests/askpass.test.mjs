@@ -51,3 +51,40 @@ test('the helper script itself answers nothing and leaks nothing to argv', { ski
   assert.match(source, /printf '%s\\n' "\$answer"/u)
   await helper.dispose()
 })
+
+test('a helper taken away between calls is put back where the transport will look', async () => {
+  // The reason the temp-namespace sweep is safe to run at all: a newer generation
+  // may collect a legacy-named helper directory, and the generation using it has
+  // to notice and rebuild rather than fail a password prompt with a message about
+  // a secret nobody got wrong.
+  const { rmSync, existsSync, readFileSync } = await import('node:fs')
+  const helper = new AskPassHelper()
+  const first = await helper.prepare()
+  assert.ok(typeof first === 'string')
+  const directory = helper.directory
+  assert.ok(typeof directory === 'string' && existsSync(directory), 'the directory is reported')
+  rmSync(directory, { recursive: true, force: true })
+  assert.equal(existsSync(first), false, 'the sweep took it')
+  const again = helper.path
+  assert.equal(typeof again, 'string', 'the read hands back a path anyway')
+  assert.equal(existsSync(again), true, 'and the file is really there to be execed')
+  assert.equal(readFileSync(again, 'utf8').includes('DSH_SSH_ASKPASS_PASSPHRASE'), true, 'the rebuilt helper is the real one')
+  assert.equal(helper.ready, true)
+  assert.equal(helper.directory, directory, 'rebuilt under the same name, so the transport never sees two paths')
+  await helper.dispose()
+  assert.equal(existsSync(directory), false, 'and the disposal still owns it')
+})
+
+test('using the helper keeps its directory young, which is what the idle rule reads', async () => {
+  const { utimesSync, statSync } = await import('node:fs')
+  const helper = new AskPassHelper()
+  const script = await helper.prepare()
+  assert.ok(typeof script === 'string')
+  const directory = helper.directory
+  const back = new Date(Date.now() - 5 * 60 * 60 * 1000)
+  utimesSync(directory, back, back)
+  assert.ok(statSync(directory).mtimeMs < Date.now() - 4 * 60 * 60 * 1000, 'stale to begin with')
+  helper.path
+  assert.ok(statSync(directory).mtimeMs > Date.now() - 60_000, 'the read renewed it')
+  await helper.dispose()
+})

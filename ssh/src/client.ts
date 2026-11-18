@@ -72,6 +72,10 @@ window.__ModuleLoader__.load({
         boundsTargets: 'Targets per profile',
         boundsOps: 'Remote operations at once',
         boundsCopies: 'File copies at once',
+        boundsSpill: 'Full-output spill files',
+        spillLine: '{files} file(s), {used} of {max} bytes',
+        spillRefused: ', {refusals} answer(s) kept to the tail',
+        tempCollected: 'Startup collected {removed} abandoned temp dir{plural} of {scanned} in its own namespace; {kept} left standing.',
         boundsRunning: 'ceiling {ceiling}, running {running}',
         boundsMasters: 'Servers sharing a connection',
         boundsPersist: 'A shared connection idles out after',
@@ -207,6 +211,10 @@ window.__ModuleLoader__.load({
         boundsTargets: '每个 profile 可存的目标数',
         boundsOps: '同时在跑的远程操作数',
         boundsCopies: '同时在跑的文件传输数',
+        boundsSpill: '完整输出落盘文件',
+        spillLine: '{files} 个文件，{used} / {max} 字节',
+        spillRefused: '，{refusals} 次回答只留尾部',
+        tempCollected: '启动时在本插件命名空间内回收了 {scanned} 个残留中的 {removed} 个临时目录，保留 {kept} 个。',
         boundsRunning: '上限 {ceiling}，正在跑 {running}',
         boundsMasters: '共用一条连接的目标数上限',
         boundsPersist: '共享连接空闲多久后断开',
@@ -935,6 +943,10 @@ window.__ModuleLoader__.load({
       // schema would refuse a `pool` field the new page is ready to send.
       const [pooling, setPooling] = React.useState(false)
       const [pool, setPool] = React.useState(null as { ready: boolean; liveMasters: number; transfers?: number; failure?: string } | null)
+      // What this Host process has asked the provider to keep on disk, and what its
+      // startup collected from its own temp namespace.
+      const [spill, setSpill] = React.useState(null as { used: number; files: number; refusals: number; max: number } | null)
+      const [temp, setTemp] = React.useState(null as { scanned: number; removed: { path: string; reason: string }[]; kept: { path: string; reason: string }[]; errors: { path: string; message: string }[] } | null)
       // Whether the loaded Host half knows about authentication modes at all:
       // an in-place package swap needs a Host restart, and the page keeps working
       // without the secret controls until then.
@@ -984,6 +996,8 @@ window.__ModuleLoader__.load({
           if (result.bounds !== undefined) setBounds(result.bounds)
           setPooling(result.pool !== undefined)
           if (result.pool !== undefined) setPool(result.pool)
+          setSpill(result.spill ?? null)
+          setTemp(result.temp ?? null)
           setModern(result.askpass !== undefined)
           setProbing(result.probing ?? 0)
           setFailure(null)
@@ -1701,6 +1715,15 @@ window.__ModuleLoader__.load({
           ...(pooling ? [
             h('div', { class: 'dshssh-bound', key: 'masters' }, h('dt', {}, t('boundsMasters')), h('dd', {}, format(t('boundsRunning'), { ceiling: String(limits.maxLiveMasters), running: String(pool?.liveMasters ?? 0) }))),
             h('div', { class: 'dshssh-bound', key: 'copies' }, h('dt', {}, t('boundsCopies')), h('dd', {}, format(t('boundsRunning'), { ceiling: String(bounds?.effective?.maxConcurrentTransfers ?? '—'), running: String(pool?.transfers ?? 0) }))),
+            // Spill is the one ceiling whose cost is a file on disk rather than a
+            // line in the answer, so the card says what is sitting there now and
+            // how many answers the budget already refused to write out.
+            ...(spill === null || spill.max === 0 ? [] : [
+              h('div', {
+                class: 'dshssh-bound',
+                key: 'spill',
+              }, h('dt', {}, t('boundsSpill')), h('dd', {}, `${format(t('spillLine'), { files: String(spill.files), used: String(spill.used), max: String(spill.max) })}${spill.refusals > 0 ? format(t('spillRefused'), { refusals: String(spill.refusals) }) : ''}`)),
+            ]),
             h('div', { class: 'dshssh-bound', key: 'persist' }, h('dt', {}, t('boundsPersist')), h('dd', {}, idleFor(limits.controlPersistSeconds))),
           ] : []),
           h('div', { class: 'dshssh-bound', key: 'round' }, h('dt', {}, t('boundsPerRound')), h('dd', {}, String(limits.probeAllLimit))),
@@ -1734,6 +1757,12 @@ window.__ModuleLoader__.load({
         // every number above still holds while sharing simply does not happen.
         pool !== null && pool.ready === false
           ? h('p', { class: 'dshssh-muted' }, format(t('poolOff'), { reason: pool.failure ?? '—' }))
+          : null,
+        // A line that only exists when there is something to report: the sweep ran
+        // at startup, and the only time its arithmetic matters to a reader is the
+        // time it took something.
+        temp !== null && temp.removed.length > 0
+          ? h('p', { class: 'dshssh-muted' }, format(t('tempCollected'), { removed: String(temp.removed.length), scanned: String(temp.scanned), kept: String(temp.kept.length), plural: temp.removed.length === 1 ? '' : 's' }))
           : null,
       )
 

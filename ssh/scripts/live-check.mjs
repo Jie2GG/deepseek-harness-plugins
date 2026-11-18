@@ -22,7 +22,8 @@
  */
 
 import { createHash } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { createServer } from 'node:net'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync, appendFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
@@ -209,6 +210,11 @@ async function copy (direction, localPath, remotePath, options = {}) {
 
 const q = (path) => `'${path.replace(/'/gu, `'\\''`)}'`
 
+
+/** A failure that stops the run rather than printing a confusing line later. */
+function assertish (condition, what) {
+  if (condition !== true) throw new Error(`cannot build the fixture for ${what}`)
+}
 /** One small file every later case may copy, created on demand. */
 async function ensureSource () {
   await remote(`mkdir -p ${q(REMOTE)} && printf 'LIVE_%s\\n' '${stamp}' > ${q(`${REMOTE}/source.txt`)}`)
@@ -586,7 +592,138 @@ cases.edit = async () => {
 }
 
 
-const order = ['plain', 'grow', 'overwrite', 'modes', 'tilde', 'lane', 'tree', 'edit', 'release']
+/**
+ * The temp namespace, on a machine that actually has residue in it.
+ *
+ * The offline suite builds its own directory tree; this asks the question against
+ * `/tmp` as it stands: does the sweep take the directories a killed generation
+ * left, leave the one the running Host is using, leave the socket whose master is
+ * still listening, and never touch a neighbour that merely has a similar name? The
+ * fixtures are created here and removed here, so the answer is measured rather
+ * than asserted from a fixture.
+ */
+cases.temp = async () => {
+  const { sweep: sweepNamespace, socketLive: probeSocket } = await import('../lib/tmpgc.js')
+  const { mkdirSync, writeFileSync: writeLocal, existsSync: exists, utimesSync, rmSync: rmLocal } = require('node:fs')
+  const base = tmpdir()
+  const dead = spawnSync('/bin/sh', ['-c', 'exit 0'])?.pid
+  assertish(typeof dead === 'number' && dead > 0, 'a reaped pid to stand in for a dead generation')
+  const tag = `live${stamp}`
+  const gone = join(base, `dsh-ssh-askpass-p${String(dead)}-${tag}`)
+  const aged = join(base, `dsh-ssh-askpass-${tag}old`)
+  const fresh = join(base, `dsh-ssh-askpass-${tag}new`)
+  const staleSocket = join(base, `dsh-ssh-mux-p${String(dead)}-${tag}`)
+  const liveSocket = join(base, `dsh-ssh-mux-p${String(dead)}-${tag}live`)
+  const neighbour = join(base, `dsh-ssh-notmynamespace-${tag}`)
+  const provider = join(base, `dsh-subprocess-${tag}`)
+  for (const path of [gone, aged, fresh, staleSocket, liveSocket, neighbour, provider]) mkdirSync(path, { recursive: true, mode: 0o700 })
+  writeLocal(join(gone, 'askpass.sh'), '#!/bin/sh\n')
+  writeLocal(join(aged, 'askpass.sh'), '#!/bin/sh\n')
+  writeLocal(join(fresh, 'askpass.sh'), '#!/bin/sh\n')
+  const old = new Date(Date.now() - (3 * 24 * 60 * 60 * 1000 + 60 * 60 * 1000))
+  // Age the directory and the helper inside it: the idle rule reads whichever
+  // timestamp is freshest, which is exactly the point of the fixture.
+  utimesSync(aged, old, old)
+  utimesSync(join(aged, 'askpass.sh'), old, old)
+  const recent = new Date()
+  utimesSync(fresh, recent, recent)
+  // And one generation that has been running for days: old directory, helper used
+  // this morning. A sweep that took it would be the incident this case exists to
+  // keep from happening again.
+  const working = join(base, `dsh-ssh-askpass-${tag}working`)
+  mkdirSync(working, { recursive: true, mode: 0o700 })
+  writeLocal(join(working, 'askpass.sh'), '#!/bin/sh\n')
+  const daysAgo = new Date(Date.now() - 4 * 24 * 60 * 60 * 1000)
+  utimesSync(working, daysAgo, daysAgo)
+  utimesSync(join(working, 'askpass.sh'), new Date(), new Date())
+  writeLocal(join(staleSocket, 'ssh-nobody-0000000000.sock'), '')
+  writeLocal(join(neighbour, 'keep.txt'), 'not ours')
+  writeLocal(join(provider, 'dsh-subprocess-1-1-aa-stdout.log'), 'another provider whole output')
+  // A real listening socket, so "somebody is using this path" is a fact about the
+  // kernel rather than a guess about a file.
+  const server = createServer(connection => { connection.end() })
+  const livePath = join(liveSocket, 'ssh-nobody-1111111111.sock')
+  await new Promise(resolve => { server.listen(livePath, resolve) })
+  try {
+    const seesLive = await probeSocket(livePath)
+    assertish(seesLive === true, 'the socket probe to see the fixture it just opened')
+    const result = await sweepNamespace({ root: base, uid: process.getuid?.() ?? 0, self: [askpass.directory ?? '', mux.directory ?? ''] })
+    const removed = new Set(result.removed.map(entry => entry.path))
+    const kept = new Map(result.kept.map(entry => [entry.path, entry.verdict.reason]))
+    evidence(`sweep scanned ${String(result.scanned)} namespace entries: ${String(result.removed.length)} collected, ${String(result.kept.length)} kept`)
+    check('a directory whose process id is gone is collected', removed.has(gone), gone)
+    check('a legacy directory three days idle is collected', removed.has(aged), `kept because ${String(kept.get(aged))}`)
+    check('a long-running Host that used its helper today keeps it', kept.get(working) === 'young' && exists(join(working, 'askpass.sh')), String(kept.get(working)))
+    check('a legacy directory that may still be starting up is kept', kept.get(fresh) === 'young', String(kept.get(fresh)))
+    check('a socket directory with nobody listening is collected', removed.has(staleSocket), String(kept.get(staleSocket)))
+    check('a socket directory whose master is answering is kept', kept.get(liveSocket) === 'live-socket', String(kept.get(liveSocket)))
+    check('the running Host keeps its own two directories', !removed.has(askpass.directory ?? '') && !removed.has(mux.directory ?? ''))
+    check('a neighbour plugin directory is never even scanned', ![...removed].some(path => path.includes('notmynamespace')) && exists(join(neighbour, 'keep.txt')))
+    check('the subprocess provider spill directory is left to its owner', exists(join(provider, 'dsh-subprocess-1-1-aa-stdout.log')))
+    check('the collected directories are really gone', !exists(gone) && !exists(aged) && !exists(staleSocket))
+  } finally {
+    await new Promise(resolve => { server.close(resolve) })
+    for (const path of [gone, aged, fresh, staleSocket, liveSocket, neighbour, provider, working]) rmLocal(path, { recursive: true, force: true })
+  }
+}
+
+/**
+ * The spill budget, against the provider that writes the files.
+ *
+ * Two claims are tested here. The first is the one every `exec` answer rests on:
+ * that the `spillPath` handed to a reader really holds the whole stream. The
+ * second is the new one: once the process budget cannot cover another file, the
+ * child is told not to write one, and the answer says which of the two happened
+ * rather than reporting a bare truncation.
+ */
+cases.spill = async () => {
+  const { SpillBudget } = await import('../lib/spill.js')
+  const { readFileSync: readLocal, existsSync: exists, statSync, rmSync: rmLocal } = require('node:fs')
+  const budget = new SpillBudget(1500, 64)
+  const counted = new SshTransport(host, askpass, mux, budget)
+  const tight = { ...settings, maxOutputBytes: 64, maxSpillBytes: 4096, remoteTimeoutMs: 15_000 }
+  const noisy = 'for i in $(seq 1 20); do printf \'LINE_%03d_abcdefghijklmnopqrstuvwxyz0123456789\\n\' \'$i\'; done'
+  const first = await counted.run(target, tight, auth, noisy)
+  const path = first.stdoutSpillPath
+  const lines = typeof path === 'string' ? readLocal(path, 'utf8').split('\n').filter(line => line.startsWith('LINE_')).length : -1
+  const onDisk = typeof path === 'string' ? statSync(path).size : -1
+  evidence(`first spill: ${String(path)} — ${String(onDisk)} bytes on disk, ${String(lines)} of 20 lines, in-memory tail ${String((first.stdout ?? '').length)} bytes`)
+  check('a clipped command reports where its whole output went', typeof path === 'string' && exists(path), String(path))
+  check('the spill file the provider reports really holds the whole stream', lines === 20, `${String(lines)} lines in the file`)
+  check('the answer still carries only its bounded tail inline', (first.stdout ?? '').length <= 64, `${String((first.stdout ?? '').length)} bytes inline`)
+  // Drive the same command until the budget says no, and check each answer against
+  // what the provider actually did: a granted child must have a file that holds
+  // the whole stream, and the refused child must have no file and a note naming
+  // the limit that answered. How many children fit is the budget's arithmetic, and
+  // a face of the answer nobody predicted is not a reason to fail the run.
+  const granted = [{ run: first, path }]
+  let refused = null
+  for (let call = 2; call <= 6 && refused === null; call += 1) {
+    const next = await counted.run(target, tight, auth, noisy)
+    if (Array.isArray(next.notes) && next.notes.some(note => String(note).includes('spill budget is spent'))) {
+      refused = { call, run: next }
+    } else {
+      granted.push({ run: next, path: next.stdoutSpillPath })
+    }
+  }
+  evidence(`granted ${String(granted.length)} spill(s), refused on call ${String(refused?.call ?? 'none')}, budget ${String(budget.used)} of ${String(budget.max)} bytes in ${String(budget.files)} file(s)`)
+  check('every granted child reported a file, and every reported file is on disk', granted.every(entry => typeof entry.path === 'string' && exists(entry.path)), `${String(granted.length)} granted`)
+  check('a granted stream keeps no note about the budget', granted.every(entry => entry.run.spillNote === undefined))
+  check('the refusal arrived once the budget was spent', refused !== null && budget.used >= budget.max, refused === null ? 'never refused' : `used ${String(budget.used)} of ${String(budget.max)}`)
+  check('the refused child is told there will be no file, and gets none', refused !== null && refused.run.stdoutSpillPath === undefined && refused.run.truncated === true, refused === null ? 'no refusal to inspect' : `path ${String(refused.run.stdoutSpillPath)} truncated ${String(refused.run.truncated)}`)
+  check('the overshoot is bounded by the stream that was in flight', budget.used - budget.max <= 4096, `${String(budget.used)} against ${String(budget.max)}`)
+  const untouched = new SshTransport(host, askpass, mux)
+  const normal = await untouched.run(target, tight, auth, noisy)
+  check('the budget belongs to the process that spent it, not to the plugin', normal.truncated === true && typeof normal.stdoutSpillPath === 'string' && normal.spillNote === undefined, String(normal.stdoutSpillPath))
+  const own = untouched.spill
+  check('each transport reports its own spill accounting, for the settings card', own.files >= 1 && own.used > 0 && own.refusals === 0 && own.max > 1_000_000_000, JSON.stringify(own))
+  check('the counted transport reports the refusals it made', counted.spill.refusals === 1 && counted.spill.max === 1500, JSON.stringify(counted.spill))
+  for (const stray of [path, normal.stdoutSpillPath, ...granted.map(entry => entry.path)]) {
+    if (typeof stray === 'string') rmLocal(stray, { force: true })
+  }
+}
+
+const order = ['plain', 'grow', 'overwrite', 'modes', 'tilde', 'lane', 'tree', 'edit', 'spill', 'temp', 'release']
 process.stdout.write(`\n@jie2gg/dsh-plugin-ssh live check against "${TARGET_LABEL}"\nscratch: ${LOCAL} ⇄ ${REMOTE}\n\n`)
 
 let failure = null
