@@ -514,6 +514,67 @@ test('one transport carries one ledger for all its children, and a second transp
   const clean = await alone.execute('/usr/bin/ssh', ['true'], settings, undefined, 5_000, 'test call')
   assert.equal(clean.spillNote, undefined, 'and a second activation is not punished for the first one’s output')
 })
+test('a background stream that keeps spilling grows the ledger to match the file on disk', async () => {
+  // K-8 end to end: the job registry pumps a background command’s output again and
+  // again, each read handing back the whole-stream offset reached so far. The budget
+  // used to freeze at the first number, so a 1500-byte spilled log was booked as 400
+  // forever — a standing understatement of what the provider had written. Driving the
+  // real pump path (`streamSources` → `SpillBudget.observe`) here proves the account
+  // now follows the growth.
+  const { SpillBudget } = await import('../lib/spill.js')
+  const spillPath = '/tmp/dsh-subprocess-1-7-aaaa-stdout.log'
+  const steps = [400, 900, 1500]
+  let call = 0
+  let last = 0
+  let killed = false
+  const provider = {
+    subprocess: {
+      resolveExecutable: async () => '/usr/bin/ssh',
+      spawn (options) {
+        return {
+          done: new Promise(resolve => {
+            options.signal.addEventListener('abort', () => { killed = true; resolve({ exitCode: null, signal: 'SIGTERM' }) })
+          }),
+          collected: {
+            stdout: {
+              readFrom: () => {
+                const next = steps[Math.min(call, steps.length - 1)]
+                call += 1
+                const delta = next - last
+                last = next
+                return { text: 'x'.repeat(delta), nextOffset: next, lossy: true, spillPath }
+              }
+            },
+            stderr: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) }
+          },
+          terminate () {},
+          waitForExit: async () => true
+        }
+      }
+    }
+  }
+  const budget = new SpillBudget(10_000, 64)
+  const transport = new SshTransport(provider, undefined, undefined, budget)
+  const settings = { ...CEILINGS, maxSpillBytes: 4096, probeTimeoutMs: 30_000, statTimeoutMs: 10_000, graceMs: 100, maxRunningJobs: 1 }
+  const job = await transport.startRun({ host: '10.0.0.9' }, settings, {}, 'producer', { timeoutMs: 0, job: true })
+  assert.ok(job)
+  const first = job.sources[0].read(0)
+  assert.equal(budget.used, 400, 'the first pump charges the whole offset it saw')
+  assert.equal(budget.files, 1)
+  const second = job.sources[0].read(first.nextOffset)
+  assert.equal(budget.used, 900, 'the second pump charges only the 500 bytes of growth')
+  const third = job.sources[0].read(second.nextOffset)
+  assert.equal(budget.used, 1500, 'and the ledger now equals the 1500 bytes on disk')
+  assert.equal(budget.files, 1, 'it is still one file, however often it was re-read')
+  // Re-reading a settled file at its full size costs nothing more — the provider
+  // reports the same offset again, and the max-per-path rule refuses to double-count.
+  job.sources[0].read(third.nextOffset)
+  assert.equal(budget.used, 1500, 'a repeat at the same size does not top up')
+  assert.ok(!killed)
+  job.kill()
+  await job.finished
+})
+
 test('a stream copy never asks for a spill file, whatever the budget says', async () => {
   const { SpillBudget } = await import('../lib/spill.js')
   const budget = new SpillBudget(1024, 8)

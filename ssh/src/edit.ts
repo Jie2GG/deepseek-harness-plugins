@@ -239,61 +239,143 @@ export const EDIT_CONTENT_UNVERIFIED = 29
  * The read an edit begins from: the file's bytes, and what the server says about
  * those bytes at the same moment.
  *
- * The first line is a marker holding `stat`'s inode, size, and nanosecond
- * modification time; the second line is the digest **the server itself** computed
- * over those bytes, and everything after them is the file. Asking in the same
- * round trip is deliberate — a second `stat` after the read would describe a file
- * that had another trip's worth of time to change under it. A server whose `stat`
- * cannot answer leaves the first marker empty, and a server with no checksum tool
- * leaves the second one empty; either way the edit still runs, because the safety
- * copy and the checks that follow still stand, and the result says plainly which
- * guard was in force.
+ * Three marker lines come first — the `stat` token holding inode, size and
+ * nanosecond modification time; the digest **the server itself** computed over
+ * those bytes; and the byte length of what follows — and everything after the
+ * third line is the file, verbatim. Asking all of it in the same round trip is
+ * deliberate: a second `stat` after the read would describe a file that had another
+ * trip's worth of time to change under it. A server whose `stat` cannot answer
+ * leaves the first marker empty, one with no checksum tool leaves the second empty,
+ * and one whose `wc -c` cannot run leaves the third empty; either way the edit
+ * still runs, because the safety copy and the checks that follow still stand, and
+ * the result says plainly which guard was in force.
+ *
+ * The third marker is what makes the split between header and body unambiguous.
+ * The read result used to be cut at "whichever leading lines look like a marker",
+ * which let a file whose own first line happened to begin with `ssh-plugin:` or
+ * `ssh-plugin-sha256:` lose that line to the header. Now the body is framed by a
+ * declared byte count, so a parser can take exactly that many bytes and prove it
+ * dropped no file — and never has to guess whether the next line is a marker.
  *
  * The digest is asked from the server rather than computed here from the decoded
  * text: a file that is not valid UTF-8 round-trips through this read into
  * something whose byte count *and* content differ from what is on disk, and a
  * number measured on the server cannot be fooled by that.
  * @param pathArg - the remote path, already shaped for the remote shell.
- * @returns one POSIX command whose stdout is the two marker lines and the file.
+ * @returns one POSIX command whose stdout is the three marker lines and the file.
  */
 export function buildEditRead (pathArg: string): string {
   return `if [ ! -f ${pathArg} ]; then exit ${EDIT_MISSING}; fi; `
     + `printf 'ssh-plugin: %s\\n' "$(stat -c '%i|%s|%y' -- ${pathArg} 2>/dev/null)"; `
     + `printf 'ssh-plugin-sha256: %s\\n' "${remoteDigest(pathArg)}"; `
+    + `printf 'ssh-plugin-bytes: %s\\n' "$(wc -c < ${pathArg} 2>/dev/null | tr -dc 0-9)"; `
     + `cat -- ${pathArg}`
 }
 
+/** A `stat -c '%i|%s|%y'` token: inode, byte size, then a modification time. */
+const STAT_TOKEN = /^\d+\|\d+\|/u
+/** The byte count a `wc -c | tr -dc 0-9` can produce: empty when it could not run. */
+const DECIMAL_OR_EMPTY = /^[0-9]*$/u
+
 /**
- * Split the markers a read answered with from the file itself.
+ * Split the markers a read answered with from the file itself, without ever
+ * eating a line that belongs to the file.
+ *
+ * The header is a run of up to three known lines — version, digest, body byte
+ * count — taken strictly **by position** from the top, and a line is only counted
+ * as a header line when its prefix matches *and* its value has the shape that
+ * `buildEditRead` would have printed for it. `ssh-plugin:` is followed by a
+ * `stat` token (`inode|size|mtime`) or by nothing when `stat` failed; `ssh-plugin-
+ * sha256:` is followed by whatever the checksum tool printed, or nothing;
+ * `ssh-plugin-bytes:` is followed by a decimal count, or nothing. That shape test
+ * is the whole fix for the old prefix-only split: a file whose first real line is
+ * `ssh-plugin: a note about the plugin` no longer looks like a version marker
+ * (`a note…` is not `123|456|…`), so it is left in the body instead of being
+ * stripped and reported as a guard the read never made. Because the header run is
+ * bounded and read top-down, a later body line that *does* look like a marker is
+ * never mistaken for one — the scan stops at the first non-header line and the
+ * body, from there down, is the file exactly as `cat` wrote it.
+ *
+ * When a body byte count was stated, it is returned alongside the content so a
+ * caller can prove the body it holds is the whole file (and, if the transport
+ * clipped the read, that it is not) rather than trusting the split.
  * @param text - the raw stdout of {@link buildEditRead}.
- * @returns the token to guard a write with and the digest the server stated (each
- *   `undefined` when this server could not state it), and the file's text.
+ * @returns the token to guard a write with, the digest the server stated, the
+ *   declared byte count of the body (each `undefined` when this server could not
+ *   state one), and the file's text.
  */
-export function splitEditVersion (text: string): { version: string | undefined; digest: string | undefined; content: string } {
-  const newline = text.indexOf('\n')
-  const head = (newline === -1 ? text : text.slice(0, newline)).trim()
-  const match = /^ssh-plugin:\s*(.*)$/u.exec(head)
-  if (match === null) {
-    // No marker at all: a shell that could not run `printf` the way the command
-    // asked, or an old server. The whole body is the file, and no guard applies.
-    return { version: undefined, digest: undefined, content: text }
+export function splitEditVersion (text: string): {
+  version: string | undefined
+  digest: string | undefined
+  bodyBytes: number | undefined
+  content: string
+} {
+  // Consume known header lines from the top; the first line that does not carry a
+  // header prefix with a well-shaped value is where the file starts. A line is
+  // only dropped from the body once it has been *recognized* as a header, so a
+  // body line that merely sits where a header would be is never consumed.
+  let rest = text
+  let version: string | undefined
+  let digest: string | undefined
+  let bodyBytes: number | undefined
+  let sawVersion = false
+  let sawDigest = false
+  let sawBytes = false
+
+  // Peek at the top line of `rest` without touching `rest`; return the line,
+  // whether it ended in a newline, and what `rest` should become if this line is
+  // committed as a header.
+  const peekLine = (current: string): { line: string; restIfCommitted: string } | undefined => {
+    const newline = current.indexOf('\n')
+    if (newline === -1) {
+      // A final line with no trailing newline: committing it leaves no body.
+      return current === '' ? undefined : { line: current, restIfCommitted: '' }
+    }
+    return { line: current.slice(0, newline), restIfCommitted: current.slice(newline + 1) }
   }
-  const token = (match[1] ?? '').trim()
-  const rest = newline === -1 ? '' : text.slice(newline + 1)
-  const second = rest.indexOf('\n')
-  const secondLine = (second === -1 ? rest : rest.slice(0, second)).trim()
-  const stated = /^ssh-plugin-sha256:\s*(.*)$/u.exec(secondLine)
-  if (stated === null) {
-    // A read from before this protocol, or a shell that printed the version line
-    // and nothing else: the body starts at the second line, and there is no
-    // digest to verify anything against.
-    return { version: token === '' ? undefined : token, digest: undefined, content: rest }
+
+  // 1. the version marker — only a header if its value is a stat token or empty.
+  const first = peekLine(rest)
+  if (first !== undefined) {
+    const value = first.line.replace(/^ssh-plugin:[ \t]*/u, '').trim()
+    if (/^ssh-plugin:/u.test(first.line) && (value === '' || STAT_TOKEN.test(value))) {
+      sawVersion = true
+      version = value === '' ? undefined : value
+      rest = first.restIfCommitted
+    }
   }
-  const digest = (stated[1] ?? '').trim()
+  // 2. the digest marker — only reached when a version marker was recognized.
+  if (sawVersion) {
+    const second = peekLine(rest)
+    if (second !== undefined && /^ssh-plugin-sha256:/u.test(second.line)) {
+      sawDigest = true
+      const value = second.line.replace(/^ssh-plugin-sha256:[ \t]*/u, '').trim()
+      digest = value === '' ? undefined : value
+      rest = second.restIfCommitted
+    }
+    // else: the line here is the file's own first line; leave it in the body.
+  }
+  // 3. the body byte count — only reached when a digest marker was recognized.
+  if (sawDigest) {
+    const third = peekLine(rest)
+    if (third !== undefined && /^ssh-plugin-bytes:/u.test(third.line)) {
+      sawBytes = true
+      const value = third.line.replace(/^ssh-plugin-bytes:[ \t]*/u, '').trim()
+      bodyBytes = DECIMAL_OR_EMPTY.test(value) && value !== '' ? Number(value) : undefined
+      rest = third.restIfCommitted
+    }
+    // else: the version and digest markers were present but the byte-count marker
+    // (a read that predates it) was not; the body starts on this line.
+  }
+
   return {
-    version: token === '' ? undefined : token,
-    digest: digest === '' ? undefined : digest,
-    content: second === -1 ? '' : rest.slice(second + 1),
+    version: sawVersion ? version : undefined,
+    digest: sawDigest ? digest : undefined,
+    bodyBytes: sawBytes ? bodyBytes : undefined,
+    // If no header line was recognized at all, the whole text is the file — a
+    // shell that never ran `printf`, or a body whose first line merely happens to
+    // begin with text like a marker. Nothing is stripped in that case.
+    content: sawVersion ? rest : text,
   }
 }
 

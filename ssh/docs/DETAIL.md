@@ -294,7 +294,12 @@ classified result.
   tipped it plus whatever else was in flight — one child may fill both of its faces
   up to `maxSpillBytes`, which puts the reachable worst case near 3 GiB at the
   defaults. Once the number is passed the next child keeps only its in-memory tail,
-  and the answer says out loud that the budget decided it.
+  and the answer says out loud that the budget decided it. What is charged per file is
+  the largest whole-stream offset the provider reported for it: a background stream
+  re-reads its own spill as the file lengthens, and since 0.0.36 each larger report is
+  billed only for the difference (an equal report charges nothing, a smaller one is not
+  refunded — a file on disk does not shrink), so the ledger follows the bytes actually
+  on disk rather than freezing at the first number, as it did through 0.0.35.
 - A downloaded file is listed among the conversation's changes, the same way an edited
   workspace file is, because the plugin asks the file pipeline for permission before the
   copy starts. Two honest caveats: only the first change to a path within a turn keeps a
@@ -355,7 +360,15 @@ classified result.
   file — keeping its inode, mode, owner and hardlinks — or by rename with the
   source's permission bits for a fresh one. A refused upload removes its temp; a
   recursive download refuses to land on a local directory that is not empty
-  rather than copying the tree and then failing.
+  rather than copying the tree and then failing. When a copy is stopped the local
+  child is waited out across its TERM→KILL grace; since 0.0.36 the transfer then
+  fires one short, bounded, best-effort command asking the server to end the mover it
+  may have stranded — a `cat` parked reading a fifo with no writer, or writing one with
+  no reader, never touches the channel, so closing it cannot wake the syscall it is
+  stuck in (such a reader was seen outliving its call by hours). The mover is named by
+  the argument it is moving and matched `[c]at …` so the cleanup cannot kill its own
+  shell; a server with no `pkill` is told the mover may linger rather than having the
+  copy's outcome rewritten.
   An `edit` reads the file **and its version and its digest** in one trip, copies
   it before truncating, writes through the same inode, checks the size it had to
   leave **and the SHA-256 of the bytes it sent**, and if any of that goes wrong a
@@ -363,7 +376,13 @@ classified result.
   on what evidence: `verdict` carried by a `digest`, or by a byte count alone, which
   is reported as `unknown` and never as a success. The digest guard is what catches
   the case a size check cannot see — another writer landing a body of the same length
-  and different bytes. The
+  and different bytes. Since 0.0.36 the same digest guard runs *before* the write as
+  well: the read now also states the file's byte count so the split between header and
+  body is framed by size, not by guessing which lines look like a marker (a file whose
+  own first line begins with `ssh-plugin:` is no longer eaten), and when this server
+  cannot state a SHA-256 at all — no `sha256sum`, `shasum` or `openssl` — the edit
+  refuses before copying or truncating and leaves the file exactly as the read found
+  it, instead of landing an unverifiable write the way 0.0.35 did. The
   window between noticing a change and making one is now two shell builtins wide
   rather than a network trip, but it is a window: this is a preview-and-confirm
   flow, not a transaction. `dryRun: true` previews the match count and the diff

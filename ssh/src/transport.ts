@@ -504,7 +504,9 @@ function streamSources(handle: ChildHandle, budget?: SpillBudget): RemoteJobSour
       if (reader === undefined) return { text: '', nextOffset: fromByte, lossy: false }
       const read = reader.readFrom(fromByte)
       // A background command's output is pumped repeatedly, so the budget sees the
-      // same path over and over; `SpillBudget.observe` counts each one once.
+      // same path over and over as the stream keeps spilling; `SpillBudget.observe`
+      // charges the difference between one report's whole-stream offset and the last,
+      // so the ledger grows with the file on disk instead of freezing at the first.
       if (budget !== undefined && read.spillPath !== undefined) {
         budget.observe([{ path: read.spillPath, bytes: read.nextOffset }])
       }

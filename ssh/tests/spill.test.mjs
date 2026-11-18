@@ -148,17 +148,31 @@ test('one budget instance says nothing to another, which is what per Host proces
   assert.equal(second.ask(8).maxBytes, 8, 'and the second still grants its child a spill file')
 })
 
-test('a path reported twice is charged once, and a refusal names which limit answered', () => {
-  // A backgrounded job's stream grows between reports; counting it again would
-  // empty the budget out of one long log. The conservative direction is to
-  // understate spend nobody can re-measure, not to punish the next child.
+test('a background file that grows is charged up to its newest size, not frozen at the first', async () => {
+  // K-8: a streamed job re-reads its own spill file as the stream lengthens, so the
+  // same path comes back with a larger whole-stream offset each time. Charging only
+  // the first left the ledger a permanent understatement of the bytes actually on
+  // disk — a 900-byte file counted as 400 forever. The fix tops the account up by
+  // the difference, so `used` equals what the provider really wrote.
   const budget = new spill.SpillBudget(1_000, 2)
-  budget.observe([{ path: '/tmp/j.log', bytes: 400 }])
-  budget.observe([{ path: '/tmp/j.log', bytes: 900 }])
+  assert.equal(budget.observe([{ path: '/tmp/j.log', bytes: 400 }]), 400, 'the first report charges its whole offset')
   assert.equal(budget.used, 400)
-  assert.equal(budget.files, 1)
+  assert.equal(budget.observe([{ path: '/tmp/j.log', bytes: 900 }]), 500, 'the next report charges only the growth')
+  assert.equal(budget.used, 900, 'the ledger now matches the file on disk')
+  assert.equal(budget.files, 1, 'and it is still one file')
+  // Equal and smaller re-reports never refund: the file on disk did not shrink, and
+  // a re-count of the whole offset would empty the budget out of one long log.
+  assert.equal(budget.observe([{ path: '/tmp/j.log', bytes: 900 }]), 0, 'an equal report charges nothing')
+  assert.equal(budget.observe([{ path: '/tmp/j.log', bytes: 500 }]), 0, 'and so does a smaller one')
+  assert.equal(budget.used, 900, 'used never moves backward, and never double-counts')
+  // The file limit still answers on the second distinct path; the byte ledger, now
+  // correctly at 900 of 1_000, has not yet tipped the byte limit on its own.
   budget.observe([{ path: '/tmp/k.log', bytes: 300 }])
+  assert.equal(budget.used, 1_200, 'the second file tops up on top of the first')
   const refused = budget.ask(64)
   assert.equal(refused.maxBytes, 0)
-  assert.match(String(refused.note), /2 of 2 files already written/u)
+  // Either limit could answer here; the byte limit is the one that tipped first as
+  // the growing file pushed `used` past the ceiling, so the note says so.
+  assert.match(String(refused.note), /spill budget is spent/u)
+  assert.match(String(refused.note), /1200 of 1000 bytes already written/u)
 })

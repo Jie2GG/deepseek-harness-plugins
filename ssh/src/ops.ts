@@ -1432,7 +1432,38 @@ export function createOps(deps: OpsDeps): Ops {
           // before deciding the preview is enough.
           versionChecked: version !== undefined,
           ...(read.durationMs === undefined ? {} : { durationMs: read.durationMs }),
+          ...(originalSha256 === undefined
+            ? { notes: [`this server stated no SHA-256 for ${path}, so the same call without dryRun would be refused before writing and the file left unchanged`] }
+            : {}),
           hint: 'Dry run: nothing was written and no backup was taken. The same call without dryRun applies this change.',
+        }
+      }
+      // K-1: the SHA-256 capability is decided here, before anything is copied or
+      // truncated, not discovered after the fact. This read asked the server, in
+      // the same round trip that produced the text, for a checksum of those exact
+      // bytes; an empty answer means this server cannot state one (no `sha256sum`,
+      // no `shasum`, no `openssl`, or the tool failed to run). Without a digest to
+      // check what lands, an overwrite here is a bet the reader cannot audit: the
+      // byte count proves length, not content, and a same-length different body
+      // would sail through. So the edit **refuses before writing** — no copy, no
+      // truncation — and leaves the file exactly as the read found it. The reader
+      // gets a clear reason and two ways forward, rather than a write that landed
+      // unverified and now has to be read back and second-guessed.
+      if (originalSha256 === undefined) {
+        return {
+          action: 'edit',
+          ok: false,
+          status: 'exit-nonzero',
+          target,
+          path,
+          type: 'file',
+          contentVerified: false,
+          versionChecked: version !== undefined,
+          bytesBefore: outcome.bytesBefore,
+          bytesAfter: outcome.bytesAfter,
+          ...(read.durationMs === undefined ? {} : { durationMs: read.durationMs }),
+          message: `${record.host} could not state a SHA-256 for ${path}, so this edit was not written and the file is unchanged: an overwrite that cannot be checked after it lands would have left the new bytes unverified and the old ones at the mercy of the copy step.`,
+          hint: `Put a checksum tool (sha256sum, shasum, or openssl) on ${record.host} and re-run, replace the whole file with \`write\` (which needs no read-verify), or re-run with dryRun: true to preview the change without touching the file.`,
         }
       }
       // The write is guarded, copied, checked, and — if any of that goes wrong

@@ -1160,24 +1160,32 @@ test('a failed repair says where the previous content is instead of claiming suc
   assertPayloadValid(h.definition.output.schema, payload)
 })
 
-test('a server that cannot state a checksum writes, and is not believed', async () => {
-  // The fail-closed half of the contract: the file may well be correct, and this
-  // call still refuses to say so, because nothing measured the bytes.
-  const h = remoteEditHarness('one\nbeta two\n', '/srv/x', { noSha: true })
+test('a server that cannot state a checksum is refused before writing, and keeps its file', async () => {
+  // K-1 at the product seam: the capability is read from the server, and a server
+  // that cannot state a SHA-256 never sees a byte of the file moved. The refusal is
+  // not "written but unverified" anymore — it is "not written at all".
+  const initial = 'one\nbeta two\n'
+  const h = remoteEditHarness(initial, '/srv/x', { noSha: true })
   const payload = await h.definition.execute({ action: 'edit', path: h.path, oldText: 'beta', newText: 'BETA' }, h.exec)
   assert.equal(payload.ok, false)
-  assert.equal(payload.verdict, 'unknown')
   assert.equal(payload.contentVerified, false)
+  assert.equal(payload.verdict, undefined, 'nothing was written, so there is no write verdict')
   assert.equal(payload.sha256, undefined)
-  assert.equal(payload.dryRun, undefined, 'a preview is not what an unverified write means')
-  assert.match(payload.message, /stated no checksum/)
-  assert.match(payload.message, /not proven to be this edit's content/)
-  assert.equal(payload.backup, '/srv/x.dsh-bak', 'and the copy is named, because it was kept')
-  assert.match(payload.hint, /Read \/srv\/x to see what is in it/)
+  assert.equal(payload.backup, undefined, 'no copy was taken — the refusal came before the copy step')
+  assert.equal(payload.dryRun, undefined, 'a refusal to write is not a preview')
+  assert.match(payload.message, /not written/)
+  assert.match(payload.message, /file is unchanged/)
+  assert.match(payload.hint, /sha256sum, shasum, or openssl/)
   assertPayloadValid(h.definition.output.schema, payload)
   const rendered = h.definition.output.render({ action: 'edit', path: h.path }, payload)[0].text
-  assert.match(rendered, /verdict=unknown \(content not verified by this server\)/)
-  assert.equal(h.server.files.get(h.path), 'one\nBETA two\n', 'the bytes did go down; only the proof is missing')
+  assert.match(rendered, /not written/)
+  // The proof the task asks for: the server\'s file is byte-for-byte what it was, and
+  // no truncating write and no safety copy were ever attempted.
+  assert.equal(h.server.files.get(h.path), initial, 'the remote file did not change')
+  assert.equal(h.server.writes, 0, 'no body was pushed through the channel')
+  assert.deepEqual(h.server.backups, [], 'and no copy was left behind')
+  assert.ok(!h.server.commands.some(entry => entry.command.includes('cp -p')), 'the copy child never ran')
+  assert.ok(!h.server.commands.some(entry => entry.command.includes('cat >')), 'the write child never ran')
 })
 
 test('a same-length body of different bytes is refused at the tool layer, and the file comes back', async () => {

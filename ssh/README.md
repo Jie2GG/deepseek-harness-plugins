@@ -739,9 +739,14 @@ still open:
   with which of the outcomes is true **and on what evidence** — a verdict (`landed`,
   `intact`, `restored`, `unrecoverable`) carried either by a digest or by a byte count
   alone. Since 0.0.35 a byte count buys no verdict: on a server with no `sha256sum`,
-  `shasum` or `openssl` the write still lands, the copy is kept, and the call ends
-  `ok: false` with `verdict: 'unknown'` and `contentVerified: false` rather than
-  claiming the bytes are this edit's. `restored: true` is set only when a digest says
+  `shasum` or `openssl`, 0.0.35 landed the write and ended `ok: false` with
+  `verdict: 'unknown'`; **since 0.0.36 the check moves before the write** — the read
+  states the SHA-256 in the round trip that produced the text, and when this server has
+  no tool to state one the edit **refuses before copying or truncating**: the remote
+  file is left exactly as it was found, no `.dsh-bak`, nothing to read back and
+  second-guess, and a `dryRun` still previews while saying the matching real edit would
+  be refused. An edit you cannot verify is now one you never started.
+  `restored: true` is set only when a digest says
   the content this call read is back. **It is still a preview-and-confirm flow, not a
   transaction**: the window
   between the version compare and the truncation is two shell builtins wide rather
@@ -777,11 +782,20 @@ still open:
   *after* copying the tree and then deleted it.
 - When a copy is stopped, the **local** child is gone: the provider is waited out
   across its TERM→KILL grace before the answer is given, and the live check proves
-  no `ssh` of ours is left holding a slot. What the server does with the command on
-  the other end of the channel is the server's business — measured honestly: a
-  remote `cat` blocked writing to a pipe dies at once, while one parked in
-  `open()` on a fifo with no writer can sit there until its own luck changes,
-  because closing a channel cannot interrupt a syscall that never touches it.
+  no `ssh` of ours is left holding a slot. Since 0.0.36 the plugin also tries to
+  clean up the far end: after a copy is stopped it fires one short, bounded,
+  best-effort command asking the server to end the mover it may have stranded —
+  named by the argument it is moving (a download's source path, an upload's unique
+  part file), written `[c]at …` so it cannot match its own shell. Why it is only
+  best-effort, measured honestly: a remote `cat` blocked writing to a pipe dies at
+  once when the channel closes, but one parked in `open()` on a fifo with no writer
+  never touches the channel, so sshd without a pty lets it sit (it was seen
+  outliving its call by hours) — closing the channel cannot interrupt a syscall it
+  is not in, so this asks the server to signal it instead. A server with no `pkill`
+  is told the mover may linger rather than having the copy's own outcome rewritten.
+  The live check now *asserts* this: the stranded reader of a timed-out download is
+  gone within the cleanup window (measured 213 ms) with no one reaching for `pkill`
+  by hand.
 - Spill files — the full-output recovery files the subprocess provider writes when
   a stream passes its ceiling — stay the **provider's**. It owns the directory,
   closes them, keeps completed ones until something outside the process cleans
@@ -791,7 +805,13 @@ still open:
   per conversation. Grants are never cut down to the remainder (a spill file the
   provider runs out of room for is *deleted*, which is worse than no file at all),
   so the number is a **stopping condition rather than a hard cap**: it bounds when
-  the asking stops, not how large the directory gets. What can pass it is the child
+  the asking stops, not how large the directory gets. What it charges per file is the
+  largest whole-stream offset the provider reported for it: a background stream
+  re-reads its own spill as the file grows, and since 0.0.36 each larger report tops
+  the ledger up by the difference — never double-counting an equal one, never
+  refunding a smaller one (a file on disk does not shrink) — so `used` follows the
+  bytes actually written instead of freezing at the first number, as it did through
+  0.0.35. What can pass it is the child
   whose report tipped it plus whatever else was in flight — one child may write on
   both of its faces, up to `maxSpillBytes` each — so at the defaults the reachable
   ceiling is nearer 3 GiB than 1 GiB, and a profile that raises `maxSpillBytes`

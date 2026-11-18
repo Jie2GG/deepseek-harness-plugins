@@ -40,6 +40,7 @@ const { transfer, remoteParts } = await import('../lib/transfer.js')
 const { AskPassHelper } = await import('../lib/askpass.js')
 const { MuxPool } = await import('../lib/pool.js')
 const { defaultBounds, resolveSettings } = await import('../lib/bounds.js')
+const { buildEditRead, splitEditVersion } = await import('../lib/edit.js')
 
 const argv = process.argv.slice(2)
 const flag = (name, fallback) => {
@@ -508,23 +509,24 @@ cases.release = async () => {
   const out2 = await copy('download', join(LOCAL, 'r2.bin'), quiet, { maxBytes: 8 * 1024 * 1024, timeoutMs: 700 })
   check('a copy that runs out of its deadline frees its slot too', out2.status === 'failed' && /deadline/iu.test(String(out2.message)) && transport.transfersInFlight === 0, `${out2.status}, lane ${String(transport.transfersInFlight)}`)
   check('an interrupted download leaves no part file behind', readdirSync(LOCAL).filter(name => name.includes('.dsh-part-')).length === 0, readdirSync(LOCAL).join(', '))
-  // What the local side can promise is that *its* child is gone; the server's
-  // reader exits when sshd finishes tearing the channel down, which is the
-  // server's business. Poll for it, and report the settle time as measured rather
-  // than asserting the optimistic one.
+  // K-4: closing the local `ssh` child cannot wake a server-side `cat` parked in
+  // open()/read() on a fifo with no writer — it never touches the channel, so sshd
+  // without a pty lets it sit for hours. The transfer layer now asks the server to
+  // end it after the teardown, so the poll below must find it gone on a server that
+  // has pkill. If it lingers, that is a real regression unless the server has no
+  // pkill to begin with, which the copy's own notes then say out loud.
+  const toldNoPkill = /no pkill to end it/u.test((out2.notes ?? []).join(' '))
+  const endedMover = /ended a leftover server-side mover/u.test((out2.notes ?? []).join(' '))
+  check('the interrupted download asked the server to end its stranded mover', endedMover || toldNoPkill, `notes: ${(out2.notes ?? []).join(' | ').slice(0, 160) || 'none'}`)
   const settledAfter = await untilGone('release-quiet.fifo', 5_000)
   if (settledAfter === null) {
-    // Measured, not argued: a remote `cat` parked in `open()` on a fifo with no
-    // writer is not reading or writing anything, so closing the channel has no
-    // way to interrupt it and sshd lets it sit. The same is *not* true of a
-    // command that is touching its descriptors — the growth case's writer died
-    // with the channel, which that check asserts. Recorded as an observation, and
-    // cleaned up, rather than failed as a promise this plugin never made.
-    const lingering = await remoteProcesses('release-quiet.fifo')
-    evidence(`observation: ${String(lingering.length)} server-side reader(s) of a fifo with no writer outlived the closed channel: ${lingering.map(line => line.trim().slice(0, 60)).join(' | ')}`)
-    await remote(`pkill -f 'cat -- ${REMOTE}/release-quiet.fifo' || true`)
+    check('the stranded server-side reader is gone after the cleanup', toldNoPkill, toldNoPkill
+      ? 'a server with no pkill was told the mover may linger (accepted residual)'
+      : `pkill is present yet the reader of release-quiet.fifo outlived the cleanup: ${String((await remoteProcesses('release-quiet.fifo')).length)} still running`)
+    if (!toldNoPkill) await remote(`pkill -f 'cat -- ${REMOTE}/release-quiet.fifo' || true`) // keep the fixture tidy
+    else evidence(`observation: ${String((await remoteProcesses('release-quiet.fifo')).length)} reader(s) lingered; ${TARGET_LABEL} has no pkill`)
   } else {
-    check('the server-side reader of a timed-out copy goes away on its own', true, `gone after ${String(settledAfter)} ms`)
+    check('the server-side reader of a timed-out copy is gone once the cleanup ran', true, `gone after ${String(settledAfter)} ms`)
   }
   const localStrays = localProcesses('release-quiet.fifo')
   check('no local ssh child of ours is left behind', localStrays.length === 0, localStrays.map(line => line.trim().slice(0, 80)).join(' | ') || 'none')
@@ -754,6 +756,48 @@ cases.temp = async () => {
 }
 
 /**
+ * K-1: the capability that gates an edit is a fact about the server, not about a
+ * fake. This runs the plugin's own read command under the server's real /bin/sh and
+ * shows the one signal the edit acts on — an empty `ssh-plugin-sha256:` line — is
+ * produced by a real server whose checksum tools are masked, while the same command
+ * states the true digest when the tools are present.
+ */
+cases.capability = async () => {
+  const path = `${REMOTE}/capability.txt`
+  const body = 'one line, then another\n'
+  await remote(`mkdir -p ${q(REMOTE)} && printf '%s' ${q(body)} > ${q(path)}`)
+  const cmd = buildEditRead(q(path))
+  // With the tools present, the read states the digest this very server computes.
+  const withTools = splitEditVersion((await remote(cmd)).stdout)
+  const trueDigest = (await remote(`sha256sum ${q(path)} 2>/dev/null | cut -c1-64 || shasum -a 256 ${q(path)} 2>/dev/null | cut -c1-64 || openssl dgst -sha256 ${q(path)} 2>/dev/null | sed 's/.*= *//'`)).stdout.trim()
+  check('the real server\'s read states the digest it computes for the file', trueDigest !== '' && withTools.digest === trueDigest, `read ${String(withTools.digest).slice(0, 12)}… vs ${trueDigest.slice(0, 12)}…`)
+  check('the read frames the body by the byte count this server stated', withTools.bodyBytes === Buffer.byteLength(body), `stated ${String(withTools.bodyBytes)} of ${String(Buffer.byteLength(body))} bytes`)
+  check('and hands the file back whole', withTools.content === body, JSON.stringify(withTools.content.slice(0, 30)))
+  // Now mask only the checksum tools: build a PATH with symlinks to everything the
+  // read still needs (cat, stat, wc, tr, head, sed, sh) but NOT sha256sum / shasum /
+  // openssl. printf and [ are shell builtins. The same command, run under that PATH,
+  // must yield an empty digest line — the exact fact K-1 turns into "refuse before
+  // writing".
+  const mask = `${REMOTE}/cap-bin-${stamp}`
+  const keepers = ['cat', 'stat', 'wc', 'tr', 'head', 'sed', 'sh', 'cut']
+  const linked = keepers.map(k => `ln -sf "$(command -v ${k} 2>/dev/null)" ${q(`${mask}/${k}`)} 2>/dev/null`).join(' ; ')
+  await remote(`rm -rf ${q(mask)} ; mkdir -p ${q(mask)} ; ${linked} ; rm -f ${q(`${mask}/sha256sum`)} ${q(`${mask}/shasum`)} ${q(`${mask}/openssl`)}`)
+  const maskedOut = (await remote(`env PATH=${q(mask)} sh ${q('-c')} ${q(cmd)}`)).stdout
+  const masked = splitEditVersion(maskedOut)
+  check('masking the checksum tools makes the same read state NO digest', masked.digest === undefined, `digest was ${JSON.stringify(String(masked.digest).slice(0, 16))}`)
+  check('the masked read still frames the file (a refusal here is about the digest only)', masked.version !== undefined && masked.content === body, `version ${String(masked.version !== undefined)}, body ${JSON.stringify(masked.content.slice(0, 20))}`)
+  // A digest-less read is precisely what ops.editRemote now refuses before writing:
+  // run the real edit against a file whose digest the server cannot state. Since the
+  // real target states its own PATH, we prove the gate by the masked signal above and
+  // by the offline real-shell suites; here we confirm the plugin does NOT refuse a
+  // capable server (the edit changed bytes and reported landed).
+  await remote(`printf '%s' ${q('worker_processes 1;\n')} > ${q(path)}`)
+  const realEdit = await ops.editRemote({ target: TARGET_LABEL, path, oldText: 'worker_processes 1;', newText: 'worker_processes auto;' })
+  check('a checksum-capable server is NOT over-refused: the edit lands verified', realEdit.ok === true && realEdit.verdict === 'landed' && realEdit.contentVerified === true, `${String(realEdit.ok)} verdict ${String(realEdit.verdict)} verified ${String(realEdit.contentVerified)}`)
+  await remote(`rm -rf ${q(mask)}`)
+}
+
+/**
  * The spill budget, against the provider that writes the files.
  *
  * Two claims are tested here. The first is the one every `exec` answer rests on:
@@ -888,7 +932,7 @@ cases.sink = async () => {
   check('the stalled copy freed its lane slot', transport.transfersInFlight === 0, String(transport.transfersInFlight))
 }
 
-const order = ['plain', 'grow', 'overwrite', 'modes', 'tilde', 'lane', 'tree', 'edit', 'spill', 'jobs', 'temp', 'sink', 'release']
+const order = ['plain', 'grow', 'overwrite', 'modes', 'tilde', 'lane', 'tree', 'edit', 'capability', 'spill', 'jobs', 'temp', 'sink', 'release']
 process.stdout.write(`\n@jie2gg/dsh-plugin-ssh live check against "${TARGET_LABEL}"\nscratch: ${LOCAL} ⇄ ${REMOTE}\n\n`)
 
 let failure = null

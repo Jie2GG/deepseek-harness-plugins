@@ -419,18 +419,33 @@ test('bytes that land at the right length and the wrong content are refused, and
   assert.ok(repair !== undefined, 'a refused content is repaired, not just reported')
 })
 
-test('a server with no checksum tool writes, and is not believed', async () => {
+test('a server with no checksum tool is refused before writing, and its file is left alone', async () => {
+  // K-1: the capability is checked from the read, not after the fact. A server that
+  // cannot state a SHA-256 gets a refusal, not a write that lands unverified: the
+  // file was never copied and never truncated.
   const built = editRunner('abc\n', { noSha: true })
   const out = await built.ops.editRemote({ path: '/f', oldText: 'b', newText: 'z' })
-  assert.equal(out.ok, false, 'an unverifiable write is not a success')
-  assert.equal(out.verdict, 'unknown')
+  assert.equal(out.ok, false, 'an unverifiable edit is refused outright')
   assert.equal(out.contentVerified, false)
-  assert.match(out.message, /no checksum/)
-  assert.match(out.hint, /Read \/f/)
-  assert.equal(out.backup, '/f.dsh-bak', 'the way back is named, because nothing proved the new bytes belong here')
-  // And the plugin does not gamble: no third child undoing a write that may well
-  // have finished.
-  assert.equal(built.state.calls.filter(call => call.kind === 'run').length, 2)
+  assert.equal(out.verdict, undefined, 'no write ran, so there is no write verdict to report')
+  assert.equal(out.backup, undefined, 'no safety copy was taken: the refusal came first')
+  assert.match(out.message, /not written/)
+  assert.match(out.message, /file is unchanged/)
+  assert.match(out.hint, /sha256sum, shasum, or openssl/)
+  // Only the read child ran. The write — `cp -p` and the truncating `cat >` — was
+  // never attempted, which is what "the file is unchanged" has to mean in fact.
+  assert.equal(built.state.calls.filter(c => c.command.includes('cp -p')).length, 0, 'no safety copy')
+  assert.equal(built.state.calls.filter(c => c.command.includes('cat >')).length, 0, 'no truncating write')
+  assert.equal(built.state.calls.filter(c => c.command.startsWith('if [ ! -f')).length, 1, 'exactly the one read')
+  assert.equal(built.server.file, 'abc\n', 'the bytes on the server are exactly what the read saw')
+  // A dry run on the same tool-less server still previews the change, and says the
+  // matching real edit would be refused — so a reader is not surprised by a yes that
+  // turns into a refusal.
+  const dry = editRunner('abc\n', { noSha: true })
+  const preview = await dry.ops.editRemote({ path: '/f', oldText: 'b', newText: 'z', dryRun: true })
+  assert.equal(preview.ok, true)
+  assert.equal(preview.dryRun, true)
+  assert.ok(preview.notes?.some(note => /would be refused before writing/u.test(String(note))), 'the preview warns the real run refuses')
 })
 
 test('a repair the server could only count is reported as unknown, never as restored', async () => {

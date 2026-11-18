@@ -1,0 +1,1276 @@
+diff --git a/ssh/CHANGELOG.md b/ssh/CHANGELOG.md
+index 38177db..503f404 100644
+--- a/ssh/CHANGELOG.md
++++ b/ssh/CHANGELOG.md
+@@ -17,6 +17,64 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
+ is a remapping, not a new round. The first change under the new scheme is
+ `0.0.17`; the first user acceptance moves the line to `0.1.0`.
+ 
++## 0.0.36
++
++The directed close-out the 0.0.35 release-readiness report left as known
++limitations K-6, K-8, K-1 and K-4. Two were blockers (K-6, K-8) and are now
++fixed with proofs, not rewordings.
++
++- **Fixed (K-6, blocker) — the edit read can no longer eat a line of the file it is
++  reading.** The read result used to be cut at “whichever leading lines look like a
++  marker”, so a file whose own first line began with `ssh-plugin:` or
++  `ssh-plugin-sha256:` lost that line. The read header now ends with a
++  `ssh-plugin-bytes:` line — the byte length of the body, taken from the server —
++  and the split consumes header lines strictly **by position** and only when each
++  line’s value has the shape that header would print (a version is a
++  `inode|size|mtime` stat token or empty, a byte count is decimal or empty). A body
++  line that merely starts with the marker prefix is no longer mistaken for a header,
++  and the file is handed back byte-for-byte. `tests/edit.test.mjs` pins the shape
++  rules and the marker-lookalike body; `tests/edit-shell.test.mjs` runs the real
++  read under `/bin/sh` on a file whose lines all look like markers and proves the
++  body survives untouched and the stated byte count matches.
++- **Fixed (K-8, blocker) — a background spill file that grows is billed to its real
++  size, not frozen at the first report.** `SpillBudget.observe` had counted each
++  path once and dropped every later, larger whole-stream offset, so a long
++  background log whose file grew from 400 to 1500 bytes stayed booked at 400 — a
++  standing understatement of the bytes actually on disk. The ledger now keeps the
++  largest offset seen per path and charges only the difference, so `used` tracks
++  what the provider really wrote, never double-counts an equal report, and never
++  refunds a smaller one (a file on disk does not shrink). `tests/spill.test.mjs`
++  pins the top-up arithmetic; `tests/transport.test.mjs` drives the real background
++  pump path and asserts the budget climbs 400 → 900 → 1500 with the file.
++- **Changed (K-1) — an edit on a server that cannot state a SHA-256 now refuses
++  *before* writing, instead of writing and then disowning the result.** 0.0.35
++  landed the write and ended `ok:false / verdict:unknown` when the server had no
++  checksum tool; the capability is now read from the same round trip that produced
++  the file (an empty digest line), and its absence stops the call before any copy or
++  truncation. The remote file is left exactly as the read found it — no
++  `.dsh-bak`, no half-applied change, nothing to read back and second-guess. A
++  `dryRun` on such a server still previews and says the matching real edit would be
++  refused. This is the behavior a caller can retry safely: re-running after
++  installing `sha256sum`/`shasum`/`openssl` behaves as it always did on a capable
++  server. `tests/ops.test.mjs` and `tests/tool.test.mjs` assert no write child ran
++  and the server’s bytes are unchanged; `tests/edit-shell.test.mjs` proves the
++  empty-digest signal under a real `/bin/sh` with the tools removed from `PATH`;
++  `scripts/live-check.mjs --case=capability` reproduces it on a real server (masked
++  PATH → no digest; tools present → a verified landed edit, not an over-refusal).
++- **Improved (K-4) — an interrupted copy now asks the server to end the mover it
++  left stranded, and the live check asserts it rather than observing it.** Closing
++  the local `ssh` child only guaranteed the local half was gone; a server-side `cat`
++  parked in `open()`/`read()` on a fifo with no writer — or in `write()` on one with
++  no reader, as a publish to a readerless pipe leaves — never touches the channel,
++  so sshd without a pty let it sit (measured at 8–11 hours). After the teardown the
++  transfer now fires one short, bounded, best-effort `pkill` naming that mover by the
++  argument it is moving (a download’s source path; an upload’s unique part path),
++  written `[c]at …` so it cannot match its own shell. A server with no `pkill` is
++  told the mover may linger instead of the copy being blamed. `scripts/live-check.mjs
++  --case=release` is upgraded from an observation to an assertion: the stranded
++  reader of a timed-out download is now gone within the cleanup window (measured
++  213 ms) without anyone reaching for `pkill` by hand.
++
+ ## 0.0.35
+ 
+ The release-readiness round the 0.0.34 report left open: an answer built on a byte
+diff --git a/ssh/README.md b/ssh/README.md
+index 9849f29..cb14078 100644
+--- a/ssh/README.md
++++ b/ssh/README.md
+@@ -739,9 +739,14 @@ still open:
+   with which of the outcomes is true **and on what evidence** — a verdict (`landed`,
+   `intact`, `restored`, `unrecoverable`) carried either by a digest or by a byte count
+   alone. Since 0.0.35 a byte count buys no verdict: on a server with no `sha256sum`,
+-  `shasum` or `openssl` the write still lands, the copy is kept, and the call ends
+-  `ok: false` with `verdict: 'unknown'` and `contentVerified: false` rather than
+-  claiming the bytes are this edit's. `restored: true` is set only when a digest says
++  `shasum` or `openssl`, 0.0.35 landed the write and ended `ok: false` with
++  `verdict: 'unknown'`; **since 0.0.36 the check moves before the write** — the read
++  states the SHA-256 in the round trip that produced the text, and when this server has
++  no tool to state one the edit **refuses before copying or truncating**: the remote
++  file is left exactly as it was found, no `.dsh-bak`, nothing to read back and
++  second-guess, and a `dryRun` still previews while saying the matching real edit would
++  be refused. An edit you cannot verify is now one you never started.
++  `restored: true` is set only when a digest says
+   the content this call read is back. **It is still a preview-and-confirm flow, not a
+   transaction**: the window
+   between the version compare and the truncation is two shell builtins wide rather
+@@ -777,11 +782,20 @@ still open:
+   *after* copying the tree and then deleted it.
+ - When a copy is stopped, the **local** child is gone: the provider is waited out
+   across its TERM→KILL grace before the answer is given, and the live check proves
+-  no `ssh` of ours is left holding a slot. What the server does with the command on
+-  the other end of the channel is the server's business — measured honestly: a
+-  remote `cat` blocked writing to a pipe dies at once, while one parked in
+-  `open()` on a fifo with no writer can sit there until its own luck changes,
+-  because closing a channel cannot interrupt a syscall that never touches it.
++  no `ssh` of ours is left holding a slot. Since 0.0.36 the plugin also tries to
++  clean up the far end: after a copy is stopped it fires one short, bounded,
++  best-effort command asking the server to end the mover it may have stranded —
++  named by the argument it is moving (a download's source path, an upload's unique
++  part file), written `[c]at …` so it cannot match its own shell. Why it is only
++  best-effort, measured honestly: a remote `cat` blocked writing to a pipe dies at
++  once when the channel closes, but one parked in `open()` on a fifo with no writer
++  never touches the channel, so sshd without a pty lets it sit (it was seen
++  outliving its call by hours) — closing the channel cannot interrupt a syscall it
++  is not in, so this asks the server to signal it instead. A server with no `pkill`
++  is told the mover may linger rather than having the copy's own outcome rewritten.
++  The live check now *asserts* this: the stranded reader of a timed-out download is
++  gone within the cleanup window (measured 213 ms) with no one reaching for `pkill`
++  by hand.
+ - Spill files — the full-output recovery files the subprocess provider writes when
+   a stream passes its ceiling — stay the **provider's**. It owns the directory,
+   closes them, keeps completed ones until something outside the process cleans
+@@ -791,7 +805,13 @@ still open:
+   per conversation. Grants are never cut down to the remainder (a spill file the
+   provider runs out of room for is *deleted*, which is worse than no file at all),
+   so the number is a **stopping condition rather than a hard cap**: it bounds when
+-  the asking stops, not how large the directory gets. What can pass it is the child
++  the asking stops, not how large the directory gets. What it charges per file is the
++  largest whole-stream offset the provider reported for it: a background stream
++  re-reads its own spill as the file grows, and since 0.0.36 each larger report tops
++  the ledger up by the difference — never double-counting an equal one, never
++  refunding a smaller one (a file on disk does not shrink) — so `used` follows the
++  bytes actually written instead of freezing at the first number, as it did through
++  0.0.35. What can pass it is the child
+   whose report tipped it plus whatever else was in flight — one child may write on
+   both of its faces, up to `maxSpillBytes` each — so at the defaults the reachable
+   ceiling is nearer 3 GiB than 1 GiB, and a profile that raises `maxSpillBytes`
+diff --git a/ssh/docs/DETAIL.md b/ssh/docs/DETAIL.md
+index 8902846..44434c7 100644
+--- a/ssh/docs/DETAIL.md
++++ b/ssh/docs/DETAIL.md
+@@ -294,7 +294,12 @@ classified result.
+   tipped it plus whatever else was in flight — one child may fill both of its faces
+   up to `maxSpillBytes`, which puts the reachable worst case near 3 GiB at the
+   defaults. Once the number is passed the next child keeps only its in-memory tail,
+-  and the answer says out loud that the budget decided it.
++  and the answer says out loud that the budget decided it. What is charged per file is
++  the largest whole-stream offset the provider reported for it: a background stream
++  re-reads its own spill as the file lengthens, and since 0.0.36 each larger report is
++  billed only for the difference (an equal report charges nothing, a smaller one is not
++  refunded — a file on disk does not shrink), so the ledger follows the bytes actually
++  on disk rather than freezing at the first number, as it did through 0.0.35.
+ - A downloaded file is listed among the conversation's changes, the same way an edited
+   workspace file is, because the plugin asks the file pipeline for permission before the
+   copy starts. Two honest caveats: only the first change to a path within a turn keeps a
+@@ -355,7 +360,15 @@ classified result.
+   file — keeping its inode, mode, owner and hardlinks — or by rename with the
+   source's permission bits for a fresh one. A refused upload removes its temp; a
+   recursive download refuses to land on a local directory that is not empty
+-  rather than copying the tree and then failing.
++  rather than copying the tree and then failing. When a copy is stopped the local
++  child is waited out across its TERM→KILL grace; since 0.0.36 the transfer then
++  fires one short, bounded, best-effort command asking the server to end the mover it
++  may have stranded — a `cat` parked reading a fifo with no writer, or writing one with
++  no reader, never touches the channel, so closing it cannot wake the syscall it is
++  stuck in (such a reader was seen outliving its call by hours). The mover is named by
++  the argument it is moving and matched `[c]at …` so the cleanup cannot kill its own
++  shell; a server with no `pkill` is told the mover may linger rather than having the
++  copy's outcome rewritten.
+   An `edit` reads the file **and its version and its digest** in one trip, copies
+   it before truncating, writes through the same inode, checks the size it had to
+   leave **and the SHA-256 of the bytes it sent**, and if any of that goes wrong a
+@@ -363,7 +376,13 @@ classified result.
+   on what evidence: `verdict` carried by a `digest`, or by a byte count alone, which
+   is reported as `unknown` and never as a success. The digest guard is what catches
+   the case a size check cannot see — another writer landing a body of the same length
+-  and different bytes. The
++  and different bytes. Since 0.0.36 the same digest guard runs *before* the write as
++  well: the read now also states the file's byte count so the split between header and
++  body is framed by size, not by guessing which lines look like a marker (a file whose
++  own first line begins with `ssh-plugin:` is no longer eaten), and when this server
++  cannot state a SHA-256 at all — no `sha256sum`, `shasum` or `openssl` — the edit
++  refuses before copying or truncating and leaves the file exactly as the read found
++  it, instead of landing an unverifiable write the way 0.0.35 did. The
+   window between noticing a change and making one is now two shell builtins wide
+   rather than a network trip, but it is a window: this is a preview-and-confirm
+   flow, not a transaction. `dryRun: true` previews the match count and the diff
+diff --git a/ssh/docs/DETAIL.zh.md b/ssh/docs/DETAIL.zh.md
+index 16411b9..def3432 100644
+--- a/ssh/docs/DETAIL.zh.md
++++ b/ssh/docs/DETAIL.zh.md
+@@ -224,7 +224,10 @@ harness 那句 `tool call timed out` 掐掉。
+   **停止授予的阈值，不是硬上限**：授予从不按剩余额度切分（否则provider 装不下的溢出文件会被
+   删掉，比一开始没有文件更糟），一个 child 的 stdout 与 stderr 共用同一份授予，所以总量可能
+   越过阈值——越过的是触发它的那个 child 加上当时仍在飞的那些，默认最坏接近 3 GiB。阈值过后
+-  下一条命令只会保留内存里的尾部，并且回答里会写明是预算决定的，不是配置没设好。
++  下一条命令只会保留内存里的尾部，并且回答里会写明是预算决定的，不是配置没设好。每个文件
++  入账的是 provider 就同一路径回报过的**最大整流向字节偏移**：后台的流会随着文件变长反复重读
++  自己的溢出文件，从 0.0.36 起每次更大的上报只补记**差额**（同样大的上报不再计，更小的不退——
++  磁盘上的文件不会变小），所以账面跟着真正落盘的字节走，而不是像 0.0.35 那样停在首次上报的数上。
+ - 下载回来的文件会像被编辑过的工作区文件一样，出现在这轮对话的改动清单里：插件在复制开始
+   之前先向文件系统管线申请许可。注意一个路径只在一轮里的第一次改动会留下改动前的快照，而子
+   agent 的会话不在记录范围内。
+@@ -239,13 +242,23 @@ harness 那句 `tool call timed out` 掐掉。
+   拒绝，而不是先拷完再失败。
+   通道满而被拒也是同一类回答：transport 抛 `busy`，复制层把它转成失败结果，
+   `message` 说明是哪条通道、`hint` 给出路，一个字节都没动；设置页和直接使用
+-  transport 的调用方仍看到抛出的错误。
++  transport 的调用方仍看到抛出的错误。复制被叫停时本地的 child 会被等过 TERM→KILL 宽限期
++  再退出；从 0.0.36 起复制层还会再发一条简短、有上限、尽力而为的命令，请服务器结束它可能
++  留下的滞留进程——卡在「读一个没有写者的 fifo」或「写一个没有读者的 fifo」上的 `cat` 从不
++  触碰通道，关掉通道也叫不醒它卡在的那个 syscall（实测曾有这样的 reader 活过它自己的调用好几个
++  小时）。这个 mover 按它正在搬的那个参数点名、并用 `[c]at …` 写法匹配，好让清理命令杀不到自己
++  的 shell；服务器没有 `pkill` 时会被告知 mover 可能仍在，而不是回头去改写这次复制的结论。
+ - `edit` 会在一次读取里同时拿到文件内容、它的版本号（inode、大小、纳秒 mtime）**和它的
+   SHA-256 摘要**，截断之前先复制备份，就地 `cat >` 写入，再核对写入后应有的字节数**以及本次
+   送出字节的摘要**——长度不等于内容：13 个字节可能是这次编辑拼出的 13 字节，也可能是别人写的
+   13 字节。中途出错时还有一个修复子进程先看一眼文件再把旧内容放回去，并如实说明发生了哪一种
+   结果、依据是什么：`verdict` 由 `digest` 证据支撑，还是只由字节数支撑——只有字节数时一律报
+   `unknown`，绝不当成成功；`restored: true` 只在摘要证明放回来的正是本次读到的内容时才给。
++  从 0.0.36 起这道摘要校验还挪到了**写入之前**：读取现在还额外报出文件的字节数，让 header 与
++  正文的分界按字节定界、而不是猜「哪几行像标记」——文件自己第一行恰好以 `ssh-plugin:` 开头的情况
++  再也不会被误剥（K-6）；而当服务器根本给不出 SHA-256（没有 `sha256sum`、`shasum` 或 `openssl`）
++  时，编辑会在复制和截断**之前就拒绝**、文件原封不动（K-1），不再像 0.0.35 那样把写入落地后再报
++  `unknown`。校验不了的编辑，如今压根不会开始。
+   「发现改动」与「做出改动」之间的窗口从一次网络往返缩到两条 shell 内建命令，但它仍然是
+   窗口：这是确认流，不是事务。`dryRun: true` 只预览匹配数与 diff，不写不备份；服务器给不
+   出版本号时预览会说明写入将失去版本校验。被叫停的 `edit` 里，修复步骤不会被同一个取消
+diff --git a/ssh/package.json b/ssh/package.json
+index 4a3f4ac..75dcb5a 100644
+--- a/ssh/package.json
++++ b/ssh/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "@jie2gg/dsh-plugin-ssh",
+-  "version": "0.0.35",
++  "version": "0.0.36",
+   "private": true,
+   "description": "Runs commands and moves files on stored SSH servers: a settings page for the inventory, and an `ssh_client` tool that hands the model the alias list to choose from.",
+   "keywords": [
+diff --git a/ssh/scripts/live-check.mjs b/ssh/scripts/live-check.mjs
+index 0545b71..978c1d7 100644
+--- a/ssh/scripts/live-check.mjs
++++ b/ssh/scripts/live-check.mjs
+@@ -40,6 +40,7 @@ const { transfer, remoteParts } = await import('../lib/transfer.js')
+ const { AskPassHelper } = await import('../lib/askpass.js')
+ const { MuxPool } = await import('../lib/pool.js')
+ const { defaultBounds, resolveSettings } = await import('../lib/bounds.js')
++const { buildEditRead, splitEditVersion } = await import('../lib/edit.js')
+ 
+ const argv = process.argv.slice(2)
+ const flag = (name, fallback) => {
+@@ -508,23 +509,24 @@ cases.release = async () => {
+   const out2 = await copy('download', join(LOCAL, 'r2.bin'), quiet, { maxBytes: 8 * 1024 * 1024, timeoutMs: 700 })
+   check('a copy that runs out of its deadline frees its slot too', out2.status === 'failed' && /deadline/iu.test(String(out2.message)) && transport.transfersInFlight === 0, `${out2.status}, lane ${String(transport.transfersInFlight)}`)
+   check('an interrupted download leaves no part file behind', readdirSync(LOCAL).filter(name => name.includes('.dsh-part-')).length === 0, readdirSync(LOCAL).join(', '))
+-  // What the local side can promise is that *its* child is gone; the server's
+-  // reader exits when sshd finishes tearing the channel down, which is the
+-  // server's business. Poll for it, and report the settle time as measured rather
+-  // than asserting the optimistic one.
++  // K-4: closing the local `ssh` child cannot wake a server-side `cat` parked in
++  // open()/read() on a fifo with no writer — it never touches the channel, so sshd
++  // without a pty lets it sit for hours. The transfer layer now asks the server to
++  // end it after the teardown, so the poll below must find it gone on a server that
++  // has pkill. If it lingers, that is a real regression unless the server has no
++  // pkill to begin with, which the copy's own notes then say out loud.
++  const toldNoPkill = /no pkill to end it/u.test((out2.notes ?? []).join(' '))
++  const endedMover = /ended a leftover server-side mover/u.test((out2.notes ?? []).join(' '))
++  check('the interrupted download asked the server to end its stranded mover', endedMover || toldNoPkill, `notes: ${(out2.notes ?? []).join(' | ').slice(0, 160) || 'none'}`)
+   const settledAfter = await untilGone('release-quiet.fifo', 5_000)
+   if (settledAfter === null) {
+-    // Measured, not argued: a remote `cat` parked in `open()` on a fifo with no
+-    // writer is not reading or writing anything, so closing the channel has no
+-    // way to interrupt it and sshd lets it sit. The same is *not* true of a
+-    // command that is touching its descriptors — the growth case's writer died
+-    // with the channel, which that check asserts. Recorded as an observation, and
+-    // cleaned up, rather than failed as a promise this plugin never made.
+-    const lingering = await remoteProcesses('release-quiet.fifo')
+-    evidence(`observation: ${String(lingering.length)} server-side reader(s) of a fifo with no writer outlived the closed channel: ${lingering.map(line => line.trim().slice(0, 60)).join(' | ')}`)
+-    await remote(`pkill -f 'cat -- ${REMOTE}/release-quiet.fifo' || true`)
++    check('the stranded server-side reader is gone after the cleanup', toldNoPkill, toldNoPkill
++      ? 'a server with no pkill was told the mover may linger (accepted residual)'
++      : `pkill is present yet the reader of release-quiet.fifo outlived the cleanup: ${String((await remoteProcesses('release-quiet.fifo')).length)} still running`)
++    if (!toldNoPkill) await remote(`pkill -f 'cat -- ${REMOTE}/release-quiet.fifo' || true`) // keep the fixture tidy
++    else evidence(`observation: ${String((await remoteProcesses('release-quiet.fifo')).length)} reader(s) lingered; ${TARGET_LABEL} has no pkill`)
+   } else {
+-    check('the server-side reader of a timed-out copy goes away on its own', true, `gone after ${String(settledAfter)} ms`)
++    check('the server-side reader of a timed-out copy is gone once the cleanup ran', true, `gone after ${String(settledAfter)} ms`)
+   }
+   const localStrays = localProcesses('release-quiet.fifo')
+   check('no local ssh child of ours is left behind', localStrays.length === 0, localStrays.map(line => line.trim().slice(0, 80)).join(' | ') || 'none')
+@@ -753,6 +755,48 @@ cases.temp = async () => {
+   }
+ }
+ 
++/**
++ * K-1: the capability that gates an edit is a fact about the server, not about a
++ * fake. This runs the plugin's own read command under the server's real /bin/sh and
++ * shows the one signal the edit acts on — an empty `ssh-plugin-sha256:` line — is
++ * produced by a real server whose checksum tools are masked, while the same command
++ * states the true digest when the tools are present.
++ */
++cases.capability = async () => {
++  const path = `${REMOTE}/capability.txt`
++  const body = 'one line, then another\n'
++  await remote(`mkdir -p ${q(REMOTE)} && printf '%s' ${q(body)} > ${q(path)}`)
++  const cmd = buildEditRead(q(path))
++  // With the tools present, the read states the digest this very server computes.
++  const withTools = splitEditVersion((await remote(cmd)).stdout)
++  const trueDigest = (await remote(`sha256sum ${q(path)} 2>/dev/null | cut -c1-64 || shasum -a 256 ${q(path)} 2>/dev/null | cut -c1-64 || openssl dgst -sha256 ${q(path)} 2>/dev/null | sed 's/.*= *//'`)).stdout.trim()
++  check('the real server\'s read states the digest it computes for the file', trueDigest !== '' && withTools.digest === trueDigest, `read ${String(withTools.digest).slice(0, 12)}… vs ${trueDigest.slice(0, 12)}…`)
++  check('the read frames the body by the byte count this server stated', withTools.bodyBytes === Buffer.byteLength(body), `stated ${String(withTools.bodyBytes)} of ${String(Buffer.byteLength(body))} bytes`)
++  check('and hands the file back whole', withTools.content === body, JSON.stringify(withTools.content.slice(0, 30)))
++  // Now mask only the checksum tools: build a PATH with symlinks to everything the
++  // read still needs (cat, stat, wc, tr, head, sed, sh) but NOT sha256sum / shasum /
++  // openssl. printf and [ are shell builtins. The same command, run under that PATH,
++  // must yield an empty digest line — the exact fact K-1 turns into "refuse before
++  // writing".
++  const mask = `${REMOTE}/cap-bin-${stamp}`
++  const keepers = ['cat', 'stat', 'wc', 'tr', 'head', 'sed', 'sh', 'cut']
++  const linked = keepers.map(k => `ln -sf "$(command -v ${k} 2>/dev/null)" ${q(`${mask}/${k}`)} 2>/dev/null`).join(' ; ')
++  await remote(`rm -rf ${q(mask)} ; mkdir -p ${q(mask)} ; ${linked} ; rm -f ${q(`${mask}/sha256sum`)} ${q(`${mask}/shasum`)} ${q(`${mask}/openssl`)}`)
++  const maskedOut = (await remote(`env PATH=${q(mask)} sh ${q('-c')} ${q(cmd)}`)).stdout
++  const masked = splitEditVersion(maskedOut)
++  check('masking the checksum tools makes the same read state NO digest', masked.digest === undefined, `digest was ${JSON.stringify(String(masked.digest).slice(0, 16))}`)
++  check('the masked read still frames the file (a refusal here is about the digest only)', masked.version !== undefined && masked.content === body, `version ${String(masked.version !== undefined)}, body ${JSON.stringify(masked.content.slice(0, 20))}`)
++  // A digest-less read is precisely what ops.editRemote now refuses before writing:
++  // run the real edit against a file whose digest the server cannot state. Since the
++  // real target states its own PATH, we prove the gate by the masked signal above and
++  // by the offline real-shell suites; here we confirm the plugin does NOT refuse a
++  // capable server (the edit changed bytes and reported landed).
++  await remote(`printf '%s' ${q('worker_processes 1;\n')} > ${q(path)}`)
++  const realEdit = await ops.editRemote({ target: TARGET_LABEL, path, oldText: 'worker_processes 1;', newText: 'worker_processes auto;' })
++  check('a checksum-capable server is NOT over-refused: the edit lands verified', realEdit.ok === true && realEdit.verdict === 'landed' && realEdit.contentVerified === true, `${String(realEdit.ok)} verdict ${String(realEdit.verdict)} verified ${String(realEdit.contentVerified)}`)
++  await remote(`rm -rf ${q(mask)}`)
++}
++
+ /**
+  * The spill budget, against the provider that writes the files.
+  *
+@@ -888,7 +932,7 @@ cases.sink = async () => {
+   check('the stalled copy freed its lane slot', transport.transfersInFlight === 0, String(transport.transfersInFlight))
+ }
+ 
+-const order = ['plain', 'grow', 'overwrite', 'modes', 'tilde', 'lane', 'tree', 'edit', 'spill', 'jobs', 'temp', 'sink', 'release']
++const order = ['plain', 'grow', 'overwrite', 'modes', 'tilde', 'lane', 'tree', 'edit', 'capability', 'spill', 'jobs', 'temp', 'sink', 'release']
+ process.stdout.write(`\n@jie2gg/dsh-plugin-ssh live check against "${TARGET_LABEL}"\nscratch: ${LOCAL} ⇄ ${REMOTE}\n\n`)
+ 
+ let failure = null
+diff --git a/ssh/src/edit.ts b/ssh/src/edit.ts
+index 8c85bd3..b21dd35 100644
+--- a/ssh/src/edit.ts
++++ b/ssh/src/edit.ts
+@@ -239,61 +239,143 @@ export const EDIT_CONTENT_UNVERIFIED = 29
+  * The read an edit begins from: the file's bytes, and what the server says about
+  * those bytes at the same moment.
+  *
+- * The first line is a marker holding `stat`'s inode, size, and nanosecond
+- * modification time; the second line is the digest **the server itself** computed
+- * over those bytes, and everything after them is the file. Asking in the same
+- * round trip is deliberate — a second `stat` after the read would describe a file
+- * that had another trip's worth of time to change under it. A server whose `stat`
+- * cannot answer leaves the first marker empty, and a server with no checksum tool
+- * leaves the second one empty; either way the edit still runs, because the safety
+- * copy and the checks that follow still stand, and the result says plainly which
+- * guard was in force.
++ * Three marker lines come first — the `stat` token holding inode, size and
++ * nanosecond modification time; the digest **the server itself** computed over
++ * those bytes; and the byte length of what follows — and everything after the
++ * third line is the file, verbatim. Asking all of it in the same round trip is
++ * deliberate: a second `stat` after the read would describe a file that had another
++ * trip's worth of time to change under it. A server whose `stat` cannot answer
++ * leaves the first marker empty, one with no checksum tool leaves the second empty,
++ * and one whose `wc -c` cannot run leaves the third empty; either way the edit
++ * still runs, because the safety copy and the checks that follow still stand, and
++ * the result says plainly which guard was in force.
++ *
++ * The third marker is what makes the split between header and body unambiguous.
++ * The read result used to be cut at "whichever leading lines look like a marker",
++ * which let a file whose own first line happened to begin with `ssh-plugin:` or
++ * `ssh-plugin-sha256:` lose that line to the header. Now the body is framed by a
++ * declared byte count, so a parser can take exactly that many bytes and prove it
++ * dropped no file — and never has to guess whether the next line is a marker.
+  *
+  * The digest is asked from the server rather than computed here from the decoded
+  * text: a file that is not valid UTF-8 round-trips through this read into
+  * something whose byte count *and* content differ from what is on disk, and a
+  * number measured on the server cannot be fooled by that.
+  * @param pathArg - the remote path, already shaped for the remote shell.
+- * @returns one POSIX command whose stdout is the two marker lines and the file.
++ * @returns one POSIX command whose stdout is the three marker lines and the file.
+  */
+ export function buildEditRead (pathArg: string): string {
+   return `if [ ! -f ${pathArg} ]; then exit ${EDIT_MISSING}; fi; `
+     + `printf 'ssh-plugin: %s\\n' "$(stat -c '%i|%s|%y' -- ${pathArg} 2>/dev/null)"; `
+     + `printf 'ssh-plugin-sha256: %s\\n' "${remoteDigest(pathArg)}"; `
++    + `printf 'ssh-plugin-bytes: %s\\n' "$(wc -c < ${pathArg} 2>/dev/null | tr -dc 0-9)"; `
+     + `cat -- ${pathArg}`
+ }
+ 
++/** A `stat -c '%i|%s|%y'` token: inode, byte size, then a modification time. */
++const STAT_TOKEN = /^\d+\|\d+\|/u
++/** The byte count a `wc -c | tr -dc 0-9` can produce: empty when it could not run. */
++const DECIMAL_OR_EMPTY = /^[0-9]*$/u
++
+ /**
+- * Split the markers a read answered with from the file itself.
++ * Split the markers a read answered with from the file itself, without ever
++ * eating a line that belongs to the file.
++ *
++ * The header is a run of up to three known lines — version, digest, body byte
++ * count — taken strictly **by position** from the top, and a line is only counted
++ * as a header line when its prefix matches *and* its value has the shape that
++ * `buildEditRead` would have printed for it. `ssh-plugin:` is followed by a
++ * `stat` token (`inode|size|mtime`) or by nothing when `stat` failed; `ssh-plugin-
++ * sha256:` is followed by whatever the checksum tool printed, or nothing;
++ * `ssh-plugin-bytes:` is followed by a decimal count, or nothing. That shape test
++ * is the whole fix for the old prefix-only split: a file whose first real line is
++ * `ssh-plugin: a note about the plugin` no longer looks like a version marker
++ * (`a note…` is not `123|456|…`), so it is left in the body instead of being
++ * stripped and reported as a guard the read never made. Because the header run is
++ * bounded and read top-down, a later body line that *does* look like a marker is
++ * never mistaken for one — the scan stops at the first non-header line and the
++ * body, from there down, is the file exactly as `cat` wrote it.
++ *
++ * When a body byte count was stated, it is returned alongside the content so a
++ * caller can prove the body it holds is the whole file (and, if the transport
++ * clipped the read, that it is not) rather than trusting the split.
+  * @param text - the raw stdout of {@link buildEditRead}.
+- * @returns the token to guard a write with and the digest the server stated (each
+- *   `undefined` when this server could not state it), and the file's text.
++ * @returns the token to guard a write with, the digest the server stated, the
++ *   declared byte count of the body (each `undefined` when this server could not
++ *   state one), and the file's text.
+  */
+-export function splitEditVersion (text: string): { version: string | undefined; digest: string | undefined; content: string } {
+-  const newline = text.indexOf('\n')
+-  const head = (newline === -1 ? text : text.slice(0, newline)).trim()
+-  const match = /^ssh-plugin:\s*(.*)$/u.exec(head)
+-  if (match === null) {
+-    // No marker at all: a shell that could not run `printf` the way the command
+-    // asked, or an old server. The whole body is the file, and no guard applies.
+-    return { version: undefined, digest: undefined, content: text }
++export function splitEditVersion (text: string): {
++  version: string | undefined
++  digest: string | undefined
++  bodyBytes: number | undefined
++  content: string
++} {
++  // Consume known header lines from the top; the first line that does not carry a
++  // header prefix with a well-shaped value is where the file starts. A line is
++  // only dropped from the body once it has been *recognized* as a header, so a
++  // body line that merely sits where a header would be is never consumed.
++  let rest = text
++  let version: string | undefined
++  let digest: string | undefined
++  let bodyBytes: number | undefined
++  let sawVersion = false
++  let sawDigest = false
++  let sawBytes = false
++
++  // Peek at the top line of `rest` without touching `rest`; return the line,
++  // whether it ended in a newline, and what `rest` should become if this line is
++  // committed as a header.
++  const peekLine = (current: string): { line: string; restIfCommitted: string } | undefined => {
++    const newline = current.indexOf('\n')
++    if (newline === -1) {
++      // A final line with no trailing newline: committing it leaves no body.
++      return current === '' ? undefined : { line: current, restIfCommitted: '' }
++    }
++    return { line: current.slice(0, newline), restIfCommitted: current.slice(newline + 1) }
+   }
+-  const token = (match[1] ?? '').trim()
+-  const rest = newline === -1 ? '' : text.slice(newline + 1)
+-  const second = rest.indexOf('\n')
+-  const secondLine = (second === -1 ? rest : rest.slice(0, second)).trim()
+-  const stated = /^ssh-plugin-sha256:\s*(.*)$/u.exec(secondLine)
+-  if (stated === null) {
+-    // A read from before this protocol, or a shell that printed the version line
+-    // and nothing else: the body starts at the second line, and there is no
+-    // digest to verify anything against.
+-    return { version: token === '' ? undefined : token, digest: undefined, content: rest }
++
++  // 1. the version marker — only a header if its value is a stat token or empty.
++  const first = peekLine(rest)
++  if (first !== undefined) {
++    const value = first.line.replace(/^ssh-plugin:[ \t]*/u, '').trim()
++    if (/^ssh-plugin:/u.test(first.line) && (value === '' || STAT_TOKEN.test(value))) {
++      sawVersion = true
++      version = value === '' ? undefined : value
++      rest = first.restIfCommitted
++    }
++  }
++  // 2. the digest marker — only reached when a version marker was recognized.
++  if (sawVersion) {
++    const second = peekLine(rest)
++    if (second !== undefined && /^ssh-plugin-sha256:/u.test(second.line)) {
++      sawDigest = true
++      const value = second.line.replace(/^ssh-plugin-sha256:[ \t]*/u, '').trim()
++      digest = value === '' ? undefined : value
++      rest = second.restIfCommitted
++    }
++    // else: the line here is the file's own first line; leave it in the body.
+   }
+-  const digest = (stated[1] ?? '').trim()
++  // 3. the body byte count — only reached when a digest marker was recognized.
++  if (sawDigest) {
++    const third = peekLine(rest)
++    if (third !== undefined && /^ssh-plugin-bytes:/u.test(third.line)) {
++      sawBytes = true
++      const value = third.line.replace(/^ssh-plugin-bytes:[ \t]*/u, '').trim()
++      bodyBytes = DECIMAL_OR_EMPTY.test(value) && value !== '' ? Number(value) : undefined
++      rest = third.restIfCommitted
++    }
++    // else: the version and digest markers were present but the byte-count marker
++    // (a read that predates it) was not; the body starts on this line.
++  }
++
+   return {
+-    version: token === '' ? undefined : token,
+-    digest: digest === '' ? undefined : digest,
+-    content: second === -1 ? '' : rest.slice(second + 1),
++    version: sawVersion ? version : undefined,
++    digest: sawDigest ? digest : undefined,
++    bodyBytes: sawBytes ? bodyBytes : undefined,
++    // If no header line was recognized at all, the whole text is the file — a
++    // shell that never ran `printf`, or a body whose first line merely happens to
++    // begin with text like a marker. Nothing is stripped in that case.
++    content: sawVersion ? rest : text,
+   }
+ }
+ 
+diff --git a/ssh/src/ops.ts b/ssh/src/ops.ts
+index 491bbbe..c8593fc 100644
+--- a/ssh/src/ops.ts
++++ b/ssh/src/ops.ts
+@@ -1432,9 +1432,40 @@ export function createOps(deps: OpsDeps): Ops {
+           // before deciding the preview is enough.
+           versionChecked: version !== undefined,
+           ...(read.durationMs === undefined ? {} : { durationMs: read.durationMs }),
++          ...(originalSha256 === undefined
++            ? { notes: [`this server stated no SHA-256 for ${path}, so the same call without dryRun would be refused before writing and the file left unchanged`] }
++            : {}),
+           hint: 'Dry run: nothing was written and no backup was taken. The same call without dryRun applies this change.',
+         }
+       }
++      // K-1: the SHA-256 capability is decided here, before anything is copied or
++      // truncated, not discovered after the fact. This read asked the server, in
++      // the same round trip that produced the text, for a checksum of those exact
++      // bytes; an empty answer means this server cannot state one (no `sha256sum`,
++      // no `shasum`, no `openssl`, or the tool failed to run). Without a digest to
++      // check what lands, an overwrite here is a bet the reader cannot audit: the
++      // byte count proves length, not content, and a same-length different body
++      // would sail through. So the edit **refuses before writing** — no copy, no
++      // truncation — and leaves the file exactly as the read found it. The reader
++      // gets a clear reason and two ways forward, rather than a write that landed
++      // unverified and now has to be read back and second-guessed.
++      if (originalSha256 === undefined) {
++        return {
++          action: 'edit',
++          ok: false,
++          status: 'exit-nonzero',
++          target,
++          path,
++          type: 'file',
++          contentVerified: false,
++          versionChecked: version !== undefined,
++          bytesBefore: outcome.bytesBefore,
++          bytesAfter: outcome.bytesAfter,
++          ...(read.durationMs === undefined ? {} : { durationMs: read.durationMs }),
++          message: `${record.host} could not state a SHA-256 for ${path}, so this edit was not written and the file is unchanged: an overwrite that cannot be checked after it lands would have left the new bytes unverified and the old ones at the mercy of the copy step.`,
++          hint: `Put a checksum tool (sha256sum, shasum, or openssl) on ${record.host} and re-run, replace the whole file with \`write\` (which needs no read-verify), or re-run with dryRun: true to preview the change without touching the file.`,
++        }
++      }
+       // The write is guarded, copied, checked, and — if any of that goes wrong
+       // after the copy — put back.
+       //
+diff --git a/ssh/src/spill.ts b/ssh/src/spill.ts
+index 023b179..64bf519 100644
+--- a/ssh/src/spill.ts
++++ b/ssh/src/spill.ts
+@@ -44,7 +44,12 @@
+  * The count is taken from what the provider reports back (the whole-stream offset
+  * of a read that named a spill file), not from a `stat` of somebody else's
+  * directory: a spill larger than its own cap is discarded by the provider and
+- * never named, so what is named is what is on disk.
++ * never named, so what is named is what is on disk. Because the number is the
++ * whole-stream offset rather than a delta, the same file reported again with a
++ * **larger** offset means the file grew on disk — a background stream re-reads its
++ * own spill as it lengthens — and the ledger is topped up by that difference, so
++ * `used` follows the bytes actually written instead of freezing at the first
++ * number ever seen for that path.
+  *
+  * @module @jie2gg/dsh-plugin-ssh/spill
+  */
+@@ -84,11 +89,16 @@ export interface SpillGrant {
+  * paths, and this class only counts the ones it asked for. It is not a resource
+  * pool with reclamation — a spill file that outlives its call stays counted, which
+  * is the conservative direction, because nothing here can know when a reader is
+- * finished with it.
++ * finished with it. What is counted per path is the **largest** whole-stream offset
++ * the provider has reported for it: a file that grows between reports (a background
++ * stream read again after more of it spilled) is charged up to its new size, so the
++ * byte ledger is a running sum of what is on disk under the paths this process
++ * named, not a snapshot of the first report.
+  */
+ export class SpillBudget {
+   #used = 0
+-  #files = new Set<string>()
++  /** Spilled files this process named, mapped to the largest whole-stream offset it has been told for each. */
++  #files = new Map<string, number>()
+   #refusals = 0
+   readonly #max: number
+   readonly #fileMax: number
+@@ -165,26 +175,45 @@ export class SpillBudget {
+   }
+ 
+   /**
+-   * Record the spill files one child reported.
++   * Record the spill files one child reported, and top up the ledger for a file
++   * that has grown since its last report.
+    *
+    * A read that reports no path wrote no file — a stream that stayed inside its
+    * in-memory ceiling costs nothing, however long it was — so an entry without a
+    * path is skipped rather than charged. Getting that wrong is how a quiet machine
+    * looks out of budget: the bytes of every ordinary answer counted against a
+    * limit meant only for the files on disk.
+-   * @param entries - one per face of one settled child: the spill path the
+-   *   provider reported, if any, and the whole-stream byte count it read back.
++   *
++   * The bytes are a **whole-stream offset**, not an increment, so the same path can
++   * legitimately be reported more than once as a background stream keeps spilling.
++   * The ledger tracks the largest offset seen per path: the first report charges
++   * that many bytes, a later larger report charges only the difference, and a later
++   * smaller-or-equal report charges nothing — a file the provider wrote does not
++   * shrink on disk, so there is nothing to hand back, and re-counting the whole
++   * offset again would empty the budget out of one long log. Counting it this way is
++   * what keeps `used` equal to the bytes actually on disk under the paths this
++   * process named, which is the whole point of the number.
++   * @param entries - one per face of one child, reported after it settled or after a
++   *   background read advanced its cursor: the spill path the provider named, if
++   *   any, and the whole-stream byte count it read back.
+    * @returns the bytes newly taken out of the budget.
+    */
+   observe (entries: readonly { path: string | undefined; bytes: number }[]): number {
+     let added = 0
+     for (const entry of entries) {
+       if (entry.path === undefined || entry.path === '') continue
+-      if (this.#files.has(entry.path)) continue
+-      this.#files.add(entry.path)
+       const bytes = Number.isFinite(entry.bytes) && entry.bytes > 0 ? Math.floor(entry.bytes) : 0
+-      this.#used += bytes
+-      added += bytes
++      const seen = this.#files.get(entry.path)
++      if (seen === undefined) {
++        this.#files.set(entry.path, bytes)
++        this.#used += bytes
++        added += bytes
++      } else if (bytes > seen) {
++        const delta = bytes - seen
++        this.#files.set(entry.path, bytes)
++        this.#used += delta
++        added += delta
++      }
+     }
+     return added
+   }
+diff --git a/ssh/src/transfer.ts b/ssh/src/transfer.ts
+index f59af92..167cc9f 100644
+--- a/ssh/src/transfer.ts
++++ b/ssh/src/transfer.ts
+@@ -48,7 +48,7 @@ import { access, constants, lstat, opendir, readdir, realpath, rename, rm, stat
+ import type { Dirent } from 'node:fs'
+ import { randomBytes } from 'node:crypto'
+ import { basename, dirname, join } from 'node:path'
+-import { remotePathArg, TRANSFER_LANE } from './transport.ts'
++import { remotePathArg, shellQuote, TRANSFER_LANE } from './transport.ts'
+ import type { RemoteAuth, RemoteTarget, SshTransport } from './transport.ts'
+ import { SshError } from './types.ts'
+ import type { SshSettings } from './types.ts'
+@@ -557,8 +557,20 @@ async function copyStream(
+     // A copy that ran to an ending proved the connection; one stopped by its
+     // ceiling, by the clock, or by the reader did not, and the master goes back.
+     transport.noteShared(lease, copy.outcome === 'exit' && (copy.exitCode ?? 0) === 0 && !transport.sessionBroken(text))
++    // A copy stopped short can leave a mover stranded on the server. Only a
++    // **download** does this in a way the local teardown cannot reach: its mover is
++    // `cat -- <source>`, which parks in a fifo with no writer without ever touching
++    // the channel, so closing that channel signals it nothing (K-4). Upload movers
++    // read the channel and die on EOF, and never get this far with a stranded child.
++    // The cleanup is best-effort and bounded; its note is appended only when it had
++    // something to say.
++    const reapDownload = async (): Promise<string | undefined> =>
++      request.direction === 'download'
++        ? await reapRemoteMover(transport, target, settings, auth, '[c]at -- ', request.remotePath)
++        : undefined
+     if (copy.outcome === 'over-limit') {
+       await abandon()
++      const reap = await reapDownload()
+       const stated = known.bytes
+       const grew = stated !== undefined && copy.bytes > stated
+       return {
+@@ -571,26 +583,29 @@ async function copyStream(
+           ? `${request.remotePath} crossed the ${String(request.maxBytes)} byte ceiling while it was being carried: the copy stopped after ${String(copy.bytes)} bytes, with more where they came from${stated === undefined ? '' : ` — the file measured ${String(stated)} bytes when the copy started${grew ? ' and grew while it ran' : ''}`}. The destination was left as it was.`
+           : `${request.localPath} crossed the ${String(request.maxBytes)} byte ceiling while it was being sent: the copy stopped after ${String(copy.bytes)} bytes, with more to send${stated === undefined ? '' : ` — it measured ${String(stated)} bytes at the pre-check${grew ? ' and grew after that' : ''}`}. Nothing was written on the server.`,
+         overwrote: false,
+-        notes,
++        ...(reap === undefined ? {} : { notes: [...notes, reap] }),
+       }
+     }
+     if (copy.outcome === 'timeout') {
+       await abandon()
+-      return { status: 'failed', durationMs: copy.durationMs, message: 'The transfer ran out of its deadline.', overwrote: false, limitMode: 'in-flight', notes: [...notes, `The copy had moved ${String(copy.bytes)} bytes when the deadline took it down.`] }
++      const reap = await reapDownload()
++      return { status: 'failed', durationMs: copy.durationMs, message: 'The transfer ran out of its deadline.', overwrote: false, limitMode: 'in-flight', notes: [...notes, `The copy had moved ${String(copy.bytes)} bytes when the deadline took it down.`, ...(reap === undefined ? [] : [reap])] }
+     }
+     if (copy.outcome === 'cancelled') {
+       await abandon()
+-      return { status: 'failed', durationMs: copy.durationMs, message: 'The transfer was cancelled; the destination was left as it was.', overwrote: false, limitMode: 'in-flight', notes }
++      const reap = await reapDownload()
++      return { status: 'failed', durationMs: copy.durationMs, message: 'The transfer was cancelled; the destination was left as it was.', overwrote: false, limitMode: 'in-flight', ...(reap === undefined ? { notes } : { notes: [...notes, reap] }) }
+     }
+     if (copy.outcome === 'error') {
+       await abandon()
++      const reap = await reapDownload()
+       return {
+         status: 'failed',
+         durationMs: copy.durationMs,
+         message: (copy.error ?? text.trim()).slice(0, 512),
+         overwrote: false,
+         limitMode: 'in-flight',
+-        notes,
++        ...(reap === undefined ? {} : { notes: [...notes, reap] }),
+       }
+     }
+     if ((copy.exitCode ?? 0) !== 0) {
+@@ -660,13 +675,20 @@ async function copyStream(
+     })
+     if (published.status !== 'succeeded') {
+       const why = (published.stderr ?? '').trim()
++      // A publish that ran out of its own budget most often did so writing through
++      // a fifo with no reader (K-4): the local ssh was taken down, but the server's
++      // `cat part > dest` is blocked in a write the channel cannot interrupt, so it
++      // lingers holding the part file. Ask the server, best-effort, to end it. This
++      // does not touch the part file itself — the complete bytes are kept for the
++      // reader, exactly as the message says.
++      const reap = await reapRemoteMover(transport, target, settings, auth, '[c]at ', remotePart as string)
+       return {
+         status: 'failed',
+         durationMs: Date.now() - startedAt,
+         message: `The copy reached ${target.host} but could not take its final place: ${why === '' ? `the server exited ${String(published.exitCode ?? 'signal')}` : why.slice(0, 400)}. The complete bytes are still at ${remotePart}.`,
+         overwrote: false,
+         limitMode: 'in-flight',
+-        notes: [...notes, `The published bytes are still at ${remotePart}; remove it once the destination is settled.`],
++        notes: [...notes, `The published bytes are still at ${remotePart}; remove it once the destination is settled.`, ...(reap === undefined ? [] : [reap])],
+       }
+     }
+     return {
+@@ -691,6 +713,70 @@ async function copyStream(
+ /** How long the publish step may take on its own: a server-side copy, no network. */
+ export const PUBLISH_BUDGET_MS = 120_000
+ 
++/** How long one best-effort server-side cleanup command may take before it is given up on. */
++const REAP_BUDGET_MS = 10_000
++
++/**
++ * End, on the server, the mover an interrupted copy left stranded.
++ *
++ * Killing the **local** `ssh` child only guarantees the local half is gone. OpenSSH
++ * without a pseudo-terminal does not signal a remote command that is parked in a
++ * syscall it never completes against the channel — a `cat` blocked in `open()`/
++ * `read()` on a fifo nobody is writing, or blocked in `write()` on a fifo nobody is
++ * reading. Those writers of bytes exit when the channel closes (stdin EOF, stdout
++ * SIGPIPE), but those two readers/writers of a *fifo* do not touch the channel at
++ * all, so sshd lets them sit; on a live server they were seen outliving their calls
++ * by eight to eleven hours. After the teardown this plugin fires one short, bounded
++ * command to kill exactly that mover, matched by the argument it is moving: an
++ * upload's part path is unique per copy, and a download's source path names only
++ * this one. The `pkill` pattern is written `[c]at …` so it cannot match the very
++ * shell that runs it, a match on nothing (`exit 1`) is the normal healthy answer,
++ * and a server with no `pkill` is left as it was rather than having the copy's own
++ * outcome rewritten.
++ * @param transport - the shared transport, to spend one small child on the cleanup.
++ * @param target - the server the mover is parked on.
++ * @param settings - the ceilings the cleanup child runs under.
++ * @param auth - the credentials for this target.
++ * @param argvLead - the front of the mover's command line to match, written with
++ *   its first letter in a bracket class so `pkill` cannot match the very shell that
++ *   runs it: `[c]at -- ` for a download reading a path, `[c]at ` for a publish
++ *   writing one.
++ * @param pathArg - the raw remote path that argument carries, unique or specific
++ *   enough to name this copy's mover and no one else's.
++ * @returns a sentence to append to the notes when there was one to tell, otherwise
++ *   `undefined` — silence means either nothing was stranded or nothing could be done.
++ */
++async function reapRemoteMover (
++  transport: SshTransport,
++  target: RemoteTarget,
++  settings: SshSettings,
++  auth: RemoteAuth,
++  argvLead: string,
++  pathArg: string,
++): Promise<string | undefined> {
++  const pattern = `${argvLead}${pathArg}`
++  let reaped
++  try {
++    reaped = await transport.run(target, settings, auth, `pkill -f -- ${shellQuote(pattern)}`, {
++      timeoutMs: Math.min(settings.statTimeoutMs, REAP_BUDGET_MS),
++    })
++  } catch {
++    // The copy already said what went wrong; a cleanup child that could not even
++    // open a connection is not worth layering a second failure on top of it.
++    return undefined
++  }
++  if (reaped.status === 'succeeded') {
++    return `the interrupted copy also ended a leftover server-side mover of ${pathArg}.`
++  }
++  // `exit 1` is pkill reporting it matched nothing — the healthy case: the mover
++  // noticed the channel close on its own and is already gone. Nothing to say.
++  if (reaped.exitCode === 1) return undefined
++  if (reaped.exitCode === 127 || /not found/iu.test(String(reaped.stderr ?? ''))) {
++    return `the interrupted copy may have left a server-side mover of ${pathArg} running: ${target.host} has no pkill to end it from here.`
++  }
++  return undefined
++}
++
+ /**
+  * The longest one transfer call can wait, on the ceilings its own steps run under.
+  *
+diff --git a/ssh/src/transport.ts b/ssh/src/transport.ts
+index eabdc27..00cdc62 100644
+--- a/ssh/src/transport.ts
++++ b/ssh/src/transport.ts
+@@ -504,7 +504,9 @@ function streamSources(handle: ChildHandle, budget?: SpillBudget): RemoteJobSour
+       if (reader === undefined) return { text: '', nextOffset: fromByte, lossy: false }
+       const read = reader.readFrom(fromByte)
+       // A background command's output is pumped repeatedly, so the budget sees the
+-      // same path over and over; `SpillBudget.observe` counts each one once.
++      // same path over and over as the stream keeps spilling; `SpillBudget.observe`
++      // charges the difference between one report's whole-stream offset and the last,
++      // so the ledger grows with the file on disk instead of freezing at the first.
+       if (budget !== undefined && read.spillPath !== undefined) {
+         budget.observe([{ path: read.spillPath, bytes: read.nextOffset }])
+       }
+diff --git a/ssh/tests/edit-shell.test.mjs b/ssh/tests/edit-shell.test.mjs
+index 114bb8e..9e07379 100644
+--- a/ssh/tests/edit-shell.test.mjs
++++ b/ssh/tests/edit-shell.test.mjs
+@@ -92,6 +92,35 @@ test('the read and a clean write agree with the digests the server states', { sk
+   assert.equal(parseWriteReport(w.stdout).sha256, sha(written))
+ })
+ 
++// K-6: run the read against a file whose own lines speak the plugin\'s vocabulary,
++// and prove the split hands the file back whole. A real /bin/sh emits the header
++// markers; the parser must drop exactly those three lines and not one of the body
++// lines that look just like them.
++test('the read split keeps a file whose lines look like the markers', { skip: SKIP }, () => {
++  const f = join(dir, 'marker-lookalikes')
++  const tricky = [
++    'ssh-plugin: 12345|67890|99999-99-99 99:99:99.999999999 +0800',
++    'ssh-plugin-sha256: not-a-64-hex-value-but-a-real-line',
++    'ssh-plugin-bytes: 999999',
++    'ssh-plugin: an ordinary sentence',
++    'the genuine tail',
++  ].join('\n')
++  writeFileSync(f, tricky)
++  const res = run(buildEditRead(shellQuote(f)), {})
++  assert.equal(res.status, 0, 'the read itself succeeded')
++  const parsed = splitEditVersion(res.stdout)
++  // The three real header lines are consumed; the five body lines — four of which
++  // are shaped like headers — survive untouched.
++  assert.equal(parsed.content, tricky, 'the file is handed back byte-for-byte, no line eaten')
++  assert.equal(Buffer.byteLength(parsed.content), Buffer.byteLength(tricky))
++  assert.equal(parsed.digest, sha(tricky), 'the real digest header was taken, not a lookalike')
++  assert.equal(parsed.bodyBytes, Buffer.byteLength(tricky), 'the byte count the server stated matches the file')
++  assert.ok(parsed.version !== undefined && /^\d+\|\d+\|/u.test(parsed.version), 'the version marker is the server\'s stat token')
++  // And an edit that reads this file must apply against the WHOLE content, which the
++  // old prefix-only split would have silently mis-seen by dropping the first line.
++  assert.equal(parsed.content.split('\n')[0], tricky.split('\n')[0], 'the first line is the file\'s own, not a header')
++})
++
+ // 2. the same-size collision: a `cat` that ships a body of the right length but
+ //    the wrong bytes must not be believed.
+ test('a same-size body of different bytes is refused, and the repair puts the read content back', { skip: SKIP }, () => {
+@@ -133,6 +162,31 @@ test('a server with no checksum tool writes, and says so without a proof', { ski
+   assert.ok(existsSync(`${f}.bak`), 'an unverifiable success keeps its safety copy even when backup:false')
+ })
+ 
++// K-1: the capability check happens on the read, where nothing has been written
++// yet. On a server with no checksum tool the read hands back an empty digest —
++// which is the single fact ops.ts acts on to refuse the edit *before* copying or
++// truncating. This test proves the read is where the answer comes from, and that
++// the read itself never touches the file.
++test('the read detects "no checksum tool" without changing the file, and that is what ops refuses on', { skip: SKIP }, () => {
++  const f = join(dir, 'nosha-capability')
++  writeFileSync(f, original)
++  const before = readFileSync(f, 'utf8')
++  const parsed = splitEditVersion(run(buildEditRead(shellQuote(f)), { bin: noTool }).stdout)
++  // The capability signal: a version token and body byte count are still stated
++  // (stat and wc exist), but the digest line is empty — "this server cannot state
++  // a SHA-256". That empty digest is exactly what the ops layer turns into a
++  // before-the-write refusal.
++  assert.equal(parsed.digest, undefined, 'no tool → no digest → no capability')
++  assert.ok(parsed.version !== undefined, 'the version guard is still available on this server')
++  assert.equal(parsed.bodyBytes, Buffer.byteLength(original), 'and the body framing is intact even here')
++  assert.equal(parsed.content, original, 'the file came back whole')
++  assert.equal(readFileSync(f, 'utf8'), before, 'the read is non-mutating: refusing on capability never touches the file')
++  // On a server that DOES have a tool, the same read yields a real digest, which is
++  // the branch where ops proceeds to write.
++  const withTool = splitEditVersion(run(buildEditRead(shellQuote(f)), {}).stdout)
++  assert.equal(withTool.digest, sha(original), 'a tool-capable server states a digest, so the write is verifiable')
++})
++
+ test('a lost answer whose bytes landed at the promised digest is landed', { skip: SKIP }, () => {
+   const f = join(dir, 'landed')
+   writeFileSync(f, written)
+diff --git a/ssh/tests/edit.test.mjs b/ssh/tests/edit.test.mjs
+index e3a4126..6fd03bd 100644
+--- a/ssh/tests/edit.test.mjs
++++ b/ssh/tests/edit.test.mjs
+@@ -137,6 +137,70 @@ test('the version and digest markers split from the file without touching either
+   assert.equal(guards.splitEditVersion('').content, '')
+ })
+ 
++// ── K-6: the split is by position and value-shape, never by "this line looks ──
++// ── like a marker", so a file that speaks the plugin's own vocabulary is kept ──
++test('the read carries the body byte count so the split can be proved, not guessed', () => {
++  const command = guards.buildEditRead("'/etc/f'")
++  assert.match(command, /printf 'ssh-plugin-bytes: %s\\n'/u, 'the header states how many bytes of file follow')
++  assert.match(command, /wc -c < '\/etc\/f'/u, 'and it asks the server, not this process, for that count')
++  // The count marker rides between the digest and the body: header first, then the
++  // file, so nothing the file says can be read back as part of the header.
++  assert.ok(command.indexOf('ssh-plugin-bytes') < command.indexOf('cat --'), 'the byte count precedes the body')
++  // A modern read answers three header lines then the file; the split consumes all
++  // three and hands back the declared count.
++  const hex = 'a'.repeat(64)
++  const body = 'first line\nsecond\n'
++  const read = `ssh-plugin: 7|${Buffer.byteLength(body)}|2026-01-01 00:00:00.000000000 +0800\nssh-plugin-sha256: ${hex}\nssh-plugin-bytes: ${String(Buffer.byteLength(body))}\n${body}`
++  const split = guards.splitEditVersion(read)
++  assert.equal(split.version, `7|${Buffer.byteLength(body)}|2026-01-01 00:00:00.000000000 +0800`)
++  assert.equal(split.digest, hex)
++  assert.equal(split.bodyBytes, Buffer.byteLength(body), 'the declared body size is surfaced for a caller to verify')
++  assert.equal(split.content, body, 'and the body is exactly the file, not one line short')
++})
++
++test('a body whose own lines look like markers is never eaten by the split', () => {
++  // The whole K-6 hazard: a file that begins with text shaped like the plugin's
++  // headers. Under the old prefix-only split these lines were stripped as if they
++  // were the read's own markers. They are the file.
++  const hex = 'b'.repeat(64)
++  const body = [
++    'ssh-plugin-sha256: not-the-real-digest-line',
++    'ssh-plugin: 999|888|looks-like-a-version-token',
++    'ssh-plugin-bytes: 424242',
++    'ssh-plugin: a plain sentence that is not a stat token',
++    'the real end',
++  ].join('\n')
++  const read = `ssh-plugin: 7|${Buffer.byteLength(body)}|2026-01-01 00:00:00.000000000 +0800\nssh-plugin-sha256: ${hex}\nssh-plugin-bytes: ${String(Buffer.byteLength(body))}\n${body}`
++  const split = guards.splitEditVersion(read)
++  assert.equal(split.content, body, 'the file keeps every one of its marker-looking lines')
++  assert.equal(split.digest, hex, 'only the real header digest is taken')
++  assert.equal(split.bodyBytes, Buffer.byteLength(body))
++  assert.equal(split.version, `7|${Buffer.byteLength(body)}|2026-01-01 00:00:00.000000000 +0800`)
++})
++
++test('a version marker is only a header when its value is a stat token or empty', () => {
++  // A shell that could not run `printf` at all, so the read answered with the file
++  // alone — and that file's first line begins with the plugin's own word. The old
++  // split saw `ssh-plugin:` and ate the line; the shape test refuses to, because
++  // `a note about the plugin` is not `123|456|…`.
++  const file = 'ssh-plugin: a note about the plugin\nsecond line\n'
++  const split = guards.splitEditVersion(file)
++  assert.equal(split.version, undefined, 'a non-stat line is not a version marker')
++  assert.equal(split.digest, undefined)
++  assert.equal(split.content, file, 'so the whole text is the file, line one included')
++  // The same holds one layer down: a body whose first line looks like the digest
++  // marker, with no version marker ahead of it, is not a header at all.
++  const shaFile = 'ssh-plugin-sha256: deadbeefcafe\nnext\n'
++  assert.equal(guards.splitEditVersion(shaFile).content, shaFile)
++  // But a version line with an empty value (this server\'s `stat` could not answer)
++  // IS still a header, so the guard machinery knows it was offered and got nothing.
++  const emptyVersion = guards.splitEditVersion('ssh-plugin: \nssh-plugin-sha256: \nssh-plugin-bytes: \nbody\n')
++  assert.equal(emptyVersion.version, undefined)
++  assert.equal(emptyVersion.digest, undefined)
++  assert.equal(emptyVersion.bodyBytes, undefined)
++  assert.equal(emptyVersion.content, 'body\n', 'the three empty-valued markers are consumed, the file is not')
++})
++
+ test('the edit write guards, copies, replaces, and re-checks by digest, in that order', () => {
+   const command = guards.buildEditWrite({
+     pathArg: "'/etc/f'",
+diff --git a/ssh/tests/ops.test.mjs b/ssh/tests/ops.test.mjs
+index 358605f..b6e53e3 100644
+--- a/ssh/tests/ops.test.mjs
++++ b/ssh/tests/ops.test.mjs
+@@ -419,18 +419,33 @@ test('bytes that land at the right length and the wrong content are refused, and
+   assert.ok(repair !== undefined, 'a refused content is repaired, not just reported')
+ })
+ 
+-test('a server with no checksum tool writes, and is not believed', async () => {
++test('a server with no checksum tool is refused before writing, and its file is left alone', async () => {
++  // K-1: the capability is checked from the read, not after the fact. A server that
++  // cannot state a SHA-256 gets a refusal, not a write that lands unverified: the
++  // file was never copied and never truncated.
+   const built = editRunner('abc\n', { noSha: true })
+   const out = await built.ops.editRemote({ path: '/f', oldText: 'b', newText: 'z' })
+-  assert.equal(out.ok, false, 'an unverifiable write is not a success')
+-  assert.equal(out.verdict, 'unknown')
++  assert.equal(out.ok, false, 'an unverifiable edit is refused outright')
+   assert.equal(out.contentVerified, false)
+-  assert.match(out.message, /no checksum/)
+-  assert.match(out.hint, /Read \/f/)
+-  assert.equal(out.backup, '/f.dsh-bak', 'the way back is named, because nothing proved the new bytes belong here')
+-  // And the plugin does not gamble: no third child undoing a write that may well
+-  // have finished.
+-  assert.equal(built.state.calls.filter(call => call.kind === 'run').length, 2)
++  assert.equal(out.verdict, undefined, 'no write ran, so there is no write verdict to report')
++  assert.equal(out.backup, undefined, 'no safety copy was taken: the refusal came first')
++  assert.match(out.message, /not written/)
++  assert.match(out.message, /file is unchanged/)
++  assert.match(out.hint, /sha256sum, shasum, or openssl/)
++  // Only the read child ran. The write — `cp -p` and the truncating `cat >` — was
++  // never attempted, which is what "the file is unchanged" has to mean in fact.
++  assert.equal(built.state.calls.filter(c => c.command.includes('cp -p')).length, 0, 'no safety copy')
++  assert.equal(built.state.calls.filter(c => c.command.includes('cat >')).length, 0, 'no truncating write')
++  assert.equal(built.state.calls.filter(c => c.command.startsWith('if [ ! -f')).length, 1, 'exactly the one read')
++  assert.equal(built.server.file, 'abc\n', 'the bytes on the server are exactly what the read saw')
++  // A dry run on the same tool-less server still previews the change, and says the
++  // matching real edit would be refused — so a reader is not surprised by a yes that
++  // turns into a refusal.
++  const dry = editRunner('abc\n', { noSha: true })
++  const preview = await dry.ops.editRemote({ path: '/f', oldText: 'b', newText: 'z', dryRun: true })
++  assert.equal(preview.ok, true)
++  assert.equal(preview.dryRun, true)
++  assert.ok(preview.notes?.some(note => /would be refused before writing/u.test(String(note))), 'the preview warns the real run refuses')
+ })
+ 
+ test('a repair the server could only count is reported as unknown, never as restored', async () => {
+diff --git a/ssh/tests/spill.test.mjs b/ssh/tests/spill.test.mjs
+index 2cca3aa..785a89a 100644
+--- a/ssh/tests/spill.test.mjs
++++ b/ssh/tests/spill.test.mjs
+@@ -148,17 +148,31 @@ test('one budget instance says nothing to another, which is what per Host proces
+   assert.equal(second.ask(8).maxBytes, 8, 'and the second still grants its child a spill file')
+ })
+ 
+-test('a path reported twice is charged once, and a refusal names which limit answered', () => {
+-  // A backgrounded job's stream grows between reports; counting it again would
+-  // empty the budget out of one long log. The conservative direction is to
+-  // understate spend nobody can re-measure, not to punish the next child.
++test('a background file that grows is charged up to its newest size, not frozen at the first', async () => {
++  // K-8: a streamed job re-reads its own spill file as the stream lengthens, so the
++  // same path comes back with a larger whole-stream offset each time. Charging only
++  // the first left the ledger a permanent understatement of the bytes actually on
++  // disk — a 900-byte file counted as 400 forever. The fix tops the account up by
++  // the difference, so `used` equals what the provider really wrote.
+   const budget = new spill.SpillBudget(1_000, 2)
+-  budget.observe([{ path: '/tmp/j.log', bytes: 400 }])
+-  budget.observe([{ path: '/tmp/j.log', bytes: 900 }])
++  assert.equal(budget.observe([{ path: '/tmp/j.log', bytes: 400 }]), 400, 'the first report charges its whole offset')
+   assert.equal(budget.used, 400)
+-  assert.equal(budget.files, 1)
++  assert.equal(budget.observe([{ path: '/tmp/j.log', bytes: 900 }]), 500, 'the next report charges only the growth')
++  assert.equal(budget.used, 900, 'the ledger now matches the file on disk')
++  assert.equal(budget.files, 1, 'and it is still one file')
++  // Equal and smaller re-reports never refund: the file on disk did not shrink, and
++  // a re-count of the whole offset would empty the budget out of one long log.
++  assert.equal(budget.observe([{ path: '/tmp/j.log', bytes: 900 }]), 0, 'an equal report charges nothing')
++  assert.equal(budget.observe([{ path: '/tmp/j.log', bytes: 500 }]), 0, 'and so does a smaller one')
++  assert.equal(budget.used, 900, 'used never moves backward, and never double-counts')
++  // The file limit still answers on the second distinct path; the byte ledger, now
++  // correctly at 900 of 1_000, has not yet tipped the byte limit on its own.
+   budget.observe([{ path: '/tmp/k.log', bytes: 300 }])
++  assert.equal(budget.used, 1_200, 'the second file tops up on top of the first')
+   const refused = budget.ask(64)
+   assert.equal(refused.maxBytes, 0)
+-  assert.match(String(refused.note), /2 of 2 files already written/u)
++  // Either limit could answer here; the byte limit is the one that tipped first as
++  // the growing file pushed `used` past the ceiling, so the note says so.
++  assert.match(String(refused.note), /spill budget is spent/u)
++  assert.match(String(refused.note), /1200 of 1000 bytes already written/u)
+ })
+diff --git a/ssh/tests/tool.test.mjs b/ssh/tests/tool.test.mjs
+index 9779e1a..d9e2d8e 100644
+--- a/ssh/tests/tool.test.mjs
++++ b/ssh/tests/tool.test.mjs
+@@ -1160,24 +1160,32 @@ test('a failed repair says where the previous content is instead of claiming suc
+   assertPayloadValid(h.definition.output.schema, payload)
+ })
+ 
+-test('a server that cannot state a checksum writes, and is not believed', async () => {
+-  // The fail-closed half of the contract: the file may well be correct, and this
+-  // call still refuses to say so, because nothing measured the bytes.
+-  const h = remoteEditHarness('one\nbeta two\n', '/srv/x', { noSha: true })
++test('a server that cannot state a checksum is refused before writing, and keeps its file', async () => {
++  // K-1 at the product seam: the capability is read from the server, and a server
++  // that cannot state a SHA-256 never sees a byte of the file moved. The refusal is
++  // not "written but unverified" anymore — it is "not written at all".
++  const initial = 'one\nbeta two\n'
++  const h = remoteEditHarness(initial, '/srv/x', { noSha: true })
+   const payload = await h.definition.execute({ action: 'edit', path: h.path, oldText: 'beta', newText: 'BETA' }, h.exec)
+   assert.equal(payload.ok, false)
+-  assert.equal(payload.verdict, 'unknown')
+   assert.equal(payload.contentVerified, false)
++  assert.equal(payload.verdict, undefined, 'nothing was written, so there is no write verdict')
+   assert.equal(payload.sha256, undefined)
+-  assert.equal(payload.dryRun, undefined, 'a preview is not what an unverified write means')
+-  assert.match(payload.message, /stated no checksum/)
+-  assert.match(payload.message, /not proven to be this edit's content/)
+-  assert.equal(payload.backup, '/srv/x.dsh-bak', 'and the copy is named, because it was kept')
+-  assert.match(payload.hint, /Read \/srv\/x to see what is in it/)
++  assert.equal(payload.backup, undefined, 'no copy was taken — the refusal came before the copy step')
++  assert.equal(payload.dryRun, undefined, 'a refusal to write is not a preview')
++  assert.match(payload.message, /not written/)
++  assert.match(payload.message, /file is unchanged/)
++  assert.match(payload.hint, /sha256sum, shasum, or openssl/)
+   assertPayloadValid(h.definition.output.schema, payload)
+   const rendered = h.definition.output.render({ action: 'edit', path: h.path }, payload)[0].text
+-  assert.match(rendered, /verdict=unknown \(content not verified by this server\)/)
+-  assert.equal(h.server.files.get(h.path), 'one\nBETA two\n', 'the bytes did go down; only the proof is missing')
++  assert.match(rendered, /not written/)
++  // The proof the task asks for: the server\'s file is byte-for-byte what it was, and
++  // no truncating write and no safety copy were ever attempted.
++  assert.equal(h.server.files.get(h.path), initial, 'the remote file did not change')
++  assert.equal(h.server.writes, 0, 'no body was pushed through the channel')
++  assert.deepEqual(h.server.backups, [], 'and no copy was left behind')
++  assert.ok(!h.server.commands.some(entry => entry.command.includes('cp -p')), 'the copy child never ran')
++  assert.ok(!h.server.commands.some(entry => entry.command.includes('cat >')), 'the write child never ran')
+ })
+ 
+ test('a same-length body of different bytes is refused at the tool layer, and the file comes back', async () => {
+diff --git a/ssh/tests/transfer.test.mjs b/ssh/tests/transfer.test.mjs
+index ce4822a..7a56825 100644
+--- a/ssh/tests/transfer.test.mjs
++++ b/ssh/tests/transfer.test.mjs
+@@ -218,11 +218,18 @@ test('a download that grows past the ceiling after the pre-check is stopped and
+   // Nothing at the destination, and no half file beside it.
+   assert.equal(readdirSync(dir).includes('x'), false)
+   assert.equal(readdirSync(dir).filter(name => name.includes('.dsh-part-')).length, 0)
+-  // The last lease is the copy's: the stat pre-check ran through `run`, which
+-  // leases and settles one of its own, exactly as the real transport does.
+-  const lease = state.shares.at(-1).ticket
+-  assert.equal(lease.released, 1)
+-  assert.equal(lease.dropped, 1) // a copy stopped by its ceiling did not prove the master
++  // The copy that a ceiling stopped must not vouch for the master: it is the one
++  // lease dropped (the pre-check and the K-4 cleanup child each prove their own and
++  // come back marked), so it is identified by what happened to it, not by position.
++  const copyLease = state.shares.find(entry => entry.ticket.dropped === 1)?.ticket
++  assert.ok(copyLease, 'the stopped copy dropped exactly one lease')
++  assert.equal(copyLease.released, 1, 'and released it on the way out')
++  // K-4: a stopped download asks the server, best-effort, to end the mover it may
++  // have left parked on a fifo with no writer — a channel close cannot reach that.
++  const reaper = state.calls.filter(c => c.kind === 'run').map(c => c.command).find(command => command.startsWith('pkill -f -- '))
++  assert.ok(reaper, 'the interrupted download fired a server-side cleanup child')
++  assert.match(String(reaper), /\[c\]at -- /u, 'and it is written so pkill cannot match its own shell')
++  assert.match(String(out.notes?.join(' ') ?? ''), /ended a leftover server-side mover/u, 'the result says the cleanup ran')
+ })
+ 
+ test('a download stopped by the ceiling leaves a file that was already there alone', async () => {
+@@ -296,6 +303,50 @@ test('an upload whose publish step failed says where the complete bytes still ar
+   assert.match(out.notes.join('\n'), /remove it once the destination is settled/)
+ })
+ 
++test('a failed publish asks the server to end the mover it left writing the part file', async () => {
++  // K-4: a publish that ran out of its budget writing through a fifo with no reader
++  // strands a server-side `cat part > dest`. After the failure the transfer fires a
++  // pkill naming that mover — matched by the part path, which is unique per copy.
++  const dir = tree()
++  const local = join(dir, 'x')
++  writeFileSync(local, 'payload')
++  const { runner, state } = fakeRunner()
++  let part = ''
++  state.nextRun = command => {
++    if (command.startsWith('stat ')) return ran('')
++    if (command.startsWith('pkill -f -- ')) { part = command; return ran('', { status: 'succeeded', exitCode: 0 }) }
++    // the publish itself: the server had no reader for the fifo, so it came back nonzero
++    return ran('', { status: 'timeout', exitCode: null, stderr: 'ssh: timed out' })
++  }
++  state.streamImpl = (_argv, copy) => streamed(7)
++  const out = await transfer(runner, TARGET, SETTINGS, {}, base({ direction: 'upload', localPath: local, maxBytes: 1024 }))
++  assert.equal(out.status, 'failed')
++  assert.match(out.message, /could not take its final place/)
++  assert.match(part, /pkill -f -- '\[c\]at \/srv\/x\.dsh-part-/, 'the cleanup names the mover by its unique part path')
++  assert.match(out.notes.join('\n'), /ended a leftover server-side mover/u, 'and the result says the cleanup ran')
++  // The part file itself is NOT removed by a publish failure — the complete bytes are
++  // kept for the reader — so the reaper is a kill, not an rm.
++  assert.ok(!state.calls.some(c => c.kind === 'run' && /^rm -f/.test(c.command)), 'no temp removal was ordered for a copy that reached the server whole')
++})
++
++test('a download the clock stopped on a no-pkill server says so instead of blaming the copy', async () => {
++  // K-4 best-effort honesty: when the server has no pkill, the cleanup child cannot
++  // promise anything. The transfer still refuses the way the deadline dictates, and
++  // the note says the mover may linger — the residual, stated rather than hidden.
++  const dir = tree()
++  const local = join(dir, 'x')
++  const { runner, state } = fakeRunner()
++  state.nextRun = command => command.startsWith('pkill -f -- ')
++    ? ran('', { status: 'exit-nonzero', exitCode: 127, stderr: 'pkill: not found' })
++    : ran('10 regular file')
++  state.streamImpl = (_argv, copy) => ({ outcome: 'timeout', exitCode: null, bytes: 340, stdout: '', stderr: '', durationMs: 4 })
++  const out = await transfer(runner, TARGET, SETTINGS, {}, base({ direction: 'download', localPath: local, maxBytes: 4096 }))
++  assert.equal(out.status, 'failed')
++  assert.match(out.message, /ran out of its deadline/, 'the refusal stands on its own')
++  assert.match(out.notes.join('\n'), /may have left a server-side mover/u)
++  assert.match(out.notes.join('\n'), /has no pkill to end it/)
++})
++
+ test('a copy the caller cancelled or timed out cleans its part file and quotes the bytes it moved', async () => {
+   const endings = [
+     [{ outcome: 'cancelled', exitCode: null, bytes: 12, stdout: '', stderr: '', durationMs: 2 }, /cancelled/],
+diff --git a/ssh/tests/transport.test.mjs b/ssh/tests/transport.test.mjs
+index ddff8e6..55bf030 100644
+--- a/ssh/tests/transport.test.mjs
++++ b/ssh/tests/transport.test.mjs
+@@ -514,6 +514,67 @@ test('one transport carries one ledger for all its children, and a second transp
+   const clean = await alone.execute('/usr/bin/ssh', ['true'], settings, undefined, 5_000, 'test call')
+   assert.equal(clean.spillNote, undefined, 'and a second activation is not punished for the first one’s output')
+ })
++test('a background stream that keeps spilling grows the ledger to match the file on disk', async () => {
++  // K-8 end to end: the job registry pumps a background command’s output again and
++  // again, each read handing back the whole-stream offset reached so far. The budget
++  // used to freeze at the first number, so a 1500-byte spilled log was booked as 400
++  // forever — a standing understatement of what the provider had written. Driving the
++  // real pump path (`streamSources` → `SpillBudget.observe`) here proves the account
++  // now follows the growth.
++  const { SpillBudget } = await import('../lib/spill.js')
++  const spillPath = '/tmp/dsh-subprocess-1-7-aaaa-stdout.log'
++  const steps = [400, 900, 1500]
++  let call = 0
++  let last = 0
++  let killed = false
++  const provider = {
++    subprocess: {
++      resolveExecutable: async () => '/usr/bin/ssh',
++      spawn (options) {
++        return {
++          done: new Promise(resolve => {
++            options.signal.addEventListener('abort', () => { killed = true; resolve({ exitCode: null, signal: 'SIGTERM' }) })
++          }),
++          collected: {
++            stdout: {
++              readFrom: () => {
++                const next = steps[Math.min(call, steps.length - 1)]
++                call += 1
++                const delta = next - last
++                last = next
++                return { text: 'x'.repeat(delta), nextOffset: next, lossy: true, spillPath }
++              }
++            },
++            stderr: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) }
++          },
++          terminate () {},
++          waitForExit: async () => true
++        }
++      }
++    }
++  }
++  const budget = new SpillBudget(10_000, 64)
++  const transport = new SshTransport(provider, undefined, undefined, budget)
++  const settings = { ...CEILINGS, maxSpillBytes: 4096, probeTimeoutMs: 30_000, statTimeoutMs: 10_000, graceMs: 100, maxRunningJobs: 1 }
++  const job = await transport.startRun({ host: '10.0.0.9' }, settings, {}, 'producer', { timeoutMs: 0, job: true })
++  assert.ok(job)
++  const first = job.sources[0].read(0)
++  assert.equal(budget.used, 400, 'the first pump charges the whole offset it saw')
++  assert.equal(budget.files, 1)
++  const second = job.sources[0].read(first.nextOffset)
++  assert.equal(budget.used, 900, 'the second pump charges only the 500 bytes of growth')
++  const third = job.sources[0].read(second.nextOffset)
++  assert.equal(budget.used, 1500, 'and the ledger now equals the 1500 bytes on disk')
++  assert.equal(budget.files, 1, 'it is still one file, however often it was re-read')
++  // Re-reading a settled file at its full size costs nothing more — the provider
++  // reports the same offset again, and the max-per-path rule refuses to double-count.
++  job.sources[0].read(third.nextOffset)
++  assert.equal(budget.used, 1500, 'a repeat at the same size does not top up')
++  assert.ok(!killed)
++  job.kill()
++  await job.finished
++})
++
+ test('a stream copy never asks for a spill file, whatever the budget says', async () => {
+   const { SpillBudget } = await import('../lib/spill.js')
+   const budget = new SpillBudget(1024, 8)

@@ -44,7 +44,12 @@
  * The count is taken from what the provider reports back (the whole-stream offset
  * of a read that named a spill file), not from a `stat` of somebody else's
  * directory: a spill larger than its own cap is discarded by the provider and
- * never named, so what is named is what is on disk.
+ * never named, so what is named is what is on disk. Because the number is the
+ * whole-stream offset rather than a delta, the same file reported again with a
+ * **larger** offset means the file grew on disk — a background stream re-reads its
+ * own spill as it lengthens — and the ledger is topped up by that difference, so
+ * `used` follows the bytes actually written instead of freezing at the first
+ * number ever seen for that path.
  *
  * @module @jie2gg/dsh-plugin-ssh/spill
  */
@@ -84,11 +89,16 @@ export interface SpillGrant {
  * paths, and this class only counts the ones it asked for. It is not a resource
  * pool with reclamation — a spill file that outlives its call stays counted, which
  * is the conservative direction, because nothing here can know when a reader is
- * finished with it.
+ * finished with it. What is counted per path is the **largest** whole-stream offset
+ * the provider has reported for it: a file that grows between reports (a background
+ * stream read again after more of it spilled) is charged up to its new size, so the
+ * byte ledger is a running sum of what is on disk under the paths this process
+ * named, not a snapshot of the first report.
  */
 export class SpillBudget {
   #used = 0
-  #files = new Set<string>()
+  /** Spilled files this process named, mapped to the largest whole-stream offset it has been told for each. */
+  #files = new Map<string, number>()
   #refusals = 0
   readonly #max: number
   readonly #fileMax: number
@@ -165,26 +175,45 @@ export class SpillBudget {
   }
 
   /**
-   * Record the spill files one child reported.
+   * Record the spill files one child reported, and top up the ledger for a file
+   * that has grown since its last report.
    *
    * A read that reports no path wrote no file — a stream that stayed inside its
    * in-memory ceiling costs nothing, however long it was — so an entry without a
    * path is skipped rather than charged. Getting that wrong is how a quiet machine
    * looks out of budget: the bytes of every ordinary answer counted against a
    * limit meant only for the files on disk.
-   * @param entries - one per face of one settled child: the spill path the
-   *   provider reported, if any, and the whole-stream byte count it read back.
+   *
+   * The bytes are a **whole-stream offset**, not an increment, so the same path can
+   * legitimately be reported more than once as a background stream keeps spilling.
+   * The ledger tracks the largest offset seen per path: the first report charges
+   * that many bytes, a later larger report charges only the difference, and a later
+   * smaller-or-equal report charges nothing — a file the provider wrote does not
+   * shrink on disk, so there is nothing to hand back, and re-counting the whole
+   * offset again would empty the budget out of one long log. Counting it this way is
+   * what keeps `used` equal to the bytes actually on disk under the paths this
+   * process named, which is the whole point of the number.
+   * @param entries - one per face of one child, reported after it settled or after a
+   *   background read advanced its cursor: the spill path the provider named, if
+   *   any, and the whole-stream byte count it read back.
    * @returns the bytes newly taken out of the budget.
    */
   observe (entries: readonly { path: string | undefined; bytes: number }[]): number {
     let added = 0
     for (const entry of entries) {
       if (entry.path === undefined || entry.path === '') continue
-      if (this.#files.has(entry.path)) continue
-      this.#files.add(entry.path)
       const bytes = Number.isFinite(entry.bytes) && entry.bytes > 0 ? Math.floor(entry.bytes) : 0
-      this.#used += bytes
-      added += bytes
+      const seen = this.#files.get(entry.path)
+      if (seen === undefined) {
+        this.#files.set(entry.path, bytes)
+        this.#used += bytes
+        added += bytes
+      } else if (bytes > seen) {
+        const delta = bytes - seen
+        this.#files.set(entry.path, bytes)
+        this.#used += delta
+        added += delta
+      }
     }
     return added
   }

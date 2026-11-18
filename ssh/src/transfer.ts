@@ -48,7 +48,7 @@ import { access, constants, lstat, opendir, readdir, realpath, rename, rm, stat 
 import type { Dirent } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { basename, dirname, join } from 'node:path'
-import { remotePathArg, TRANSFER_LANE } from './transport.ts'
+import { remotePathArg, shellQuote, TRANSFER_LANE } from './transport.ts'
 import type { RemoteAuth, RemoteTarget, SshTransport } from './transport.ts'
 import { SshError } from './types.ts'
 import type { SshSettings } from './types.ts'
@@ -557,8 +557,20 @@ async function copyStream(
     // A copy that ran to an ending proved the connection; one stopped by its
     // ceiling, by the clock, or by the reader did not, and the master goes back.
     transport.noteShared(lease, copy.outcome === 'exit' && (copy.exitCode ?? 0) === 0 && !transport.sessionBroken(text))
+    // A copy stopped short can leave a mover stranded on the server. Only a
+    // **download** does this in a way the local teardown cannot reach: its mover is
+    // `cat -- <source>`, which parks in a fifo with no writer without ever touching
+    // the channel, so closing that channel signals it nothing (K-4). Upload movers
+    // read the channel and die on EOF, and never get this far with a stranded child.
+    // The cleanup is best-effort and bounded; its note is appended only when it had
+    // something to say.
+    const reapDownload = async (): Promise<string | undefined> =>
+      request.direction === 'download'
+        ? await reapRemoteMover(transport, target, settings, auth, '[c]at -- ', request.remotePath)
+        : undefined
     if (copy.outcome === 'over-limit') {
       await abandon()
+      const reap = await reapDownload()
       const stated = known.bytes
       const grew = stated !== undefined && copy.bytes > stated
       return {
@@ -571,26 +583,29 @@ async function copyStream(
           ? `${request.remotePath} crossed the ${String(request.maxBytes)} byte ceiling while it was being carried: the copy stopped after ${String(copy.bytes)} bytes, with more where they came from${stated === undefined ? '' : ` — the file measured ${String(stated)} bytes when the copy started${grew ? ' and grew while it ran' : ''}`}. The destination was left as it was.`
           : `${request.localPath} crossed the ${String(request.maxBytes)} byte ceiling while it was being sent: the copy stopped after ${String(copy.bytes)} bytes, with more to send${stated === undefined ? '' : ` — it measured ${String(stated)} bytes at the pre-check${grew ? ' and grew after that' : ''}`}. Nothing was written on the server.`,
         overwrote: false,
-        notes,
+        ...(reap === undefined ? {} : { notes: [...notes, reap] }),
       }
     }
     if (copy.outcome === 'timeout') {
       await abandon()
-      return { status: 'failed', durationMs: copy.durationMs, message: 'The transfer ran out of its deadline.', overwrote: false, limitMode: 'in-flight', notes: [...notes, `The copy had moved ${String(copy.bytes)} bytes when the deadline took it down.`] }
+      const reap = await reapDownload()
+      return { status: 'failed', durationMs: copy.durationMs, message: 'The transfer ran out of its deadline.', overwrote: false, limitMode: 'in-flight', notes: [...notes, `The copy had moved ${String(copy.bytes)} bytes when the deadline took it down.`, ...(reap === undefined ? [] : [reap])] }
     }
     if (copy.outcome === 'cancelled') {
       await abandon()
-      return { status: 'failed', durationMs: copy.durationMs, message: 'The transfer was cancelled; the destination was left as it was.', overwrote: false, limitMode: 'in-flight', notes }
+      const reap = await reapDownload()
+      return { status: 'failed', durationMs: copy.durationMs, message: 'The transfer was cancelled; the destination was left as it was.', overwrote: false, limitMode: 'in-flight', ...(reap === undefined ? { notes } : { notes: [...notes, reap] }) }
     }
     if (copy.outcome === 'error') {
       await abandon()
+      const reap = await reapDownload()
       return {
         status: 'failed',
         durationMs: copy.durationMs,
         message: (copy.error ?? text.trim()).slice(0, 512),
         overwrote: false,
         limitMode: 'in-flight',
-        notes,
+        ...(reap === undefined ? {} : { notes: [...notes, reap] }),
       }
     }
     if ((copy.exitCode ?? 0) !== 0) {
@@ -660,13 +675,20 @@ async function copyStream(
     })
     if (published.status !== 'succeeded') {
       const why = (published.stderr ?? '').trim()
+      // A publish that ran out of its own budget most often did so writing through
+      // a fifo with no reader (K-4): the local ssh was taken down, but the server's
+      // `cat part > dest` is blocked in a write the channel cannot interrupt, so it
+      // lingers holding the part file. Ask the server, best-effort, to end it. This
+      // does not touch the part file itself — the complete bytes are kept for the
+      // reader, exactly as the message says.
+      const reap = await reapRemoteMover(transport, target, settings, auth, '[c]at ', remotePart as string)
       return {
         status: 'failed',
         durationMs: Date.now() - startedAt,
         message: `The copy reached ${target.host} but could not take its final place: ${why === '' ? `the server exited ${String(published.exitCode ?? 'signal')}` : why.slice(0, 400)}. The complete bytes are still at ${remotePart}.`,
         overwrote: false,
         limitMode: 'in-flight',
-        notes: [...notes, `The published bytes are still at ${remotePart}; remove it once the destination is settled.`],
+        notes: [...notes, `The published bytes are still at ${remotePart}; remove it once the destination is settled.`, ...(reap === undefined ? [] : [reap])],
       }
     }
     return {
@@ -690,6 +712,70 @@ async function copyStream(
 
 /** How long the publish step may take on its own: a server-side copy, no network. */
 export const PUBLISH_BUDGET_MS = 120_000
+
+/** How long one best-effort server-side cleanup command may take before it is given up on. */
+const REAP_BUDGET_MS = 10_000
+
+/**
+ * End, on the server, the mover an interrupted copy left stranded.
+ *
+ * Killing the **local** `ssh` child only guarantees the local half is gone. OpenSSH
+ * without a pseudo-terminal does not signal a remote command that is parked in a
+ * syscall it never completes against the channel — a `cat` blocked in `open()`/
+ * `read()` on a fifo nobody is writing, or blocked in `write()` on a fifo nobody is
+ * reading. Those writers of bytes exit when the channel closes (stdin EOF, stdout
+ * SIGPIPE), but those two readers/writers of a *fifo* do not touch the channel at
+ * all, so sshd lets them sit; on a live server they were seen outliving their calls
+ * by eight to eleven hours. After the teardown this plugin fires one short, bounded
+ * command to kill exactly that mover, matched by the argument it is moving: an
+ * upload's part path is unique per copy, and a download's source path names only
+ * this one. The `pkill` pattern is written `[c]at …` so it cannot match the very
+ * shell that runs it, a match on nothing (`exit 1`) is the normal healthy answer,
+ * and a server with no `pkill` is left as it was rather than having the copy's own
+ * outcome rewritten.
+ * @param transport - the shared transport, to spend one small child on the cleanup.
+ * @param target - the server the mover is parked on.
+ * @param settings - the ceilings the cleanup child runs under.
+ * @param auth - the credentials for this target.
+ * @param argvLead - the front of the mover's command line to match, written with
+ *   its first letter in a bracket class so `pkill` cannot match the very shell that
+ *   runs it: `[c]at -- ` for a download reading a path, `[c]at ` for a publish
+ *   writing one.
+ * @param pathArg - the raw remote path that argument carries, unique or specific
+ *   enough to name this copy's mover and no one else's.
+ * @returns a sentence to append to the notes when there was one to tell, otherwise
+ *   `undefined` — silence means either nothing was stranded or nothing could be done.
+ */
+async function reapRemoteMover (
+  transport: SshTransport,
+  target: RemoteTarget,
+  settings: SshSettings,
+  auth: RemoteAuth,
+  argvLead: string,
+  pathArg: string,
+): Promise<string | undefined> {
+  const pattern = `${argvLead}${pathArg}`
+  let reaped
+  try {
+    reaped = await transport.run(target, settings, auth, `pkill -f -- ${shellQuote(pattern)}`, {
+      timeoutMs: Math.min(settings.statTimeoutMs, REAP_BUDGET_MS),
+    })
+  } catch {
+    // The copy already said what went wrong; a cleanup child that could not even
+    // open a connection is not worth layering a second failure on top of it.
+    return undefined
+  }
+  if (reaped.status === 'succeeded') {
+    return `the interrupted copy also ended a leftover server-side mover of ${pathArg}.`
+  }
+  // `exit 1` is pkill reporting it matched nothing — the healthy case: the mover
+  // noticed the channel close on its own and is already gone. Nothing to say.
+  if (reaped.exitCode === 1) return undefined
+  if (reaped.exitCode === 127 || /not found/iu.test(String(reaped.stderr ?? ''))) {
+    return `the interrupted copy may have left a server-side mover of ${pathArg} running: ${target.host} has no pkill to end it from here.`
+  }
+  return undefined
+}
 
 /**
  * The longest one transfer call can wait, on the ceilings its own steps run under.

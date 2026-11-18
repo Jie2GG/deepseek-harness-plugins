@@ -137,6 +137,70 @@ test('the version and digest markers split from the file without touching either
   assert.equal(guards.splitEditVersion('').content, '')
 })
 
+// ── K-6: the split is by position and value-shape, never by "this line looks ──
+// ── like a marker", so a file that speaks the plugin's own vocabulary is kept ──
+test('the read carries the body byte count so the split can be proved, not guessed', () => {
+  const command = guards.buildEditRead("'/etc/f'")
+  assert.match(command, /printf 'ssh-plugin-bytes: %s\\n'/u, 'the header states how many bytes of file follow')
+  assert.match(command, /wc -c < '\/etc\/f'/u, 'and it asks the server, not this process, for that count')
+  // The count marker rides between the digest and the body: header first, then the
+  // file, so nothing the file says can be read back as part of the header.
+  assert.ok(command.indexOf('ssh-plugin-bytes') < command.indexOf('cat --'), 'the byte count precedes the body')
+  // A modern read answers three header lines then the file; the split consumes all
+  // three and hands back the declared count.
+  const hex = 'a'.repeat(64)
+  const body = 'first line\nsecond\n'
+  const read = `ssh-plugin: 7|${Buffer.byteLength(body)}|2026-01-01 00:00:00.000000000 +0800\nssh-plugin-sha256: ${hex}\nssh-plugin-bytes: ${String(Buffer.byteLength(body))}\n${body}`
+  const split = guards.splitEditVersion(read)
+  assert.equal(split.version, `7|${Buffer.byteLength(body)}|2026-01-01 00:00:00.000000000 +0800`)
+  assert.equal(split.digest, hex)
+  assert.equal(split.bodyBytes, Buffer.byteLength(body), 'the declared body size is surfaced for a caller to verify')
+  assert.equal(split.content, body, 'and the body is exactly the file, not one line short')
+})
+
+test('a body whose own lines look like markers is never eaten by the split', () => {
+  // The whole K-6 hazard: a file that begins with text shaped like the plugin's
+  // headers. Under the old prefix-only split these lines were stripped as if they
+  // were the read's own markers. They are the file.
+  const hex = 'b'.repeat(64)
+  const body = [
+    'ssh-plugin-sha256: not-the-real-digest-line',
+    'ssh-plugin: 999|888|looks-like-a-version-token',
+    'ssh-plugin-bytes: 424242',
+    'ssh-plugin: a plain sentence that is not a stat token',
+    'the real end',
+  ].join('\n')
+  const read = `ssh-plugin: 7|${Buffer.byteLength(body)}|2026-01-01 00:00:00.000000000 +0800\nssh-plugin-sha256: ${hex}\nssh-plugin-bytes: ${String(Buffer.byteLength(body))}\n${body}`
+  const split = guards.splitEditVersion(read)
+  assert.equal(split.content, body, 'the file keeps every one of its marker-looking lines')
+  assert.equal(split.digest, hex, 'only the real header digest is taken')
+  assert.equal(split.bodyBytes, Buffer.byteLength(body))
+  assert.equal(split.version, `7|${Buffer.byteLength(body)}|2026-01-01 00:00:00.000000000 +0800`)
+})
+
+test('a version marker is only a header when its value is a stat token or empty', () => {
+  // A shell that could not run `printf` at all, so the read answered with the file
+  // alone — and that file's first line begins with the plugin's own word. The old
+  // split saw `ssh-plugin:` and ate the line; the shape test refuses to, because
+  // `a note about the plugin` is not `123|456|…`.
+  const file = 'ssh-plugin: a note about the plugin\nsecond line\n'
+  const split = guards.splitEditVersion(file)
+  assert.equal(split.version, undefined, 'a non-stat line is not a version marker')
+  assert.equal(split.digest, undefined)
+  assert.equal(split.content, file, 'so the whole text is the file, line one included')
+  // The same holds one layer down: a body whose first line looks like the digest
+  // marker, with no version marker ahead of it, is not a header at all.
+  const shaFile = 'ssh-plugin-sha256: deadbeefcafe\nnext\n'
+  assert.equal(guards.splitEditVersion(shaFile).content, shaFile)
+  // But a version line with an empty value (this server\'s `stat` could not answer)
+  // IS still a header, so the guard machinery knows it was offered and got nothing.
+  const emptyVersion = guards.splitEditVersion('ssh-plugin: \nssh-plugin-sha256: \nssh-plugin-bytes: \nbody\n')
+  assert.equal(emptyVersion.version, undefined)
+  assert.equal(emptyVersion.digest, undefined)
+  assert.equal(emptyVersion.bodyBytes, undefined)
+  assert.equal(emptyVersion.content, 'body\n', 'the three empty-valued markers are consumed, the file is not')
+})
+
 test('the edit write guards, copies, replaces, and re-checks by digest, in that order', () => {
   const command = guards.buildEditWrite({
     pathArg: "'/etc/f'",

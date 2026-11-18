@@ -218,11 +218,18 @@ test('a download that grows past the ceiling after the pre-check is stopped and 
   // Nothing at the destination, and no half file beside it.
   assert.equal(readdirSync(dir).includes('x'), false)
   assert.equal(readdirSync(dir).filter(name => name.includes('.dsh-part-')).length, 0)
-  // The last lease is the copy's: the stat pre-check ran through `run`, which
-  // leases and settles one of its own, exactly as the real transport does.
-  const lease = state.shares.at(-1).ticket
-  assert.equal(lease.released, 1)
-  assert.equal(lease.dropped, 1) // a copy stopped by its ceiling did not prove the master
+  // The copy that a ceiling stopped must not vouch for the master: it is the one
+  // lease dropped (the pre-check and the K-4 cleanup child each prove their own and
+  // come back marked), so it is identified by what happened to it, not by position.
+  const copyLease = state.shares.find(entry => entry.ticket.dropped === 1)?.ticket
+  assert.ok(copyLease, 'the stopped copy dropped exactly one lease')
+  assert.equal(copyLease.released, 1, 'and released it on the way out')
+  // K-4: a stopped download asks the server, best-effort, to end the mover it may
+  // have left parked on a fifo with no writer — a channel close cannot reach that.
+  const reaper = state.calls.filter(c => c.kind === 'run').map(c => c.command).find(command => command.startsWith('pkill -f -- '))
+  assert.ok(reaper, 'the interrupted download fired a server-side cleanup child')
+  assert.match(String(reaper), /\[c\]at -- /u, 'and it is written so pkill cannot match its own shell')
+  assert.match(String(out.notes?.join(' ') ?? ''), /ended a leftover server-side mover/u, 'the result says the cleanup ran')
 })
 
 test('a download stopped by the ceiling leaves a file that was already there alone', async () => {
@@ -294,6 +301,50 @@ test('an upload whose publish step failed says where the complete bytes still ar
   assert.match(out.message, /could not take its final place/)
   assert.match(out.message, /The complete bytes are still at \/srv\/x\.dsh-part-/)
   assert.match(out.notes.join('\n'), /remove it once the destination is settled/)
+})
+
+test('a failed publish asks the server to end the mover it left writing the part file', async () => {
+  // K-4: a publish that ran out of its budget writing through a fifo with no reader
+  // strands a server-side `cat part > dest`. After the failure the transfer fires a
+  // pkill naming that mover — matched by the part path, which is unique per copy.
+  const dir = tree()
+  const local = join(dir, 'x')
+  writeFileSync(local, 'payload')
+  const { runner, state } = fakeRunner()
+  let part = ''
+  state.nextRun = command => {
+    if (command.startsWith('stat ')) return ran('')
+    if (command.startsWith('pkill -f -- ')) { part = command; return ran('', { status: 'succeeded', exitCode: 0 }) }
+    // the publish itself: the server had no reader for the fifo, so it came back nonzero
+    return ran('', { status: 'timeout', exitCode: null, stderr: 'ssh: timed out' })
+  }
+  state.streamImpl = (_argv, copy) => streamed(7)
+  const out = await transfer(runner, TARGET, SETTINGS, {}, base({ direction: 'upload', localPath: local, maxBytes: 1024 }))
+  assert.equal(out.status, 'failed')
+  assert.match(out.message, /could not take its final place/)
+  assert.match(part, /pkill -f -- '\[c\]at \/srv\/x\.dsh-part-/, 'the cleanup names the mover by its unique part path')
+  assert.match(out.notes.join('\n'), /ended a leftover server-side mover/u, 'and the result says the cleanup ran')
+  // The part file itself is NOT removed by a publish failure — the complete bytes are
+  // kept for the reader — so the reaper is a kill, not an rm.
+  assert.ok(!state.calls.some(c => c.kind === 'run' && /^rm -f/.test(c.command)), 'no temp removal was ordered for a copy that reached the server whole')
+})
+
+test('a download the clock stopped on a no-pkill server says so instead of blaming the copy', async () => {
+  // K-4 best-effort honesty: when the server has no pkill, the cleanup child cannot
+  // promise anything. The transfer still refuses the way the deadline dictates, and
+  // the note says the mover may linger — the residual, stated rather than hidden.
+  const dir = tree()
+  const local = join(dir, 'x')
+  const { runner, state } = fakeRunner()
+  state.nextRun = command => command.startsWith('pkill -f -- ')
+    ? ran('', { status: 'exit-nonzero', exitCode: 127, stderr: 'pkill: not found' })
+    : ran('10 regular file')
+  state.streamImpl = (_argv, copy) => ({ outcome: 'timeout', exitCode: null, bytes: 340, stdout: '', stderr: '', durationMs: 4 })
+  const out = await transfer(runner, TARGET, SETTINGS, {}, base({ direction: 'download', localPath: local, maxBytes: 4096 }))
+  assert.equal(out.status, 'failed')
+  assert.match(out.message, /ran out of its deadline/, 'the refusal stands on its own')
+  assert.match(out.notes.join('\n'), /may have left a server-side mover/u)
+  assert.match(out.notes.join('\n'), /has no pkill to end it/)
 })
 
 test('a copy the caller cancelled or timed out cleans its part file and quotes the bytes it moved', async () => {

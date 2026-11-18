@@ -17,6 +17,64 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.36
+
+The directed close-out the 0.0.35 release-readiness report left as known
+limitations K-6, K-8, K-1 and K-4. Two were blockers (K-6, K-8) and are now
+fixed with proofs, not rewordings.
+
+- **Fixed (K-6, blocker) — the edit read can no longer eat a line of the file it is
+  reading.** The read result used to be cut at “whichever leading lines look like a
+  marker”, so a file whose own first line began with `ssh-plugin:` or
+  `ssh-plugin-sha256:` lost that line. The read header now ends with a
+  `ssh-plugin-bytes:` line — the byte length of the body, taken from the server —
+  and the split consumes header lines strictly **by position** and only when each
+  line’s value has the shape that header would print (a version is a
+  `inode|size|mtime` stat token or empty, a byte count is decimal or empty). A body
+  line that merely starts with the marker prefix is no longer mistaken for a header,
+  and the file is handed back byte-for-byte. `tests/edit.test.mjs` pins the shape
+  rules and the marker-lookalike body; `tests/edit-shell.test.mjs` runs the real
+  read under `/bin/sh` on a file whose lines all look like markers and proves the
+  body survives untouched and the stated byte count matches.
+- **Fixed (K-8, blocker) — a background spill file that grows is billed to its real
+  size, not frozen at the first report.** `SpillBudget.observe` had counted each
+  path once and dropped every later, larger whole-stream offset, so a long
+  background log whose file grew from 400 to 1500 bytes stayed booked at 400 — a
+  standing understatement of the bytes actually on disk. The ledger now keeps the
+  largest offset seen per path and charges only the difference, so `used` tracks
+  what the provider really wrote, never double-counts an equal report, and never
+  refunds a smaller one (a file on disk does not shrink). `tests/spill.test.mjs`
+  pins the top-up arithmetic; `tests/transport.test.mjs` drives the real background
+  pump path and asserts the budget climbs 400 → 900 → 1500 with the file.
+- **Changed (K-1) — an edit on a server that cannot state a SHA-256 now refuses
+  *before* writing, instead of writing and then disowning the result.** 0.0.35
+  landed the write and ended `ok:false / verdict:unknown` when the server had no
+  checksum tool; the capability is now read from the same round trip that produced
+  the file (an empty digest line), and its absence stops the call before any copy or
+  truncation. The remote file is left exactly as the read found it — no
+  `.dsh-bak`, no half-applied change, nothing to read back and second-guess. A
+  `dryRun` on such a server still previews and says the matching real edit would be
+  refused. This is the behavior a caller can retry safely: re-running after
+  installing `sha256sum`/`shasum`/`openssl` behaves as it always did on a capable
+  server. `tests/ops.test.mjs` and `tests/tool.test.mjs` assert no write child ran
+  and the server’s bytes are unchanged; `tests/edit-shell.test.mjs` proves the
+  empty-digest signal under a real `/bin/sh` with the tools removed from `PATH`;
+  `scripts/live-check.mjs --case=capability` reproduces it on a real server (masked
+  PATH → no digest; tools present → a verified landed edit, not an over-refusal).
+- **Improved (K-4) — an interrupted copy now asks the server to end the mover it
+  left stranded, and the live check asserts it rather than observing it.** Closing
+  the local `ssh` child only guaranteed the local half was gone; a server-side `cat`
+  parked in `open()`/`read()` on a fifo with no writer — or in `write()` on one with
+  no reader, as a publish to a readerless pipe leaves — never touches the channel,
+  so sshd without a pty let it sit (measured at 8–11 hours). After the teardown the
+  transfer now fires one short, bounded, best-effort `pkill` naming that mover by the
+  argument it is moving (a download’s source path; an upload’s unique part path),
+  written `[c]at …` so it cannot match its own shell. A server with no `pkill` is
+  told the mover may linger instead of the copy being blamed. `scripts/live-check.mjs
+  --case=release` is upgraded from an observation to an assertion: the stranded
+  reader of a timed-out download is now gone within the cleanup window (measured
+  213 ms) without anyone reaching for `pkill` by hand.
+
 ## 0.0.35
 
 The release-readiness round the 0.0.34 report left open: an answer built on a byte

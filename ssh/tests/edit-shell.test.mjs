@@ -92,6 +92,35 @@ test('the read and a clean write agree with the digests the server states', { sk
   assert.equal(parseWriteReport(w.stdout).sha256, sha(written))
 })
 
+// K-6: run the read against a file whose own lines speak the plugin\'s vocabulary,
+// and prove the split hands the file back whole. A real /bin/sh emits the header
+// markers; the parser must drop exactly those three lines and not one of the body
+// lines that look just like them.
+test('the read split keeps a file whose lines look like the markers', { skip: SKIP }, () => {
+  const f = join(dir, 'marker-lookalikes')
+  const tricky = [
+    'ssh-plugin: 12345|67890|99999-99-99 99:99:99.999999999 +0800',
+    'ssh-plugin-sha256: not-a-64-hex-value-but-a-real-line',
+    'ssh-plugin-bytes: 999999',
+    'ssh-plugin: an ordinary sentence',
+    'the genuine tail',
+  ].join('\n')
+  writeFileSync(f, tricky)
+  const res = run(buildEditRead(shellQuote(f)), {})
+  assert.equal(res.status, 0, 'the read itself succeeded')
+  const parsed = splitEditVersion(res.stdout)
+  // The three real header lines are consumed; the five body lines — four of which
+  // are shaped like headers — survive untouched.
+  assert.equal(parsed.content, tricky, 'the file is handed back byte-for-byte, no line eaten')
+  assert.equal(Buffer.byteLength(parsed.content), Buffer.byteLength(tricky))
+  assert.equal(parsed.digest, sha(tricky), 'the real digest header was taken, not a lookalike')
+  assert.equal(parsed.bodyBytes, Buffer.byteLength(tricky), 'the byte count the server stated matches the file')
+  assert.ok(parsed.version !== undefined && /^\d+\|\d+\|/u.test(parsed.version), 'the version marker is the server\'s stat token')
+  // And an edit that reads this file must apply against the WHOLE content, which the
+  // old prefix-only split would have silently mis-seen by dropping the first line.
+  assert.equal(parsed.content.split('\n')[0], tricky.split('\n')[0], 'the first line is the file\'s own, not a header')
+})
+
 // 2. the same-size collision: a `cat` that ships a body of the right length but
 //    the wrong bytes must not be believed.
 test('a same-size body of different bytes is refused, and the repair puts the read content back', { skip: SKIP }, () => {
@@ -131,6 +160,31 @@ test('a server with no checksum tool writes, and says so without a proof', { ski
   assert.equal(w.status, 29)
   assert.equal(parseWriteReport(w.stdout).evidence, 'sizeonly')
   assert.ok(existsSync(`${f}.bak`), 'an unverifiable success keeps its safety copy even when backup:false')
+})
+
+// K-1: the capability check happens on the read, where nothing has been written
+// yet. On a server with no checksum tool the read hands back an empty digest —
+// which is the single fact ops.ts acts on to refuse the edit *before* copying or
+// truncating. This test proves the read is where the answer comes from, and that
+// the read itself never touches the file.
+test('the read detects "no checksum tool" without changing the file, and that is what ops refuses on', { skip: SKIP }, () => {
+  const f = join(dir, 'nosha-capability')
+  writeFileSync(f, original)
+  const before = readFileSync(f, 'utf8')
+  const parsed = splitEditVersion(run(buildEditRead(shellQuote(f)), { bin: noTool }).stdout)
+  // The capability signal: a version token and body byte count are still stated
+  // (stat and wc exist), but the digest line is empty — "this server cannot state
+  // a SHA-256". That empty digest is exactly what the ops layer turns into a
+  // before-the-write refusal.
+  assert.equal(parsed.digest, undefined, 'no tool → no digest → no capability')
+  assert.ok(parsed.version !== undefined, 'the version guard is still available on this server')
+  assert.equal(parsed.bodyBytes, Buffer.byteLength(original), 'and the body framing is intact even here')
+  assert.equal(parsed.content, original, 'the file came back whole')
+  assert.equal(readFileSync(f, 'utf8'), before, 'the read is non-mutating: refusing on capability never touches the file')
+  // On a server that DOES have a tool, the same read yields a real digest, which is
+  // the branch where ops proceeds to write.
+  const withTool = splitEditVersion(run(buildEditRead(shellQuote(f)), {}).stdout)
+  assert.equal(withTool.digest, sha(original), 'a tool-capable server states a digest, so the write is verifiable')
 })
 
 test('a lost answer whose bytes landed at the promised digest is landed', { skip: SKIP }, () => {
