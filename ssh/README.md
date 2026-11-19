@@ -791,14 +791,21 @@ still open:
   across its TERM→KILL grace before the answer is given, and the live check proves
   no `ssh` of ours is left holding a slot. Since 0.0.36 the plugin also tries to
   clean up the far end: before a mover starts it prints one line about itself —
-  `dsh-mover <pid> <tag>` — on **stderr**, the channel the copy already reads whole;
-  a download then `exec`s into the mover so the number it reported and the process
-  holding the file are one and the same, and an upload's publish runs its mover as a
-  background job so `$!` names the mover rather than the shell waiting on it. After a
-  copy is stopped, one short, bounded, best-effort command asks the server to end
-  **that pid**: it checks `kill -0`, reads `/proc/<pid>/cmdline` one argument at a
-  time, and compares those arguments as plain strings with the argv this copy was
-  given; only a match is killed. Why it is only best-effort, measured honestly: a
+  `dsh-mover <pid> <tag> <starttime>` — on **stderr**, the channel the copy already
+  reads whole; a download then `exec`s into the mover so the number it reported and
+  the process holding the file are one and the same, and an upload's publish runs its
+  mover as a background job so `$!` names the mover rather than the shell waiting on
+  it. Since **0.0.38** the line carries the kernel's own start time for that number
+  (`/proc/<pid>/stat`, counted after the last `)` so a process name cannot skew it):
+  a pid is a number that gets handed between processes, and the time says which
+  process wore it. After a copy is stopped, one short, bounded, best-effort command
+  asks the server to end **that identity**: it checks `kill -0`, reads
+  `/proc/<pid>/stat` for the start time and `/proc/<pid>/cmdline` one argument at a
+  time, compares the pair against what this copy reported and its argv against the
+  argv this copy was given, and only a match is acted on; a match is then frozen with
+  SIGSTOP — a stopped process cannot exit, so its number cannot be recycled while the
+  decision is being made — re-checked while frozen, and only then killed. Why it is
+  only best-effort, measured honestly: a
   remote `cat` blocked writing to a pipe dies at once when the channel closes, but one
   parked in `open()` on a fifo with no writer never touches the channel, so sshd
   without a pty lets it sit (it was seen outliving its call by hours) — closing the
@@ -809,15 +816,23 @@ still open:
   and a remote path is allowed to contain `[`, `*`, `?`, `+` and `.`, all of which are
   regular-expression syntax to `pkill -f`. A pid is not. The verdict the cleanup gets
   back is reported rather than smoothed over: `gone` says nothing (the mover left with
-  the channel), `killed` and `killed-unverified` name the pid and say whether the
-  command line confirmed it (a server without a readable `/proc` gets said so),
+  the channel, or ended and only waits to be reaped — a `Z` state reads as gone, not
+  as a stranger), `killed` names the pid and says the command line **and the start
+  time** confirmed it before the freeze and the re-check, `unverifiable` says the
+  server states no readable `/proc` for that pid (or the mover recorded no time) and
+  that nothing was signalled — 0.0.37's `killed-unverified`, a SIGKILL on the bare
+  number, is retired, because a recycled number belongs to somebody else's work,
   `foreign` says the number is running something else and was left alone, `refused`
   says the server would not let this user signal it, and `unanswered` says the cleanup
   got no reply and nothing is claimed. A copy that never learned a pid kills nothing
   and says the residual is unnamed. The live check asserts all of it on two movers of
   one path: after one copy's cleanup the other's mover is still parked, still
   deliverable, and its channel closes with the payload whole (measured on `proxy`,
-  pids 2747830/2747840, 2026-11-19 10:46).
+  pids 2747830/2747840, 2026-11-19 10:46). 0.0.38 adds the two refusals to that live
+  check: the same mover aimed with a start time that is not its own answers `foreign`
+  and keeps serving, and one recorded with no start time at all answers
+  `unverifiable` — never `killed` — on both `proxy` and `nas` (measured 2026-11-19
+  14:10, mover pid 2893057 refused twice, then killed on its real identity).
 - Spill files — the full-output recovery files the subprocess provider writes when
   a stream passes its ceiling — stay the **provider's**. It owns the directory,
   closes them, keeps completed ones until something outside the process cleans

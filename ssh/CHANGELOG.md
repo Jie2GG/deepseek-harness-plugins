@@ -17,6 +17,82 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.38
+
+The directed round that took the 0.0.37 delivery at its own word: two of its
+credited guards turned out not to say what they promised — the edit gate waived
+the byte count as soon as a digest matched, and the mover cleanup killed on a
+number it had only *momentarily* confirmed — and both were true defects, not
+documentation slips. The 0.0.37 suites still pass untouched in every case that
+was checking a sound proof; what changed is the two claims are now checked
+apart, and the identity behind a pid is checked while it cannot move.
+
+- **Fixed (K-6, blocker) — a matching digest no longer waives the stated byte
+  count.** `verifyEditBody` answered on the digest alone whenever one was
+  stated (`if (digest) return digestHex(body) === digest`), so a read whose
+  `ssh-plugin-bytes:` marker disagreed with the body under it passed the gate
+  and rode into the write: the digest proves *these bytes* digest to *this
+  value*, never that they are the number of bytes the server counted. The two
+  claims are now checked independently and both must hold — a matching digest
+  over a disagreeing count is the read contradicting itself, and the refusal
+  says so (`Its bytes do digest to the SHA-256 the server stated…`). The
+  digest-matches/count-disagrees counterexample is pinned in `edit.test.mjs`
+  and at a real shell in `edit-shell.test.mjs`; the `ops.test.mjs` case that
+  had *pinned the waiver* (“a matching digest outranks a stale byte count”) is
+  reversed to pin the rule, and `scripts/live-check.mjs --case=framing` proves
+  the refusal on bytes both real servers stated (`proxy` and `nas`, 2026-11-19:
+  a 22 000-byte body overstated by 7 and understated by 3 both refused before
+  any write). Every body the old gate accepted on sound proof still passes:
+  when the digest itself disagrees the refusal is still `not-the-same-bytes`,
+  and the non-UTF-8 content-loss guard keeps its exact diagnostic.
+- **Fixed (K-4, blocker) — the mover's pid comes with an identity a recycled
+  number cannot inherit, and an unidentified number is no longer killed.**
+  0.0.37 named the mover by pid and confirmed its `/proc/<pid>/cmdline` before
+  the SIGKILL, but between confirmation and signal the process can exit and the
+  kernel can hand the number to a stranger — and on a server with no readable
+  `/proc` the kill was taken on the bare number at all (`killed-unverified`),
+  which is the same race with the check removed. Every mover now stamps its
+  kernel **start time** (field 20 after the last `)` of `/proc/<pid>/stat`, so
+  a comm holding spaces cannot skew it) into its marker —
+  `dsh-mover <pid> <tag> <starttime>` — and the cleanup compares the *pair*
+  before it acts and **closes the window instead of narrowing it**: a matching
+  identity is frozen with SIGSTOP (a stopped process cannot exit, so its number
+  cannot change hands between the last check and the kill), the start time is
+  re-read while frozen — a freeze that caught an heir is undone with SIGCONT
+  and the verdict is `foreign` — and only then is SIGKILL delivered. Where the
+  identity cannot be stated at all (no readable `/proc`, or a mover that
+  recorded no start time), nothing is signalled: the verdict is `unverifiable`,
+  and the copy's note names the stranded mover as still running — a cost
+  stated, not a tidy server claimed. A mover that terminated and merely waits
+  to be reaped (a `Z` state, an empty cmdline that would otherwise read as a
+  stranger) answers `gone`, which is the truth about it. `killed-unverified`
+  is retired from the vocabulary. The 0.0.37 protections are kept and re-pinned:
+  task tags, one process per cleanup, the path compared as a plain string in
+  the mover's own expanded shape, no `pkill`/`pgrep` anywhere.
+  `tests/transfer-shell.test.mjs` runs the real cleanup script against real
+  parked movers under `/bin/sh` **and** `/bin/dash` with the kernel's own
+  `/proc` in front of it: killed, gone-after-exit, idempotent repeats,
+  `foreign` on a wrong start time (a live mover checked alive and unstopped
+  afterwards), `unverifiable` on a missing one, the A/B pair sharing one path
+  (each ends exactly its own process and B's payload still flows), a sentinel
+  `cat` on the same path surviving every refusal and every race with its state
+  and start time intact, the publish branch's backgrounded mover, and a mover
+  that exits *during* the cleanup — answered honestly, with nobody left
+  SIGSTOPped. `scripts/live-check.mjs --case=reap` proves the same refusals on
+  `proxy` and `nas` (2026-11-19 14:10): a living mover aimed with a wrong time
+  answers `foreign` and keeps serving, one aimed with no time answers
+  `unverifiable` and survives, and the same mover on its real identity is then
+  `killed`; the three product-path stops leave nothing parked.
+- **Added — `tests/transfer-shell.test.mjs`** joins the matrix between the
+  faked-transport suites and the live servers: the cleanup's race behaviour is
+  tested where the race is real (a kernel process table), without needing a
+  server.
+- **Kept as verified** — the 0.0.37 modules this round did not touch still
+  pass: the K-1 no-digest fail-closed gate, the K-8 spill ledger's
+  increment-on-growth accounting, the background-job slot floor (8 held for
+  calls that wait), and the 30 s probe timeout down every fallback chain.
+  Offline suite: 338 tests, 317 carried and passing, 21 new.
+
 ## 0.0.37
 
 The directed round that took the 0.0.36 source audit at its word: two of its

@@ -370,8 +370,24 @@ classified result.
   `dsh-mover <pid> <tag>` on stderr (a download `exec`s into the mover so the reported
   number *is* the mover; a publish backgrounds it and reports `$!`), and the cleanup
   kills that one process — after reading `/proc/<pid>/cmdline` one argument at a time
-  and comparing it, as plain strings, with the argv this copy was handed. `gone`,
-  `killed`, `killed-unverified`, `foreign`, `refused` and `unanswered` each get their
+  and comparing it, as plain strings, with the argv this copy was handed. And since
+  **0.0.38** that number carries a second, unforgeable fact: the mover also prints the
+  kernel's start time for itself (`/proc/<pid>/stat`, field 20 counted after the last
+  `)` so a comm with spaces cannot skew it — `dsh-mover <pid> <tag> <starttime>`),
+  because a pid is a number the kernel hands out again after its owner exits. Before
+  signalling, the cleanup now compares **the pair**: a live pid whose recorded start
+  time is not its own is a stranger that borrowed the number, and it is left alone.
+  The decision is then *closed* against the exit race rather than merely narrowed: a
+  matching identity is frozen with SIGSTOP — a stopped process cannot exit, so its
+  number cannot be recycled between the check and the kill — the start time is
+  re-read while frozen (a freeze that landed on an heir is undone with SIGCONT and
+  reported `foreign`), and only then is SIGKILL delivered. Two behaviours retired a
+  race with: `killed-unverified` (0.0.37 killed on the bare number wherever `/proc`
+  was unreadable — a recycled number made that a strike at unrelated work; the verdict
+  is now `unverifiable`: nothing is signalled, the stranded mover is named as the
+  cost) and the check-then-kill window itself. A terminated mover its parent has not
+  reaped yet (a `Z` state, empty cmdline) reads `gone`, which is what it is. `gone`,
+  `killed`, `unverifiable`, `foreign`, `refused` and `unanswered` each get their
   own sentence, and a copy that never saw a pid kills nothing and says the residual is
   unnamed. The 0.0.36 form, `pkill -f '[c]at -- <path>'`, was not concurrency-safe:
   the path is the one thing two copies of one file share (measured on a live server:
@@ -395,7 +411,14 @@ classified result.
   it, instead of landing an unverifiable write the way 0.0.35 did. And since **0.0.37**
   the byte count is not merely stated, it is **used**: `verifyEditBody` compares the
   body the split produced against the count and against the digest, before the match
-  and before any dry-run preview, and refuses when they disagree. What that closes is
+  and before any dry-run preview, and refuses when they disagree. (The 0.0.37
+  sentence above says more than its code enforced: that build answered on the digest
+  *alone* whenever one was stated — `if (digest) return digestHex(body) === digest` —
+  so a read with a matching digest and a `ssh-plugin-bytes:` value that disagreed with
+  the body passed the gate and rode into the write. **0.0.38** checks the count and the
+  digest independently: both must hold, and a matching digest over a body that is not
+  the length the server counted is now read as what it is, the read contradicting
+  itself.) What that closes is
   a content-loss bug 0.0.36 could not see: a file that is not valid UTF-8 comes back
   through the transport as text whose bytes are *invented* (each undecodable byte
   becomes `EF BF BD`), the edit then writes that text back, and every check the old
