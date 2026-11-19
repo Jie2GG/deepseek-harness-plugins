@@ -10,7 +10,7 @@
   - `336a2c0` ssh: 0.0.38 — the delivery docs say what the two guards now enforce（文档与版本）
   - `a1816c6` ssh: a mover that leaves while the cleanup reads it is gone, not unverifiable（K-4 verdict 精确化，稳定性轮次中抓到）
   - 其后：0.0.38 交付报告与本 patch 的归档 commit
-- 完整差异：[SSH-PLUGIN-0.0.38-DIFF.patch](SSH-PLUGIN-0.0.38-DIFF.patch)（`git diff 555685a..HEAD -- ssh/`，109,748 字节，13 个文件）
+- 完整差异：[SSH-PLUGIN-0.0.38-DIFF.patch](SSH-PLUGIN-0.0.38-DIFF.patch)（`git diff 555685a..HEAD -- ssh/`，112,321 字节，13 个文件；排除交付报告与 patch 自身，与 0.0.37 的归档方式一致）
 
 本报告只陈述**本轮亲自执行**的验证；引用 0.0.37 及更早结论之处都标明为历史记录。
 

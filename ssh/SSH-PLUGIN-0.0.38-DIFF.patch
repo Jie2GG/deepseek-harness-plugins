@@ -1,8 +1,8 @@
 diff --git a/ssh/CHANGELOG.md b/ssh/CHANGELOG.md
-index ae307ae..088afff 100644
+index ae307ae..df9c212 100644
 --- a/ssh/CHANGELOG.md
 +++ b/ssh/CHANGELOG.md
-@@ -17,6 +17,82 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
+@@ -17,6 +17,87 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
  is a remapping, not a new round. The first change under the new scheme is
  `0.0.17`; the first user acceptance moves the line to `0.1.0`.
  
@@ -48,7 +48,12 @@ index ae307ae..088afff 100644
 +  identity is frozen with SIGSTOP (a stopped process cannot exit, so its number
 +  cannot change hands between the last check and the kill), the start time is
 +  re-read while frozen — a freeze that caught an heir is undone with SIGCONT
-+  and the verdict is `foreign` — and only then is SIGKILL delivered. Where the
++  and the verdict is `foreign` — and only then is SIGKILL delivered. A target that
++  exits *while the cleanup is reading it* is answered with the state it is in, not
++  the state it was in a line earlier: every start-time probe resets its own scratch
++  (a stale match would aim the kill at a borrowed number), and a probe that comes
++  back empty asks `kill -0` once more — `gone` if the number no longer answers,
++  `unverifiable` only if it still stands there unreadable. Where the
 +  identity cannot be stated at all (no readable `/proc`, or a mover that
 +  recorded no start time), nothing is signalled: the verdict is `unverifiable`,
 +  and the copy's note names the stranded mover as still running — a cost
@@ -86,7 +91,7 @@ index ae307ae..088afff 100644
  
  The directed round that took the 0.0.36 source audit at its word: two of its
 diff --git a/ssh/README.md b/ssh/README.md
-index 3593dde..c722b3c 100644
+index 3593dde..c07f26b 100644
 --- a/ssh/README.md
 +++ b/ssh/README.md
 @@ -791,14 +791,21 @@ still open:
@@ -119,7 +124,7 @@ index 3593dde..c722b3c 100644
    remote `cat` blocked writing to a pipe dies at once when the channel closes, but one
    parked in `open()` on a fifo with no writer never touches the channel, so sshd
    without a pty lets it sit (it was seen outliving its call by hours) — closing the
-@@ -809,15 +816,23 @@ still open:
+@@ -809,15 +816,26 @@ still open:
    and a remote path is allowed to contain `[`, `*`, `?`, `+` and `.`, all of which are
    regular-expression syntax to `pkill -f`. A pid is not. The verdict the cleanup gets
    back is reported rather than smoothed over: `gone` says nothing (the mover left with
@@ -133,7 +138,11 @@ index 3593dde..c722b3c 100644
 +  number, is retired, because a recycled number belongs to somebody else's work,
    `foreign` says the number is running something else and was left alone, `refused`
    says the server would not let this user signal it, and `unanswered` says the cleanup
-   got no reply and nothing is claimed. A copy that never learned a pid kills nothing
+-  got no reply and nothing is claimed. A copy that never learned a pid kills nothing
++  got no reply and nothing is claimed. A mover that exits *during* the cleanup is
++  answered with where it ended up: the number no longer answering `kill -0` reads
++  `gone`, and only a number still standing there unreadable reads `unverifiable`.
++  A copy that never learned a pid kills nothing
    and says the residual is unnamed. The live check asserts all of it on two movers of
    one path: after one copy's cleanup the other's mover is still parked, still
    deliverable, and its channel closes with the payload whole (measured on `proxy`,
@@ -147,10 +156,10 @@ index 3593dde..c722b3c 100644
    a stream passes its ceiling — stay the **provider's**. It owns the directory,
    closes them, keeps completed ones until something outside the process cleans
 diff --git a/ssh/docs/DETAIL.md b/ssh/docs/DETAIL.md
-index 8eba9c1..19378ab 100644
+index 8eba9c1..68852ef 100644
 --- a/ssh/docs/DETAIL.md
 +++ b/ssh/docs/DETAIL.md
-@@ -370,8 +370,24 @@ classified result.
+@@ -370,8 +370,30 @@ classified result.
    `dsh-mover <pid> <tag>` on stderr (a download `exec`s into the mover so the reported
    number *is* the mover; a publish backgrounds it and reports `$!`), and the cleanup
    kills that one process — after reading `/proc/<pid>/cmdline` one argument at a time
@@ -171,13 +180,19 @@ index 8eba9c1..19378ab 100644
 +  race with: `killed-unverified` (0.0.37 killed on the bare number wherever `/proc`
 +  was unreadable — a recycled number made that a strike at unrelated work; the verdict
 +  is now `unverifiable`: nothing is signalled, the stranded mover is named as the
-+  cost) and the check-then-kill window itself. A terminated mover its parent has not
++  cost) and the check-then-kill window itself. A target that exits *during* the
++  cleanup answers with where it ended up, not with where it was one line earlier:
++  each probe resets its scratch before reading (a stale time matching `K` would aim
++  the SIGKILL at a borrowed number), a readable stat that says `Z` answers `gone`,
++  and a stat that cannot be read at all asks `kill -0` one more time — `gone` if the
++  number has stopped answering, `unverifiable` only if it still stands there
++  unreadable. A terminated mover its parent has not
 +  reaped yet (a `Z` state, empty cmdline) reads `gone`, which is what it is. `gone`,
 +  `killed`, `unverifiable`, `foreign`, `refused` and `unanswered` each get their
    own sentence, and a copy that never saw a pid kills nothing and says the residual is
    unnamed. The 0.0.36 form, `pkill -f '[c]at -- <path>'`, was not concurrency-safe:
    the path is the one thing two copies of one file share (measured on a live server:
-@@ -395,7 +411,14 @@ classified result.
+@@ -395,7 +417,14 @@ classified result.
    it, instead of landing an unverifiable write the way 0.0.35 did. And since **0.0.37**
    the byte count is not merely stated, it is **used**: `verifyEditBody` compares the
    body the split produced against the count and against the digest, before the match
@@ -194,10 +209,10 @@ index 8eba9c1..19378ab 100644
    through the transport as text whose bytes are *invented* (each undecodable byte
    becomes `EF BF BD`), the edit then writes that text back, and every check the old
 diff --git a/ssh/docs/DETAIL.zh.md b/ssh/docs/DETAIL.zh.md
-index 286c691..d8eccf0 100644
+index 286c691..b59bfab 100644
 --- a/ssh/docs/DETAIL.zh.md
 +++ b/ssh/docs/DETAIL.zh.md
-@@ -249,8 +249,19 @@ harness 那句 `tool call timed out` 掐掉。
+@@ -249,8 +249,22 @@ harness 那句 `tool call timed out` 掐掉。
    小时）。**从 0.0.37 起，这个 mover 用一个 pid 点名，不再按路径点名。** mover 卡住之前会先在
    stderr 上打印 `dsh-mover <pid> <tag>`（下载用 `exec` 变成 mover，所以报出的号就是 mover 本身；
    上传落地那步把它放后台、报 `$!`），清理只杀那一个进程——杀之前先按参数逐行读 `/proc/<pid>/cmdline`，
@@ -212,14 +227,17 @@ index 286c691..d8eccf0 100644
 +  时间（若这一冻恰好冻到了刚接号的继承人，就 `SIGCONT` 把它放回、如实报 `foreign`），最后才
 +  `SIGKILL`。两种行为就此退役：`killed-unverified`（0.0.37 在 `/proc` 不可读处凭一个裸号就杀，
 +  号一旦被复用就是误伤别人的任务；现在的判决是 `unverifiable`——不发任何信号，滞留的 mover 被
-+  如实列为代价）和「先验后杀」之间的竞态窗口本身。已终止、还没被父进程回收的 mover（状态 `Z`、
++  如实列为代价）和「先验后杀」之间的竞态窗口本身。清理**读到一半**才离场的目标按它最终的处境回答，
++  而不是按一行之前的处境：每次探针读取前都先清空自己的暂存（过期的时间匹配会把 SIGKILL 瞄准借号者）、
++  读到的状态是 `Z` 报 `gone`、完全读不到 stat 时再问一次 `kill -0`——号已不应答报 `gone`，仍站着却
++  读不到才报 `unverifiable`。已终止、还没被父进程回收的 mover（状态 `Z`、
 +  cmdline 已空）报 `gone`——那正是它的实情，不是陌生人。`gone`、`killed`、`unverifiable`、
 +  `foreign`、`refused`、`unanswered` 各有一句实话；没拿到 pid 的复制什么都不杀，并说明残留无法指名。
 +  0.0.36 的
    `pkill -f '[c]at -- <路径>'` 做不到并发安全：路径正是两个复制同一个文件时唯一共享的东西（真机实测：
    同一 fifo 上两个 parked mover，一次按路径的 `pkill`，零存活），而且远端路径里允许出现 `[`、`*`、`?`、
    `+`、`.`，这些对 `pkill -f` 都是正则语法。新写法不再需要 `pkill` 或 `pgrep`，能清理的服务器反而更宽。
-@@ -266,7 +277,11 @@ harness 那句 `tool call timed out` 掐掉。
+@@ -266,7 +280,11 @@ harness 那句 `tool call timed out` 掐掉。
    时，编辑会在复制和截断**之前就拒绝**、文件原封不动（K-1），不再像 0.0.35 那样把写入落地后再报
    `unknown`。校验不了的编辑，如今压根不会开始。
    从 **0.0.37** 起，那份字节数不只是「报出来了」，而是**被用上了**：`verifyEditBody` 会在匹配之前、
@@ -454,7 +472,7 @@ index d90424c..e74b449 100644
    return { ok: true, evidence: 'none' }
  }
 diff --git a/ssh/src/transfer.ts b/ssh/src/transfer.ts
-index b895e38..a63d67a 100644
+index b895e38..162e7c4 100644
 --- a/ssh/src/transfer.ts
 +++ b/ssh/src/transfer.ts
 @@ -744,42 +744,63 @@ const REAP_BUDGET_MS = 10_000
@@ -577,7 +595,7 @@ index b895e38..a63d67a 100644
  }
  
  /**
-@@ -839,47 +878,86 @@ function moverArgvLines (): readonly [string, string] {
+@@ -839,47 +878,97 @@ function moverArgvLines (): readonly [string, string] {
   * all, so sshd lets them sit; on a live server they were seen outliving their calls
   * by eight to eleven hours.
   *
@@ -644,16 +662,27 @@ index b895e38..a63d67a 100644
 +  // already terminated and merely waits for its parent to reap it — its number is
 +  // not running anything, and its now-empty `cmdline` would fail the argv compare
 +  // and be reported as `foreign` when the honest word is `gone`.
-+  const readStart = `{ IFS= read -r _t </proc/"$P"/stat 2>/dev/null && { set -- \${_t##*) }; _st=$1; _n=\${20:-0}; }; } 2>/dev/null; `
++  // Each probe resets its own scratch first: a read that fails because the process
++  // left between one line of this script and the next must yield the empty answer,
++  // never the previous line's — a stale `_n` matching `K` would send a SIGKILL at a
++  // number that had already changed hands.
++  const readStart = `_st=; _n=0; { IFS= read -r _t </proc/"$P"/stat 2>/dev/null && { set -- \${_t##*) }; _st=$1; _n=\${20:-0}; }; } 2>/dev/null; `
 +  const zombieGone = `if [ "$_st" = Z ]; then echo 'dsh-reap gone'; exit 0; fi; `
++  // A pid that answers to `kill -0` but yields no start time at all — the `-r` test
++  // passed and then the file went, or the platform states stat but not this field —
++  // is still a pid standing there, and the only honest word for *that* is
++  // `unverifiable`; the instant it stops answering, the word is `gone`. The two
++  // states must not be collapsed into one refusal sentence about a mover that is
++  // already off the process table.
++  const noIdentity = `if kill -0 "$P" 2>/dev/null; then echo 'dsh-reap unverifiable'; else echo 'dsh-reap gone'; fi; exit 0; fi; `
 +  return `P=${shellQuote(String(pid))}; K=${shellQuote(String(starttime))}; p=${pathWord}; `
      + `if ! kill -0 "$P" 2>/dev/null; then echo 'dsh-reap gone'; exit 0; fi; `
 -    + `if [ ! -r /proc/"$P"/cmdline ]; then if kill -9 "$P" 2>/dev/null; then echo 'dsh-reap killed-unverified'; else echo 'dsh-reap refused'; fi; exit 0; fi; `
 -    + `a=$(tr '\\0' '\\n' < /proc/"$P"/cmdline 2>/dev/null); `
 -    + `if [ "$(printf '%s\\n' "$a" | sed -n 1p)" != ${shellQuote(program)} ] || [ "$(printf '%s\\n' "$a" | sed -n 2p)" != ${shellQuote(dashdash)} ] || [ "$(printf '%s\\n' "$a" | sed -n 3p)" != "$p" ]; then echo 'dsh-reap foreign'; exit 0; fi; `
 -    + `if kill -9 "$P" 2>/dev/null; then echo 'dsh-reap killed'; else echo 'dsh-reap refused'; fi`
-+    + `if [ "$K" = 0 ] || [ ! -r /proc/"$P"/stat ] || [ ! -r /proc/"$P"/cmdline ]; then echo 'dsh-reap unverifiable'; exit 0; fi; `
-+    + readStart + zombieGone + `_a=$(tr '\\0' '\\n' < /proc/"$P"/cmdline 2>/dev/null); `
++    + `if [ "$K" = 0 ] || [ ! -r /proc/"$P"/stat ] || [ ! -r /proc/"$P"/cmdline ]; then ` + `if kill -0 "$P" 2>/dev/null; then echo 'dsh-reap unverifiable'; else echo 'dsh-reap gone'; fi; exit 0; fi; `
++    + readStart + zombieGone + `if [ "$_n" = 0 ]; then ` + noIdentity + ` _a=$(tr '\\0' '\\n' < /proc/"$P"/cmdline 2>/dev/null); `
 +    + `if [ "$_n" != "$K" ] || [ "$(printf '%s\\n' "$_a" | sed -n 1p)" != ${shellQuote(program)} ] || [ "$(printf '%s\\n' "$_a" | sed -n 2p)" != ${shellQuote(dashdash)} ] || [ "$(printf '%s\\n' "$_a" | sed -n 3p)" != "$p" ]; then echo 'dsh-reap foreign'; exit 0; fi; `
 +    + `if ! kill -STOP "$P" 2>/dev/null; then if kill -0 "$P" 2>/dev/null; then echo 'dsh-reap refused'; else echo 'dsh-reap gone'; fi; exit 0; fi; `
 +    + readStart + zombieGone + `if [ "$_n" != "$K" ]; then kill -CONT "$P" 2>/dev/null; if [ "$_n" = 0 ]; then echo 'dsh-reap gone'; else echo 'dsh-reap foreign'; fi; exit 0; fi; `
@@ -686,7 +715,7 @@ index b895e38..a63d67a 100644
  }
  
  /**
-@@ -926,11 +1004,11 @@ export function moverVerdictNote (
+@@ -926,11 +1015,11 @@ export function moverVerdictNote (
        // 0.0.36 called this "matched nothing" and said nothing either.
        return undefined
      case 'killed':
@@ -702,7 +731,7 @@ index b895e38..a63d67a 100644
      case 'refused':
        return `the interrupted copy could not end its own server-side mover of ${path} (pid ${String(pid)}): ${host} refused the signal, so that mover may still be running.`
      case 'unanswered':
-@@ -956,12 +1034,13 @@ function moverPidMissingNote (outcome: string, bytes: number, path: string): str
+@@ -956,12 +1045,13 @@ function moverPidMissingNote (outcome: string, bytes: number, path: string): str
  }
  
  /**
@@ -718,7 +747,7 @@ index b895e38..a63d67a 100644
   * @param pathWord - the remote path in the shell shape the mover was handed.
   * @param path - the path as the reader names it, for the note.
   * @returns a sentence when there was one to tell, otherwise `undefined`.
-@@ -971,28 +1050,28 @@ async function reapStoppedMover (
+@@ -971,28 +1061,28 @@ async function reapStoppedMover (
    target: RemoteTarget,
    settings: SshSettings,
    auth: RemoteAuth,
@@ -752,7 +781,7 @@ index b895e38..a63d67a 100644
  }
  
  /**
-@@ -1066,7 +1145,7 @@ export function publishCommand(remotePart: string, destArg: string, sourceMode?:
+@@ -1066,7 +1156,7 @@ export function publishCommand(remotePart: string, destArg: string, sourceMode?:
      ? ''
      : ` && { u=$(umask); m=$((0${sourceMode.toString(8)} & ~(0$u))); c=$(printf "%o" "$m"); if [ -n "$c" ]; then chmod "$c" ${destArg}; fi; }`
    return `if [ -e ${destArg} ] || [ -L ${destArg} ]; then cat -- ${partArg} > ${destArg} & mp=$!; `
