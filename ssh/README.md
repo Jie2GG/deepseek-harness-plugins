@@ -824,7 +824,10 @@ still open:
   number, is retired, because a recycled number belongs to somebody else's work,
   `foreign` says the number is running something else and was left alone, `refused`
   says the server would not let this user signal it, and `unanswered` says the cleanup
-  got no reply and nothing is claimed. A copy that never learned a pid kills nothing
+  got no reply and nothing is claimed. A mover that exits *during* the cleanup is
+  answered with where it ended up: the number no longer answering `kill -0` reads
+  `gone`, and only a number still standing there unreadable reads `unverifiable`.
+  A copy that never learned a pid kills nothing
   and says the residual is unnamed. The live check asserts all of it on two movers of
   one path: after one copy's cleanup the other's mover is still parked, still
   deliverable, and its channel closes with the payload whole (measured on `proxy`,

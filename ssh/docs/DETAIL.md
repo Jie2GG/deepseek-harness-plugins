@@ -385,7 +385,13 @@ classified result.
   race with: `killed-unverified` (0.0.37 killed on the bare number wherever `/proc`
   was unreadable — a recycled number made that a strike at unrelated work; the verdict
   is now `unverifiable`: nothing is signalled, the stranded mover is named as the
-  cost) and the check-then-kill window itself. A terminated mover its parent has not
+  cost) and the check-then-kill window itself. A target that exits *during* the
+  cleanup answers with where it ended up, not with where it was one line earlier:
+  each probe resets its scratch before reading (a stale time matching `K` would aim
+  the SIGKILL at a borrowed number), a readable stat that says `Z` answers `gone`,
+  and a stat that cannot be read at all asks `kill -0` one more time — `gone` if the
+  number has stopped answering, `unverifiable` only if it still stands there
+  unreadable. A terminated mover its parent has not
   reaped yet (a `Z` state, empty cmdline) reads `gone`, which is what it is. `gone`,
   `killed`, `unverifiable`, `foreign`, `refused` and `unanswered` each get their
   own sentence, and a copy that never saw a pid kills nothing and says the residual is

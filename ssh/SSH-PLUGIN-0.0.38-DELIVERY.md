@@ -8,6 +8,8 @@
   - `202624b` ssh: a digest that matches no longer waives the byte count it has to agree with（K-6）
   - `e5348a2` ssh: a mover is cleaned up by its identity, and an unverifiable number is left alone（K-4）
   - `336a2c0` ssh: 0.0.38 — the delivery docs say what the two guards now enforce（文档与版本）
+  - `a1816c6` ssh: a mover that leaves while the cleanup reads it is gone, not unverifiable（K-4 verdict 精确化，稳定性轮次中抓到）
+  - 其后：0.0.38 交付报告与本 patch 的归档 commit
 - 完整差异：[SSH-PLUGIN-0.0.38-DIFF.patch](SSH-PLUGIN-0.0.38-DIFF.patch)（`git diff 555685a..HEAD -- ssh/`，109,748 字节，13 个文件）
 
 本报告只陈述**本轮亲自执行**的验证；引用 0.0.37 及更早结论之处都标明为历史记录。
@@ -135,14 +137,18 @@ UTF-8/非 UTF-8 行为符合协议 ✅；写失败恢复后内容完整 ✅；�
 
 ```
 kill -0 失败                        → gone
-K=0 或 stat/cmdline 不可读          → unverifiable（不发任何信号，0.0.37 在此盲杀）
+K=0 或 stat/cmdline 不可读：号还在 → unverifiable；号已不应答 → gone
 stat 状态 = Z（已终止待回收）        → gone（cmdline 已空，不误判成 foreign）
+探针读不到启动时间（_n=0）：号还在 → unverifiable；已消失 → gone
 starttime ≠ K 或 argv ≠ (cat, --, 本次路径词) → foreign（不碰）
 kill -STOP 失败：号还在 → refused；已消失 → gone
 冻结后再读 starttime：≠ K（冻到了接号继承人）→ kill -CONT 放回 → foreign
 冻结后状态 = Z                       → gone
 kill -9 成功 → killed；失败 → CONT 放回 + refused
 ```
+每轮探针先把 `_st/_n` 清零再读：读到一半目标退出时，绝不拿上一行的旧时间戳去匹配——
+否则 SIGKILL 会瞄准恰好借走号码的新进程。这一条正是本轮 10 轮稳定性跑里抓出来的
+偶发形态（目标在 `-r` 预检与读取之间退出曾被报成 `unverifiable`），修复后 10/10 轮无失败。
 
 竞态是被**关闭**而不是被缩小的：SIGSTOP 送达后进程不可能退出，其号码不可能在校验与击杀之间
 转手；因此「冻结后的 starttime 复核相符」在进程仍持有该号码期间是对同一事实的两次读数，
@@ -262,7 +268,8 @@ killed-on-real-identity 三条同样 ✅（内核 4.4 起即有 stat starttime �
 | K-6 复现（旧 lib + 新用例） | `node --test tests/edit.test.mjs`（修复前） | 新用例失败于旧实现 ✅（复现证明） |
 | **0.0.38 全量**（修复后） | 同上 | **338/338**（+21 用例，0 skip，0 fail）✅ |
 | 分文件 P1 复核 | `node --test tests/{spill,jobs,bounds,client-fallbacks,approval,transport,ops}.test.mjs` | 12+5+11+3+4+41+58 全过 ✅ |
-| K-4 shell 生命周期稳定性 | `node --test --test-timeout=10000 tests/transfer-shell.test.mjs` × 8 轮 | 8/8 轮 18/18 ✅（`/tmp/zz1..8.log`） |
+| K-4 shell 生命周期稳定性 | `node --test --test-timeout=10000 tests/transfer-shell.test.mjs` × 8 轮（竞态修复前）+ × **10 轮**（修复后） | 修复前曾抓到 1 次偶发（见 §三.2 注），修复后 10/10 轮 18/18 ✅（`/tmp/rr1..10.log`） |
+| **0.0.38 竞态修复后全量复跑** | `node --test --test-timeout=20000 tests/*.test.mjs` × 3 轮 | 3 轮 338/338 ✅（`/tmp/ff1..3.log`）；`tsc --noEmit` 0 错误 ✅ |
 
 离线层的「模拟 SSH」= fake transport 单元层 + 真 /proc 本地 shell 层（`transfer-shell`），
 两者都不冒充真实服务器。
@@ -272,6 +279,7 @@ killed-on-real-identity 三条同样 ✅（内核 4.4 起即有 stat starttime �
 | 目标 | 命令 | 结果 | 日志 |
 |---|---|---|---|
 | proxy（Linux 6.12） | `node scripts/live-check.mjs --target=proxy`（17 case 全跑） | **174 通过 / 0 失败**，exit 0 | `/tmp/live-proxy.log` |
+| proxy（**竞态修复后复跑**） | 同上，HEAD=`a1816c6` | **174 通过 / 0 失败**，exit 0；reap 各 verdict（killed/foreign/unverifiable/gone）与前次逐项一致复现 | `/tmp/live-proxy2.log` |
 | nas（Linux 4.4） | `node scripts/live-check.mjs --target=nas` | 168 通过 / 5 失败（逐项为既有环境差异，见 §八），exit 1 | `/tmp/live-nas.log` |
 
 nas 的 5 项失败**用 0.0.37 原始产物（官方 tgz 内已编译 lib + 0.0.37 的 live-check 脚本）在同一台 nas 上对照**：

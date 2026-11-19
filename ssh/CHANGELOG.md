@@ -59,7 +59,12 @@ apart, and the identity behind a pid is checked while it cannot move.
   identity is frozen with SIGSTOP (a stopped process cannot exit, so its number
   cannot change hands between the last check and the kill), the start time is
   re-read while frozen — a freeze that caught an heir is undone with SIGCONT
-  and the verdict is `foreign` — and only then is SIGKILL delivered. Where the
+  and the verdict is `foreign` — and only then is SIGKILL delivered. A target that
+  exits *while the cleanup is reading it* is answered with the state it is in, not
+  the state it was in a line earlier: every start-time probe resets its own scratch
+  (a stale match would aim the kill at a borrowed number), and a probe that comes
+  back empty asks `kill -0` once more — `gone` if the number no longer answers,
+  `unverifiable` only if it still stands there unreadable. Where the
   identity cannot be stated at all (no readable `/proc`, or a mover that
   recorded no start time), nothing is signalled: the verdict is `unverifiable`,
   and the copy's note names the stranded mover as still running — a cost

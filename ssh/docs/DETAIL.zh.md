@@ -258,7 +258,10 @@ harness 那句 `tool call timed out` 掐掉。
   时间（若这一冻恰好冻到了刚接号的继承人，就 `SIGCONT` 把它放回、如实报 `foreign`），最后才
   `SIGKILL`。两种行为就此退役：`killed-unverified`（0.0.37 在 `/proc` 不可读处凭一个裸号就杀，
   号一旦被复用就是误伤别人的任务；现在的判决是 `unverifiable`——不发任何信号，滞留的 mover 被
-  如实列为代价）和「先验后杀」之间的竞态窗口本身。已终止、还没被父进程回收的 mover（状态 `Z`、
+  如实列为代价）和「先验后杀」之间的竞态窗口本身。清理**读到一半**才离场的目标按它最终的处境回答，
+  而不是按一行之前的处境：每次探针读取前都先清空自己的暂存（过期的时间匹配会把 SIGKILL 瞄准借号者）、
+  读到的状态是 `Z` 报 `gone`、完全读不到 stat 时再问一次 `kill -0`——号已不应答报 `gone`，仍站着却
+  读不到才报 `unverifiable`。已终止、还没被父进程回收的 mover（状态 `Z`、
   cmdline 已空）报 `gone`——那正是它的实情，不是陌生人。`gone`、`killed`、`unverifiable`、
   `foreign`、`refused`、`unanswered` 各有一句实话；没拿到 pid 的复制什么都不杀，并说明残留无法指名。
   0.0.36 的
