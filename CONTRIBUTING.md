@@ -112,6 +112,22 @@
    确认无 manifest 诊断（标题、描述、图标、详情文档均正常显示），再到设置页
    切换中英文检查文案。
 
+## 交付产物与目录卫生
+
+每轮版本迭代的**过程 / 审阅产物**——交付报告（`*-DELIVERY.md`、`*-REPORT.md`、
+`*-SPEC-CHECK.md`、`*-READINESS.md`、`*-SMOKE-TEST-REPORT.md`）、diff 导出
+（`*-DIFF.patch`）、`npm pack` 生成的 `*.tgz`——一律放入插件目录内的
+`<plugin>/artifacts/<version>/`（例如 `ssh/artifacts/0.0.38/`），不得散放在仓库根或
+插件源码目录。
+
+- `artifacts/` 已被根 `.gitignore` 忽略，是**审阅留底归档**，不进版本控制；删除插件时
+  产物随目录一并消失，符合「一个目录 = 一个插件」的独立性。
+- 同一版本的报告与其引用的 patch 放进**同一 `<version>/` 子目录**，保证报告内的相对链接成立。
+- 权威内容走 `CHANGELOG.md`（版本摘要）与 `README.md` / `docs/`（正式文档），不得用散装
+  大文件承载。
+- **例外**：`cordis.patch.yml` 是 bundle 入口源文件，名字含 `patch` 但不是产物，必须留在
+  插件根并进版本控制（`.gitignore` 的 `*.patch` 只匹配 `.patch` 结尾，不会误伤 `.patch.yml`）。
+
 ## 插件状态取值
 
 根 `README.md` 插件索引表「状态」列只允许以下三个取值：

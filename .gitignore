@@ -25,3 +25,10 @@ yarn-error.log*
 .vscode/
 *.swp
 .DS_Store
+
+# 交付产物与审阅归档：版本报告、diff 导出、pack 安装包一律不进版本控制
+artifacts/
+# 兜底：防止 agent 未遵守规范、把产物散放在插件目录或仓库根
+SSH-PLUGIN-*.md
+SSH-PLUGIN-*.patch
+*.tgz

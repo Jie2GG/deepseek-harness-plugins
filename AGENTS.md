@@ -19,6 +19,8 @@ Jie2GG 的 DeepSeek Harness（DSH）插件集合仓库：**一个顶层目录 = 
   诊断、中英文文案均正常才算可用（细节见 CONTRIBUTING.md「版本与安装验证」）。
 - commit 前缀：插件目录改动用 `<短名>: <摘要>`，仓库级改动用 `chore:`（规则见
   CONTRIBUTING.md「新增插件流程」）。
+- 交付产物（版本报告、diff 导出、pack 的 tgz）放 `<短名>/artifacts/<版本>/`，已被 git
+  忽略；不散放插件目录或仓库根（细节见 CONTRIBUTING.md「交付产物与目录卫生」）。
 - 版本号三段语义：大版本 / 用户认可版本 / Agent 自动迭代版本；agent 日常提交只
   递增第三段，第二段须用户认可才动（细则见 CONTRIBUTING.md「版本号三段语义」）。
 - `CLAUDE.md` 是本文件的符号链接：只编辑 AGENTS.md。
