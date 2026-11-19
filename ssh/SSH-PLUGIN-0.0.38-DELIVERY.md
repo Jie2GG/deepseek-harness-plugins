@@ -289,17 +289,19 @@ K-4/K-6 新增的 reap/framing 断言在 nas 全部通过。
 
 ### 5.4 独立安装与加载（本轮执行）
 
-`node scripts/independent-install-check.mjs --keep` → **18/18** ✅（`/tmp/indep.log`，安装留在
-`/tmp/dsh-ssh-install-FmdIU5/project`）：解包安装、版本一致（0.0.38）、入口/导出解析、
+`node scripts/independent-install-check.mjs --keep`：竞态修复前 18/18 ✅（`/tmp/indep.log`），
+对最终 HEAD 复跑再次 **18/18** ✅（`/tmp/indep2.log`，安装留在 `/tmp/dsh-ssh-install-vANgPr/project`）：解包安装、版本一致（0.0.38）、入口/导出解析、
 50 个打包文件与当次构建逐 hash 相同（42 个 lib 文件双向核对，无陈旧模块）、bundle patch 单一 Host 行、
 配置 schema、工具注册（`ssh_client`，7 actions）、经真实 DSH subprocess provider 的 `ops.list()`
-与真机 `probe`（384 ms 可达）、一条远端命令返回成功。不依赖开发 worktree、不依赖已删目录。
+与真机 `probe`（394 ms 可达）、一条远端命令返回成功。不依赖开发 worktree、不依赖已删目录。
 
 ### 5.5 打包
 
-`npm pack` → `artifacts/jie2gg-dsh-plugin-ssh-0.0.38.tgz`（271,636 字节，50 个条目：`lib/`、
+`npm pack` → `artifacts/jie2gg-dsh-plugin-ssh-0.0.38.tgz`（272,671 字节，50 个条目：`lib/`、
 `cordis.patch.yml`、`locale/*.json`、`icon.svg`、`docs/`；不含 tests/scripts/临时产物）。
-`sha256 = ab548f74415999748d584a77f20e3610b713388e712269493f1f3b7d7b192ff0`（与 /tmp 原件一致）。
+`sha256 = 112ad33f726bb285f9c8b5c971f6172b6c0c59d44f1e212639d8c28a4b11f743`（重新打包于竞态修复
+`a1816c6` 之后；首轮 0.0.38 包 `ab548f74…` 已被此包替换，二者的差异仅在 `lib/transfer.js` 的
+verdict 精确化）。
 
 ---
 
