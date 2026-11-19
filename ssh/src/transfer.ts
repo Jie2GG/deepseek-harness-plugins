@@ -927,12 +927,23 @@ export function reapMoverCommand (pid: number, starttime: number, pathWord: stri
   // already terminated and merely waits for its parent to reap it — its number is
   // not running anything, and its now-empty `cmdline` would fail the argv compare
   // and be reported as `foreign` when the honest word is `gone`.
-  const readStart = `{ IFS= read -r _t </proc/"$P"/stat 2>/dev/null && { set -- \${_t##*) }; _st=$1; _n=\${20:-0}; }; } 2>/dev/null; `
+  // Each probe resets its own scratch first: a read that fails because the process
+  // left between one line of this script and the next must yield the empty answer,
+  // never the previous line's — a stale `_n` matching `K` would send a SIGKILL at a
+  // number that had already changed hands.
+  const readStart = `_st=; _n=0; { IFS= read -r _t </proc/"$P"/stat 2>/dev/null && { set -- \${_t##*) }; _st=$1; _n=\${20:-0}; }; } 2>/dev/null; `
   const zombieGone = `if [ "$_st" = Z ]; then echo 'dsh-reap gone'; exit 0; fi; `
+  // A pid that answers to `kill -0` but yields no start time at all — the `-r` test
+  // passed and then the file went, or the platform states stat but not this field —
+  // is still a pid standing there, and the only honest word for *that* is
+  // `unverifiable`; the instant it stops answering, the word is `gone`. The two
+  // states must not be collapsed into one refusal sentence about a mover that is
+  // already off the process table.
+  const noIdentity = `if kill -0 "$P" 2>/dev/null; then echo 'dsh-reap unverifiable'; else echo 'dsh-reap gone'; fi; exit 0; fi; `
   return `P=${shellQuote(String(pid))}; K=${shellQuote(String(starttime))}; p=${pathWord}; `
     + `if ! kill -0 "$P" 2>/dev/null; then echo 'dsh-reap gone'; exit 0; fi; `
-    + `if [ "$K" = 0 ] || [ ! -r /proc/"$P"/stat ] || [ ! -r /proc/"$P"/cmdline ]; then echo 'dsh-reap unverifiable'; exit 0; fi; `
-    + readStart + zombieGone + `_a=$(tr '\\0' '\\n' < /proc/"$P"/cmdline 2>/dev/null); `
+    + `if [ "$K" = 0 ] || [ ! -r /proc/"$P"/stat ] || [ ! -r /proc/"$P"/cmdline ]; then ` + `if kill -0 "$P" 2>/dev/null; then echo 'dsh-reap unverifiable'; else echo 'dsh-reap gone'; fi; exit 0; fi; `
+    + readStart + zombieGone + `if [ "$_n" = 0 ]; then ` + noIdentity + ` _a=$(tr '\\0' '\\n' < /proc/"$P"/cmdline 2>/dev/null); `
     + `if [ "$_n" != "$K" ] || [ "$(printf '%s\\n' "$_a" | sed -n 1p)" != ${shellQuote(program)} ] || [ "$(printf '%s\\n' "$_a" | sed -n 2p)" != ${shellQuote(dashdash)} ] || [ "$(printf '%s\\n' "$_a" | sed -n 3p)" != "$p" ]; then echo 'dsh-reap foreign'; exit 0; fi; `
     + `if ! kill -STOP "$P" 2>/dev/null; then if kill -0 "$P" 2>/dev/null; then echo 'dsh-reap refused'; else echo 'dsh-reap gone'; fi; exit 0; fi; `
     + readStart + zombieGone + `if [ "$_n" != "$K" ]; then kill -CONT "$P" 2>/dev/null; if [ "$_n" = 0 ]; then echo 'dsh-reap gone'; else echo 'dsh-reap foreign'; fi; exit 0; fi; `
