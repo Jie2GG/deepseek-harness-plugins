@@ -1364,17 +1364,31 @@ test('a body longer than the count the server gave is refused, because the strea
   assert.equal(built.server.file, 'one\nTARGET two\n')
 })
 
-test('a matching digest outranks a stale byte count, and the edit proceeds on the stronger claim', async () => {
-  // Pinned deliberately: 0.0.37 does not refuse a well-attested body because one
-  // marker disagreed with it. The digest describes the bytes that were handed over;
-  // the count was taken at a different instant, and a file that grew between the two
-  // still arrives whole. What covers the change is the version token, which the write
-  // child re-reads before it truncates anything.
+test('a matching digest no longer outranks a disagreeing byte count — K-6 closes the waiver (0.0.38)', async () => {
+  // 0.0.37 pinned the opposite answer here (“the digest describes the bytes handed
+  // over; the count was taken at another instant”), and that pin was the bug: a read
+  // whose two markers contradict each other is a read nobody can size, and an edit
+  // built on it writes bytes the server never agreed to. The version token still
+  // guards a file that grew *between* the read and the write; it cannot say what the
+  // body *was* when the two claims disagreed inside one read. So the refusal comes
+  // before the match, before the copy, and before anything is truncated.
   const built = editRunner('one\nTARGET two\n', { readBytes: 99 })
   const out = await built.ops.editRemote({ path: '/etc/f', oldText: 'TARGET', newText: 'KEPT' })
-  assert.equal(out.ok, true)
-  assert.equal(out.contentVerified, true, 'and the answer says which guard stood')
-  assert.equal(built.server.file, 'one\nKEPT two\n')
+  assert.equal(out.ok, false, 'the count’s disagreement is not waived by the digest')
+  assert.equal(out.contentVerified, false)
+  assert.match(out.message, /is not provably the file, so nothing was written and the file is unchanged/u)
+  assert.match(out.message, /short of the file on disk/u, 'named as the length fault it is')
+  assert.match(out.message, /do digest to the SHA-256 the server stated/u, 'and the sentence says the digest matched anyway — the read contradicts itself')
+  assert.equal(built.state.calls.filter(c => c.command.includes('cp -p')).length, 0, 'no safety copy')
+  assert.equal(built.state.calls.filter(c => c.command.includes('cat >')).length, 0, 'no truncating write')
+  assert.equal(built.server.file, 'one\nTARGET two\n', 'the server keeps its file')
+  // A dry run is refused by the same rule: a preview sized from a self-contradictory
+  // read is as untrustworthy as an edit built on one.
+  const dry = editRunner('one\nTARGET two\n', { readBytes: 99 })
+  const preview = await dry.ops.editRemote({ path: '/etc/f', oldText: 'TARGET', newText: 'KEPT', dryRun: true })
+  assert.equal(preview.ok, false, 'and the preview is not offered either')
+  assert.match(preview.message, /not provably the file/u)
+  assert.equal(dry.state.calls.filter(c => c.kind === 'run').length, 1, 'only the read ran')
 })
 
 test('bytes that decode to something other than what the server digested are refused', async () => {

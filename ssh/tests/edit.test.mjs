@@ -386,6 +386,37 @@ test('a declared byte count catches a body that is short or long', () => {
   assert.deepEqual(guards.verifyEditBody('whatever', {}), { ok: true, evidence: 'none' })
 })
 
+test('a matching digest does not waive the byte count the same read stated (K-6)', () => {
+  // 0.0.37's gate returned on the digest alone (`if (digest) return digestHex(body) ===
+  // digest`), so a read whose `ssh-plugin-bytes:` marker disagreed with the body under it
+  // passed on the strength of a digest that only proved *these* bytes digest to *this*
+  // value — never that they were the number of bytes the server counted. A matching
+  // digest over a disagreeing count is the read's two claims contradicting each other,
+  // and the only safe answer is a refusal before anything is written.
+  const body = 'alpha\nbeta\n'
+  const hex = guards.digestHex(body)
+  const overstated = guards.verifyEditBody(body, { bytes: Buffer.byteLength(body) + 5, digest: hex })
+  assert.equal(overstated.ok, false, 'a count larger than the body fails even with the digest matching')
+  assert.equal(overstated.reason, 'body-short')
+  assert.equal(overstated.declared, Buffer.byteLength(body) + 5)
+  const understated = guards.verifyEditBody(body, { bytes: Buffer.byteLength(body) - 3, digest: hex })
+  assert.equal(understated.ok, false, 'and so does a count smaller than the body')
+  assert.equal(understated.reason, 'body-long')
+  // An empty body under a nonzero declared length is the same fault, not a waiver.
+  const emptyUnder = guards.verifyEditBody('', { bytes: 3, digest: guards.digestHex('') })
+  assert.equal(emptyUnder.ok, false, 'the digest of nothing does not prove there were three bytes of file')
+  assert.equal(emptyUnder.reason, 'body-short')
+  // And the agreement that used to pass still passes: this tightening removes no proof
+  // the old gate accepted, it only refuses to let one claim stand in for the other.
+  assert.deepEqual(guards.verifyEditBody(body, { bytes: Buffer.byteLength(body), digest: hex }), { ok: true, evidence: 'digest' })
+  // The digest's own refusal still owns what it answered for before: a body whose bytes
+  // are not the file's — seen through both claims — fails as `not-the-same-bytes`, with
+  // the length disagreement spelled out in the message.
+  const cut = guards.verifyEditBody(body.slice(0, 6), { bytes: Buffer.byteLength(body), digest: hex })
+  assert.equal(cut.ok, false)
+  assert.equal(cut.reason, 'not-the-same-bytes')
+})
+
 test('a file that speaks the plugin\u2019s own header vocabulary keeps its first line', () => {
   // The residual hazard of a position-and-shape header split: `ssh-plugin:` with an
   // empty value IS a well-formed header line, so a file that starts with exactly that

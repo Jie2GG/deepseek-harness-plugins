@@ -460,3 +460,25 @@ test('a body the stream clipped, or lengthened with a line of its own, is refuse
   assert.equal(readFileSync(f, 'utf8'), original, 'and through all of it the file kept what it had')
   assert.ok(res.stdout.startsWith('ssh-plugin: '), 'the read really did run against that PATH')
 })
+
+test('a tampered byte marker is refused even though the digest still matches (K-6)', { skip: SKIP }, () => {
+  // The whole point of stating the count *and* the digest is that neither stands in for
+  // the other. This takes a real read of a real file — honest body, honest digest — and
+  // misstates only the `ssh-plugin-bytes:` value, the exact shape 0.0.37's gate waved
+  // through. The refusal has to come from the check, and the file has to stay untouched.
+  const f = join(dir, 'tampered-count')
+  writeFileSync(f, original)
+  const res = run(buildEditRead(shellQuote(f)), { bin: full })
+  assert.equal(res.status, 0, 'the read ran')
+  const parsed = splitEditVersion(res.stdout)
+  assert.equal(parsed.content, original, 'the body is the file')
+  assert.equal(parsed.digest, sha(original), 'and the digest marker is honest')
+  assert.equal(parsed.bodyBytes, Buffer.byteLength(original), 'the read itself stated the right count')
+  const overstated = verifyEditBody(parsed.content, { bytes: Buffer.byteLength(original) + 7, digest: parsed.digest })
+  assert.equal(overstated.ok, false, 'a count that disagrees fails the gate on its own terms — no digest waiver')
+  assert.equal(overstated.reason, 'body-short')
+  const understated = verifyEditBody(parsed.content, { bytes: Buffer.byteLength(original) - 2, digest: parsed.digest })
+  assert.equal(understated.ok, false, 'and disagreement in the other direction is refused the same way')
+  assert.equal(understated.reason, 'body-long')
+  assert.equal(readFileSync(f, 'utf8'), original, 'and through it all the file kept what it had')
+})

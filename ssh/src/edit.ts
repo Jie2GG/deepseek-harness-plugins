@@ -280,9 +280,15 @@ export type EditBodyCheck =
  * a text whose bytes are *similar in shape and different in fact* (each undecodable
  * byte comes back as `EF BF BD`), and only a digest notices that. So:
  *
- * - a digest stated and matching → **the body is the file**, byte for byte;
+ * - a digest stated and matching, **and** a stated count that agrees with it →
+ *   **the body is the file**, byte for byte;
  * - a digest stated and not matching → the body is not the file the server measured,
  *   whether the file moved mid-read or the read had to decode bytes that are not text;
+ * - a digest stated and matching but a count that disagrees → the read contradicts
+ *   itself: these bytes digest to the value the server stated, yet they are not the
+ *   number of bytes it counted, and no edit may be built on a body nobody can size.
+ *   K-6 closed this in 0.0.38 — until then the digest answered for everything, and a
+ *   mis-stated `ssh-plugin-bytes:` rode through an edit with the digest still matching;
  * - no digest, a byte count stated → the length is all this server can support, and a
  *   length that disagrees with the body is a truncated or an extended body either way;
  * - neither stated (an older read, or a server whose tools could not run) → nothing is
@@ -300,28 +306,48 @@ export function verifyEditBody (
 ): EditBodyCheck {
   const bytes = Buffer.byteLength(body, 'utf8')
   const { digest, bytes: count } = declared
-  if (digest !== undefined) {
-    if (digestHex(body) === digest) return { ok: true, evidence: 'digest' }
-    return {
-      ok: false,
-      reason: 'not-the-same-bytes',
-      bytes,
-      ...(count === undefined ? {} : { declared: count }),
-      message: `The ${String(bytes)} bytes this read handed over do not digest to the SHA-256 the server stated for the file${count === undefined ? '' : count === bytes ? `, although the length matches the ${String(count)} bytes it counted` : `, and the length is not the ${String(count)} bytes it counted either`}, so the text in hand is not the file on disk and an edit here would write bytes the server never agreed to.`,
-      hint: 'A file that is not valid UTF-8 comes back through this read as text whose bytes are not the ones on disk; a file that changed while it was being read does the same. Read it with `read` or copy it with `download` to see what is really there, and replace the whole file with `write` if that is what is wanted.',
-    }
-  }
-  if (count !== undefined) {
-    if (bytes === count) return { ok: true, evidence: 'bytes' }
-    const short = bytes < count
+  // The count refused, whatever else this read claimed. `stated` is the number the
+  // server printed, never the number this function counts: the fault *is* that the
+  // two disagree, and the sentence has to say both figures to be diagnosable. When a
+  // digest was stated and matches, that is worth saying too — a reader who sees a
+  // matching digest and a wrong count needs to know the check refused *because* the
+  // two claims disagree, not despite the digest.
+  const countRefused = (stated: number): EditBodyCheck => {
+    const short = bytes < stated
     return {
       ok: false,
       reason: short ? 'body-short' : 'body-long',
       bytes,
-      declared: count,
-      message: `The server said ${String(count)} bytes of file would follow its header and this read carries ${String(bytes)}, so the body this read produced is ${short ? 'short of' : 'longer than'} the file on disk: an edit here could not put the whole file back.`,
+      declared: stated,
+      message: `The server said ${String(stated)} bytes of file would follow its header and this read carries ${String(bytes)}, so the body this read produced is ${short ? 'short of' : 'longer than'} the file on disk: an edit here could not put the whole file back.${digest === undefined ? '' : ' Its bytes do digest to the SHA-256 the server stated, and that is the read disagreeing with itself: a matching digest over a body that is not the length the server counted proves nothing about which of the two markers lied.'}`,
       hint: `Read the file again${short ? ' — the channel stopped short of the end of it' : ' — the stream held more than the file itself'}. If it reads back whole, re-run the edit; if it does not, the ceiling is the thing to raise (Settings → Remote connections).`,
     }
+  }
+  // The digest is the stronger of the two claims, but "stronger" describes what it
+  // can prove about *these bytes* — it was never a measurement of *how many* bytes
+  // the server saw. So a matching digest does not end the check (K-6): when the read
+  // also stated a count, the count has to agree with the body too, or the two claims
+  // contradict each other and neither one may be trusted. Checked independently, in
+  // either order, the refusals below are the same set the digest-only gate made plus
+  // the one it wrongly waived — no body that was accepted on sound proof is refused
+  // now, and no body built on one contradicted claim gets to overwrite a file.
+  if (digest !== undefined) {
+    if (digestHex(body) !== digest) {
+      return {
+        ok: false,
+        reason: 'not-the-same-bytes',
+        bytes,
+        ...(count === undefined ? {} : { declared: count }),
+        message: `The ${String(bytes)} bytes this read handed over do not digest to the SHA-256 the server stated for the file${count === undefined ? '' : count === bytes ? `, although the length matches the ${String(count)} bytes it counted` : `, and the length is not the ${String(count)} bytes it counted either`}, so the text in hand is not the file on disk and an edit here would write bytes the server never agreed to.`,
+        hint: 'A file that is not valid UTF-8 comes back through this read as text whose bytes are not the ones on disk; a file that changed while it was being read does the same. Read it with `read` or copy it with `download` to see what is really there, and replace the whole file with `write` if that is what is wanted.',
+      }
+    }
+    if (count !== undefined && bytes !== count) return countRefused(count)
+    return { ok: true, evidence: 'digest' }
+  }
+  if (count !== undefined) {
+    if (bytes === count) return { ok: true, evidence: 'bytes' }
+    return countRefused(count)
   }
   return { ok: true, evidence: 'none' }
 }
