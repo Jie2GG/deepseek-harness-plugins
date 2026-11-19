@@ -1002,14 +1002,16 @@ cases.reap = async () => {
   async function parkMover (path, tag) {
     const handle = await transport.startRun(own, { ...settings, remoteTimeoutMs: 120_000 }, auth, downloadMoverCommand(q(path), tag), {})
     let marker = ''
-    let pid
-    for (let wait = 0; wait < 60 && pid === undefined; wait += 1) {
+    let identity
+    for (let wait = 0; wait < 60 && identity === undefined; wait += 1) {
       await new Promise(resolve => setTimeout(resolve, 250))
       const stderrSource = handle?.sources?.find(source => source.channel === 'stderr')
       marker = String(stderrSource?.read(0).text ?? '')
-      pid = moverPid(marker, tag)
+      identity = moverPid(marker, tag)
     }
-    return { handle, marker, pid }
+    // K-4: what makes the handle a handle is the *pair* — the number and the
+    // kernel start time that number carried — so both travel with the mover.
+    return { handle, marker, pid: identity?.pid, identity }
   }
 
   await remote(`mkdir -p ${q(REMOTE)}`)
@@ -1024,12 +1026,12 @@ cases.reap = async () => {
   const moverA = await parkMover(one, aTag)
   const moverB = await parkMover(one, bTag)
   check('two movers of one path are parked on it at once', typeof moverA.pid === 'number' && typeof moverB.pid === 'number' && moverA.pid !== moverB.pid && (await countOn(one)) === 2, `pids ${String(moverA.pid)} and ${String(moverB.pid)}, ${String(await countOn(one))} movers`)
-  const reapA = await remote(reapMoverCommand(moverA.pid ?? -1, q(one)))
+  const reapA = await remote(reapMoverCommand(moverA.pid ?? -1, moverA.identity?.starttime ?? 0, q(one)))
   check('the first copy ends its own mover, confirmed from that mover\u2019s command line', /dsh-reap killed/u.test(String(reapA.stdout)), String(reapA.stdout).trim().slice(0, 24))
   await new Promise(resolve => setTimeout(resolve, 300))
   check('the mover that belonged to the other copy is still parked', await alive(moverB.pid), `pid ${String(moverB.pid)} alive`)
   check('and exactly one mover is left on the shared path', (await countOn(one)) === 1, `${String(await countOn(one))} left`)
-  const reapAgain = await remote(reapMoverCommand(moverA.pid ?? -1, q(one)))
+  const reapAgain = await remote(reapMoverCommand(moverA.pid ?? -1, moverA.identity?.starttime ?? 0, q(one)))
   check('a cleanup run twice says gone, and never claims a second kill', /dsh-reap gone/u.test(String(reapAgain.stdout)), String(reapAgain.stdout).trim().slice(0, 24))
   // The survivor is not merely a process that still exists: fed, it carries the
   // payload through the channel its own copy owns.
@@ -1053,8 +1055,8 @@ cases.reap = async () => {
   const moverC = await parkMover(two, cTag)
   const moverD = await parkMover(odd, dTag)
   check('a mover is parked on each of two paths', typeof moverC.pid === 'number' && typeof moverD.pid === 'number', `pids ${String(moverC.pid)} / ${String(moverD.pid)}`)
-  const reapC = await remote(reapMoverCommand(moverC.pid ?? -1, q(two)))
-  const reapD = await remote(reapMoverCommand(moverD.pid ?? -1, q(odd)))
+  const reapC = await remote(reapMoverCommand(moverC.pid ?? -1, moverC.identity?.starttime ?? 0, q(two)))
+  const reapD = await remote(reapMoverCommand(moverD.pid ?? -1, moverD.identity?.starttime ?? 0, q(odd)))
   check('each is ended by its own cleanup, on a path whose name contains shell metacharacters', /dsh-reap killed/u.test(String(reapC.stdout)) && /dsh-reap killed/u.test(String(reapD.stdout)), `${String(reapC.stdout).trim().slice(0, 12)} | ${String(reapD.stdout).trim().slice(0, 12)}`)
   check('the odd path holds no mover afterwards', await countOn(odd) === 0, String(await countOn(odd)))
   moverC.handle?.kill(); await moverC.handle?.finished
@@ -1063,7 +1065,7 @@ cases.reap = async () => {
   // ── 3. the identity rule: a pid that is not this copy's mover is left alone ──
   const held = await parkMover(one, stampTag('e'))
   if (typeof held.pid === 'number') {
-    const wrong = await remote(reapMoverCommand(held.pid, q(`${REMOTE}/some-other-copy`)))
+    const wrong = await remote(reapMoverCommand(held.pid, held.identity?.starttime ?? 0, q(`${REMOTE}/some-other-copy`)))
     check('a cleanup aimed with another copy\u2019s path word refuses to kill', /dsh-reap foreign/u.test(String(wrong.stdout)), String(wrong.stdout).trim().slice(0, 20))
     check('and refusing costs the mover nothing', await alive(held.pid), `pid ${String(held.pid)} still alive`)
     // A pid that has already been recycled to an unrelated process is the other half
@@ -1072,12 +1074,35 @@ cases.reap = async () => {
     const sleeperLines = await remoteProcesses('sleep 30')
     const sleeperPid = Number((sleeperLines[0] ?? '').trim().split(/\s+/u)[0])
     if (Number.isSafeInteger(sleeperPid) && sleeperPid > 0) {
-      const recycled = await remote(reapMoverCommand(sleeperPid, q(one)))
+      // Read the sleeper's own kernel start time so the *recycled-pid* branch is
+      // what gets tested: a live number wearing somebody else's time. The probe
+      // counts fields after the last `)` for the same reason the plugin's does —
+      // a comm may hold spaces and parentheses.
+      const stRaw = await remote(`sed 's/.*) //' /proc/${String(sleeperPid)}/stat 2>/dev/null | tr ' ' '\n' | sed -n 20p`)
+      const sleeperStart = Number(String(stRaw.stdout).trim())
+      check('the server can state the sentinel’s start time', Number.isSafeInteger(sleeperStart) && sleeperStart > 0, String(sleeperStart))
+      const recycled = await remote(reapMoverCommand(sleeperPid, sleeperStart + 1, q(one)))
       check('a recycled pid running something else is reported as foreign, not as cleaned', /dsh-reap foreign/u.test(String(recycled.stdout)), String(recycled.stdout).trim().slice(0, 20))
       check('and the unrelated process survives it', await alive(sleeperPid), `pid ${String(sleeperPid)} alive`)
+      // And the fail-closed rule for a number with no identity to check: the
+      // 0.0.37 behaviour here was `killed-unverified` — a SIGKILL on the number
+      // alone. K-4 refuses, and the sleeper must never know it was aimed at.
+      const blind = await remote(reapMoverCommand(sleeperPid, 0, q(one)))
+      check('a mover identity with no recorded start time is refused, never killed on the number alone', /dsh-reap unverifiable/u.test(String(blind.stdout)), String(blind.stdout).trim().slice(0, 24))
+      check('and the sentinel survives that refusal untouched', await alive(sleeperPid), `pid ${String(sleeperPid)} alive`)
     }
     sleeper.kill(); await sleeper.finished
-    const right = await remote(reapMoverCommand(held.pid, q(one)))
+    // K-4, 0.0.38, on the mover itself: the same live process, aimed with a start
+    // time that is not its own (the shape a recycled number wears), must be left
+    // alone — and a mover whose recorded time is `0` must be refused outright,
+    // where 0.0.37 killed it `killed-unverified` on the bare number.
+    const mistimed = await remote(reapMoverCommand(held.pid, (held.identity?.starttime ?? 0) + 1, q(one)))
+    check('a living mover under a wrong recorded start time is left alone', /dsh-reap foreign/u.test(String(mistimed.stdout)), String(mistimed.stdout).trim().slice(0, 20))
+    check('and refusing the wrong time costs the mover nothing', await alive(held.pid), `pid ${String(held.pid)} alive`)
+    const blindHeld = await remote(reapMoverCommand(held.pid, 0, q(one)))
+    check('a mover recorded without a start time is refused, never killed on the number alone', /dsh-reap unverifiable/u.test(String(blindHeld.stdout)), String(blindHeld.stdout).trim().slice(0, 26))
+    check('and it is still parked after that refusal', await alive(held.pid), `pid ${String(held.pid)} alive`)
+    const right = await remote(reapMoverCommand(held.pid, held.identity?.starttime ?? 0, q(one)))
     check('the same cleanup, aimed correctly, ends that mover', /dsh-reap killed/u.test(String(right.stdout)), String(right.stdout).trim().slice(0, 20))
     held.handle?.kill(); await held.handle?.finished
   }
@@ -1106,7 +1131,7 @@ cases.reap = async () => {
       // that lost its channel also stops trusting the shared master, so the next child
       // has to dial again — which is when this can happen at all.
       const pid = Number(/pid (\d+)/u.exec(note)?.[1])
-      const direct = await remote(reapMoverCommand(Number.isSafeInteger(pid) ? pid : -1, q(prod)))
+      const direct = await remote(reapMoverCommand(Number.isSafeInteger(pid) ? pid : -1, 0, q(prod)))
       evidence(`  re-ask for pid ${String(pid)}: status ${String(direct.status)}, exit ${String(direct.exitCode)}, said ${JSON.stringify(String(direct.stdout ?? '').trim()).slice(0, 34)}, stderr ${JSON.stringify(String(direct.stderr ?? '').trim()).slice(0, 70)}`)
     }
     check(`copy stopped on its deadline (round ${String(round)}): refused, and its mover accounted for`, out.status === 'failed' && /ran out of its deadline/u.test(String(out.message)) && parkedNow === 0 && (/ended its own server-side mover/u.test(note) || /mover/u.test(note) === false || /got no answer|now running something else|refused the signal|no readable \/proc/u.test(note)), `${String(out.status)}, ${String(parkedNow)} mover(s)`)
@@ -1250,6 +1275,16 @@ cases.framing = async () => {
   check('a body short of the stated count is refused by the count', clipped.ok === false && clipped.reason === 'body-short', JSON.stringify(clipped).slice(0, 70))
   const extended = verifyEditBody(`${bigFrame.parsed.content}a line the file never had\n`, { bytes: bigFrame.parsed.bodyBytes, digest: bigFrame.parsed.digest })
   check('and so is one the stream made longer', extended.ok === false && extended.reason === 'not-the-same-bytes', JSON.stringify(extended).slice(0, 70))
+  // K-6, 0.0.38: a matching digest no longer waives a disagreeing count. Take a
+  // read the server itself proved — honest body, honest digest — and mis-state
+  // only the `ssh-plugin-bytes:` value. The 0.0.37 gate accepted these bytes on
+  // the digest alone; the count is a second claim and the two must agree.
+  const overstated = verifyEditBody(bigFrame.parsed.content, { bytes: (bigFrame.parsed.bodyBytes ?? 0) + 7, digest: bigFrame.parsed.digest })
+  check('a correct digest over a body the marker mis-sized is refused before the match (K-6)', overstated.ok === false && overstated.reason === 'body-short', JSON.stringify(overstated).slice(0, 90))
+  const understated = verifyEditBody(bigFrame.parsed.content, { bytes: Math.max(0, (bigFrame.parsed.bodyBytes ?? 0) - 3), digest: bigFrame.parsed.digest })
+  check('and the refusal stands in the other direction too', understated.ok === false && understated.reason === 'body-long', JSON.stringify(understated).slice(0, 90))
+  const whole = verifyEditBody(bigFrame.parsed.content, { bytes: bigFrame.parsed.bodyBytes, digest: bigFrame.parsed.digest })
+  check('claims that agree still pass together, on the digest as the stronger proof', whole.ok === true && whole.evidence === 'digest', JSON.stringify(whole).slice(0, 60))
 }
 
 const order = ['plain', 'grow', 'overwrite', 'modes', 'tilde', 'lane', 'tree', 'edit', 'capability', 'spill', 'jobs', 'temp', 'sink', 'reap', 'jobcap', 'framing', 'release']

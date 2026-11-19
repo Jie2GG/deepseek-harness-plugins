@@ -745,41 +745,62 @@ const REAP_BUDGET_MS = 10_000
 const MOVER_PROGRAM = 'cat'
 
 /**
+/**
  * The line a copy's server-side mover prints about itself, on **stderr**.
  *
- * `dsh-mover <pid> <tag>`. The pid is the process doing the moving, not the shell
- * that started it: a download ends its shell with `exec` so the two are the same
- * process, and a publish starts its mover as a background job and records *that*
+ * `dsh-mover <pid> <tag> <starttime>`. The pid is the process doing the moving, not
+ * the shell that started it: a download ends its shell with `exec` so the two are the
+ * same process, and a publish starts its mover as a background job and records *that*
  * job's pid. The tag is the copy's own task identity, echoed back so the near end
  * can prove the line came from the command it ran and not from something the
- * server printed on its own. It travels on stderr because stderr is a channel this
- * copy's parent already reads whole, whatever direction the bytes are moving, and
- * because stdout is the payload itself.
+ * server printed on its own. The start time is the number the kernel wrote into
+ * `/proc/<pid>/stat` when this very process began — a fact a recycled pid cannot
+ * inherit, because a process that took over a freed number started later and says so.
+ * `0` when the server states no `/proc` at all (K-4: a pid alone is a number that
+ * gets handed between processes; a pid *and* its start time is an identity).
+ * It travels on stderr because stderr is a channel this copy's parent already reads
+ * whole, whatever direction the bytes are moving, and because stdout is the payload
+ * itself.
  */
-const MOVER_MARKER = /^dsh-mover ([0-9]{1,7}) ([a-z0-9-]+)$/mu
+const MOVER_MARKER = /^dsh-mover ([0-9]{1,7}) ([a-z0-9-]+)(?: ([0-9]{1,20}))?$/mu
+
+/** What one stopped copy learned about the server-side process it is allowed to end. */
+export interface MoverIdentity {
+  /** The number the mover reported for itself. */
+  pid: number
+  /** The kernel start time that number belonged to, `0` when the server stated none. */
+  starttime: number
+}
 
 /**
  * What one cleanup child says about the process it was pointed at.
  *
  * - `gone` — the recorded pid is no longer running: the mover noticed the channel
- *   close on its own, which is the healthy answer and gets no note.
- * - `killed` — the pid was running **and its recorded command line was this
- *   copy's mover**, and SIGKILL was delivered.
- * - `killed-unverified` — the pid was killed on the strength of the recorded number
- *   alone, because this server states no readable `/proc/<pid>/cmdline` (not Linux,
- *   or `/proc` mounted `hidepid`).
- * - `foreign` — the pid is running something that is not this copy's mover: either
- *   the mover already finished and the number was handed to another process, or the
- *   process has no command line to check (a zombie, a kernel thread). Nothing was
- *   touched, because killing an unrelated process is worse than a leftover mover.
- * - `refused` — the server would not let this user signal that pid.
+ *   close on its own, or it terminated and only waits to be reaped (a `Z` state in
+ *   its own stat line), which is the same fact as far as a signal is concerned. This
+ *   is the healthy answer and gets no note.
+ * - `killed` — the pid's command line **and its kernel start time** both named this
+ *   copy's mover; it was frozen with SIGSTOP, its identity re-read while frozen (a
+ *   stopped process cannot exit, so its number cannot pass to an heir mid-decision),
+ *   and only then struck with SIGKILL.
+ * - `foreign` — the pid is not this copy's mover any more: the number was recycled,
+ *   the command line says something else, or the process vanished between the check
+ *   and the freeze. A process this cleanup froze and then found to be a stranger was
+ *   continued with SIGCONT before it walked away. Nothing was killed.
+ * - `unverifiable` — the server states no readable `/proc` for this pid, or this
+ *   mover reported no start time to check against, so the identity behind the number
+ *   cannot be established at all. Nothing was signalled: 0.0.37 killed on the number
+ *   alone here, which is exactly the unverified-kill risk K-4 closes (a recycled pid
+ *   belongs to somebody else's work). The stranded mover is left running and the
+ *   note says so.
+ * - `refused` — the server would not let this user freeze or signal that pid.
  * - `unanswered` — the cleanup child itself never got an answer to read: the call
  *   timed out, the channel died, or the shell could not run the script.
  */
-export type MoverVerdict = 'gone' | 'killed' | 'killed-unverified' | 'foreign' | 'refused' | 'unanswered'
+export type MoverVerdict = 'gone' | 'killed' | 'foreign' | 'unverifiable' | 'refused' | 'unanswered'
 
 /** The verdicts a cleanup child may print, and nothing else, counts as an answer. */
-const REAP_VERDICT = /^dsh-reap (gone|killed|killed-unverified|foreign|refused)$/mu
+const REAP_VERDICT = /^dsh-reap (gone|killed|foreign|refused|unverifiable)$/mu
 
 /**
  * The one line {@link MOVER_MARKER} matches, as a command.
@@ -788,7 +809,25 @@ const REAP_VERDICT = /^dsh-reap (gone|killed|killed-unverified|foreign|refused)$
  * @returns a `printf` that writes the marker to stderr and a `; ` to follow.
  */
 function moverMarker (pidExpression: string, tag: string): string {
-  return `printf 'dsh-mover %s %s\\n' ${pidExpression} ${shellQuote(tag)} >&2; `
+  return `printf 'dsh-mover %s %s %s\\n' ${pidExpression} ${shellQuote(tag)} "$ms" >&2; `
+}
+
+/**
+ * The shell fragment that fills `$ms` with a process's kernel start time.
+ *
+ * `/proc/<pid>/stat` is one line shaped `pid (comm) state ppid … starttime …`, and
+ * `comm` may hold spaces and brackets, so the fields are counted **after** the last
+ * `)` — which is what `${_t##*) }` strips, greedily. The start time is field 22 of
+ * the line, which is the 20th after `comm`. Everything stays inside one subshell:
+ * the `set --` reshapes that subshell's positional parameters, never the mover
+ * script's own, and a server with no readable `/proc` just gets `ms=0` — the honest
+ * spelling of “this platform states no identity beyond the number.”
+ * @param pidExpression - `$$` for a mover this shell execs into, `"$mp"` for a
+ *   backgrounded one; the same number the marker will report.
+ * @returns an assignment to `ms`, ending in `; `.
+ */
+function moverStartProbe (pidExpression: string): string {
+  return `ms=0; { IFS= read -r _t </proc/${pidExpression}/stat 2>/dev/null && { set -- \${_t##*) }; ms=\${20:-0}; }; } 2>/dev/null; `
 }
 
 /**
@@ -807,7 +846,7 @@ function moverMarker (pidExpression: string, tag: string): string {
  * @returns one POSIX command whose stdout is the file.
  */
 export function downloadMoverCommand (destArg: string, tag: string): string {
-  return `${moverMarker('"$$"', tag)}exec ${MOVER_PROGRAM} -- ${destArg}`
+  return `${moverStartProbe('"$$"')}${moverMarker('"$$"', tag)}exec ${MOVER_PROGRAM} -- ${destArg}`
 }
 
 /**
@@ -839,47 +878,86 @@ function moverArgvLines (): readonly [string, string] {
  * all, so sshd lets them sit; on a live server they were seen outliving their calls
  * by eight to eleven hours.
  *
- * What gets killed is therefore **the pid this copy reported**, and the pid alone:
- * a `pkill -f` pattern built from a remote path cannot separate two copies of the
- * same file, because the path is the one thing they share, and a path is a regular
+ * What gets killed is therefore **the pid this copy reported, together with the
+ * start time that pid stamped into its own marker** — an identity, not a bare
+ * number: a `pkill -f` pattern built from a remote path cannot separate two copies of
+ * the same file, because the path is the one thing they share, and a path is a regular
  * expression to `pkill -f` besides (`[`, `*`, `?`, `+` and `.` are all legal in a
  * remote path). This command needs no `pkill` and no `pgrep` either — `kill -0`,
- * `kill -9`, `tr` and `sed` are the whole toolkit, which is a wider set of servers
- * than 0.0.36 could clean at all.
+ * `kill -9`, `kill -STOP`, `kill -CONT`, `tr` and `sed` are the whole toolkit, which
+ * is a wider set of servers than 0.0.36 could clean at all.
  *
- * Before the signal, the target is identified from the inside out: `/proc/<pid>/cmdline`
- * is read one argument per line and compared, as plain strings, with the argv this
- * plugin handed that process (`cat`, `--`, and the path *the server's own shell*
- * expanded, which is why the path word is assigned to a variable rather than
- * quoted twice — `~/x` has to expand the same way it did for the mover). A pid
- * whose command line says something else is left alone and reported, because a
- * recycled number is not this copy's mover.
+ * Before the signal, the target is identified from the inside out, and the decision
+ * is then *closed* rather than raced. `/proc/<pid>/stat` yields the kernel start time
+ * the mover stamped into its own marker, `/proc/<pid>/cmdline` is read one argument
+ * per line and compared, as plain strings, with the argv this plugin handed that
+ * process (`cat`, `--`, and the path *the server's own shell* expanded, which is why
+ * the path word is assigned to a variable rather than quoted twice — `~/x` has to
+ * expand the same way it did for the mover). A pid whose start time or command line
+ * says something else is left alone and reported: a recycled number is not this
+ * copy's mover, and no number that changed hands can be trusted to keep still.
+ *
+ * The residue that a check-then-kill shape cannot close on its own — the process
+ * exiting between the last check and the signal, its number taken by a new process
+ * that then eats the SIGKILL — is what SIGSTOP is for. The freeze comes first: a
+ * stopped process cannot exit, so between the freeze and the kill its pid cannot be
+ * freed and re-handed, and the start time re-read *while stopped* is the same
+ * identity re-checked against a process that has had no chance to change. Equal →
+ * the SIGKILL can only land on the mover this copy started. Unequal → the freeze
+ * caught an heir that took the number in the instant before it, and `kill -CONT`
+ * hands that stranger back its life, milliseconds of stillness the only thing it
+ * lost, before the verdict says `foreign`. When a server states no readable `/proc`
+ * (not Linux, or `hidepid`) or the mover recorded no start time, the identity behind
+ * the number cannot be established at all, and nothing is signalled: 0.0.37 killed
+ * on the number alone in exactly that case, and K-4 retired that bet — a stranded
+ * mover is a cost this plugin names, an unrelated process killed by a recycled pid
+ * is a damage it refuses to risk.
  * @param pid - the number the mover reported about itself.
+ * @param starttime - the kernel start time that number carried, as the mover itself
+ *   recorded it, `0` when this server states no `/proc`.
  * @param pathWord - the remote path in the exact shell shape the mover was given.
  * @returns one POSIX command that answers with one `dsh-reap <verdict>` line.
  */
-export function reapMoverCommand (pid: number, pathWord: string): string {
+export function reapMoverCommand (pid: number, starttime: number, pathWord: string): string {
   const [program, dashdash] = moverArgvLines()
-  return `P=${shellQuote(String(pid))}; p=${pathWord}; `
+  // The start-time read, kept one expression so both checks (before and after the
+  // freeze) run the identical field extraction; see {@link moverStartProbe} for why
+  // the fields are counted after the last `)` and why `set --` stays in a subshell.
+  // The first field after `comm` is the process *state*: a `Z` is a mover that has
+  // already terminated and merely waits for its parent to reap it — its number is
+  // not running anything, and its now-empty `cmdline` would fail the argv compare
+  // and be reported as `foreign` when the honest word is `gone`.
+  const readStart = `{ IFS= read -r _t </proc/"$P"/stat 2>/dev/null && { set -- \${_t##*) }; _st=$1; _n=\${20:-0}; }; } 2>/dev/null; `
+  const zombieGone = `if [ "$_st" = Z ]; then echo 'dsh-reap gone'; exit 0; fi; `
+  return `P=${shellQuote(String(pid))}; K=${shellQuote(String(starttime))}; p=${pathWord}; `
     + `if ! kill -0 "$P" 2>/dev/null; then echo 'dsh-reap gone'; exit 0; fi; `
-    + `if [ ! -r /proc/"$P"/cmdline ]; then if kill -9 "$P" 2>/dev/null; then echo 'dsh-reap killed-unverified'; else echo 'dsh-reap refused'; fi; exit 0; fi; `
-    + `a=$(tr '\\0' '\\n' < /proc/"$P"/cmdline 2>/dev/null); `
-    + `if [ "$(printf '%s\\n' "$a" | sed -n 1p)" != ${shellQuote(program)} ] || [ "$(printf '%s\\n' "$a" | sed -n 2p)" != ${shellQuote(dashdash)} ] || [ "$(printf '%s\\n' "$a" | sed -n 3p)" != "$p" ]; then echo 'dsh-reap foreign'; exit 0; fi; `
-    + `if kill -9 "$P" 2>/dev/null; then echo 'dsh-reap killed'; else echo 'dsh-reap refused'; fi`
+    + `if [ "$K" = 0 ] || [ ! -r /proc/"$P"/stat ] || [ ! -r /proc/"$P"/cmdline ]; then echo 'dsh-reap unverifiable'; exit 0; fi; `
+    + readStart + zombieGone + `_a=$(tr '\\0' '\\n' < /proc/"$P"/cmdline 2>/dev/null); `
+    + `if [ "$_n" != "$K" ] || [ "$(printf '%s\\n' "$_a" | sed -n 1p)" != ${shellQuote(program)} ] || [ "$(printf '%s\\n' "$_a" | sed -n 2p)" != ${shellQuote(dashdash)} ] || [ "$(printf '%s\\n' "$_a" | sed -n 3p)" != "$p" ]; then echo 'dsh-reap foreign'; exit 0; fi; `
+    + `if ! kill -STOP "$P" 2>/dev/null; then if kill -0 "$P" 2>/dev/null; then echo 'dsh-reap refused'; else echo 'dsh-reap gone'; fi; exit 0; fi; `
+    + readStart + zombieGone + `if [ "$_n" != "$K" ]; then kill -CONT "$P" 2>/dev/null; if [ "$_n" = 0 ]; then echo 'dsh-reap gone'; else echo 'dsh-reap foreign'; fi; exit 0; fi; `
+    + `if kill -9 "$P" 2>/dev/null; then echo 'dsh-reap killed'; else kill -CONT "$P" 2>/dev/null; echo 'dsh-reap refused'; fi`
 }
 
 /**
- * The pid a stopped copy's mover reported, when it reported one.
+ * The mover identity a stopped copy reported, when it reported one.
  * @param stderr - the stderr this copy collected from its own channel.
  * @param tag - the identity this copy wrote into the marker, which is what makes
  *   the line *this* copy's and not a stray line that happens to look like one.
- * @returns the mover's pid, or `undefined` when this copy never got one.
+ * @returns the mover's pid and the kernel start time that number belonged to
+ *   (`0` when this server states no `/proc`), or `undefined` when this copy never
+ *   got a marker at all.
  */
-export function moverPid (stderr: string | undefined, tag: string): number | undefined {
+export function moverPid (stderr: string | undefined, tag: string): MoverIdentity | undefined {
   const marker = MOVER_MARKER.exec(stderr ?? '')
   if (marker === null || marker[2] !== tag) return undefined
   const pid = Number(marker[1])
-  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined
+  // A marker from a server with no `/proc` carries `0`; a marker shaped before the
+  // start time existed parses to `0` too. Both mean the same thing to the cleanup:
+  // the number has no time stamp behind it, so it must not be killed on its own.
+  const starttime = Number(marker[3] ?? '0')
+  return { pid, starttime: Number.isSafeInteger(starttime) && starttime > 0 ? starttime : 0 }
 }
 
 /**
@@ -926,11 +1004,11 @@ export function moverVerdictNote (
       // 0.0.36 called this "matched nothing" and said nothing either.
       return undefined
     case 'killed':
-      return `the interrupted copy ended its own server-side mover of ${path} (pid ${String(pid)}), confirmed from that pid's command line before the signal.`
-    case 'killed-unverified':
-      return `the interrupted copy ended its server-side mover of ${path} (pid ${String(pid)}); ${host} states no readable /proc entry for that pid, so the kill was taken on the recorded number alone.`
+      return `the interrupted copy ended its own server-side mover of ${path} (pid ${String(pid)}), confirmed from that pid's command line and start time, then frozen with SIGSTOP and re-checked while frozen before the signal.`
+    case 'unverifiable':
+      return `the interrupted copy left its server-side mover of ${path} (pid ${String(pid)}) running: ${host} states no readable /proc entry for that pid, or the mover recorded no start time, so the number could not be proved still its mover's — and killing an unverified pid can strike a process that only borrowed the recycled number. This plugin names the stranded mover instead of risking that.`
     case 'foreign':
-      return `the pid this copy recorded as its mover of ${path} (pid ${String(pid)}) is now running something else, so nothing was killed: the mover had already gone, and an unrelated process holds that number.`
+      return `the pid this copy recorded as its mover of ${path} (pid ${String(pid)}) is no longer that mover — another command line, another start time, or a process that left before the freeze — so nothing was killed: an unrelated process may hold that number now.`
     case 'refused':
       return `the interrupted copy could not end its own server-side mover of ${path} (pid ${String(pid)}): ${host} refused the signal, so that mover may still be running.`
     case 'unanswered':
@@ -956,12 +1034,13 @@ function moverPidMissingNote (outcome: string, bytes: number, path: string): str
 }
 
 /**
- * End one stranded mover, identified by the pid it reported.
+ * End one stranded mover, identified by the pid and start time it reported.
  * @param transport - the shared transport, to spend one small child on the cleanup.
  * @param target - the server the mover is parked on.
  * @param settings - the ceilings the cleanup child runs under.
  * @param auth - the credentials for this target.
- * @param pid - the mover pid this copy recorded on its own channel.
+ * @param mover - the identity the mover reported on this copy's own channel: its
+ *   pid, and the kernel start time that number carried.
  * @param pathWord - the remote path in the shell shape the mover was handed.
  * @param path - the path as the reader names it, for the note.
  * @returns a sentence when there was one to tell, otherwise `undefined`.
@@ -971,28 +1050,28 @@ async function reapStoppedMover (
   target: RemoteTarget,
   settings: SshSettings,
   auth: RemoteAuth,
-  pid: number,
+  mover: MoverIdentity,
   pathWord: string,
   path: string,
 ): Promise<string | undefined> {
   let reaped
   try {
-    reaped = await transport.run(target, settings, auth, reapMoverCommand(pid, pathWord), {
+    reaped = await transport.run(target, settings, auth, reapMoverCommand(mover.pid, mover.starttime, pathWord), {
       timeoutMs: Math.min(settings.statTimeoutMs, REAP_BUDGET_MS),
     })
   } catch {
     // The copy already said what went wrong. Here the cleanup could not even be
     // asked, which is a residual worth naming rather than a silence: 0.0.36 said
     // nothing in exactly this case and read as though the server had been tidied.
-    return moverVerdictNote('unanswered', pid, path, target.host)
+    return moverVerdictNote('unanswered', mover.pid, path, target.host)
   }
   const verdict = parseMoverVerdict(reaped.stdout)
   if (verdict === 'unanswered' && reaped.status !== 'succeeded') {
     // The child answered, but not with a verdict: a shell that could not parse the
     // script, or a server that ended it. Same residual, same honesty.
-    return moverVerdictNote('unanswered', pid, path, target.host)
+    return moverVerdictNote('unanswered', mover.pid, path, target.host)
   }
-  return moverVerdictNote(verdict, pid, path, target.host)
+  return moverVerdictNote(verdict, mover.pid, path, target.host)
 }
 
 /**
@@ -1066,7 +1145,7 @@ export function publishCommand(remotePart: string, destArg: string, sourceMode?:
     ? ''
     : ` && { u=$(umask); m=$((0${sourceMode.toString(8)} & ~(0$u))); c=$(printf "%o" "$m"); if [ -n "$c" ]; then chmod "$c" ${destArg}; fi; }`
   return `if [ -e ${destArg} ] || [ -L ${destArg} ]; then cat -- ${partArg} > ${destArg} & mp=$!; `
-    + `${moverMarker('"$mp"', tag)}wait $mp && rm -f ${partArg}; `
+    + `${moverStartProbe('"$mp"')}${moverMarker('"$mp"', tag)}wait $mp && rm -f ${partArg}; `
     + `else mv -f ${partArg} ${destArg}${carry}; fi`
 }
 

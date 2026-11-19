@@ -785,7 +785,7 @@ test('a single-file download rides a counted channel and lands by rename, not in
   // cleanup can name the process it is allowed to kill; the sink is a sibling temp
   // file with this process's id and four bytes of entropy in its name.
   const mover = String(stream.argvTail.at(-1))
-  assert.match(mover, /^printf 'dsh-mover %s %s\\n' "\$\$" '[a-z0-9]+-[a-f0-9]{8}' >&2; exec cat -- '\/srv\/x'$/u, 'the mover announces its pid, then becomes the mover')
+  assert.match(mover, /^ms=0; \{ IFS= read -r _t <\/proc\/"\$\$"\/stat .*printf 'dsh-mover %s %s %s\\n' "\$\$" '[a-z0-9]+-[a-f0-9]{8}' "\$ms" >&2; exec cat -- '\/srv\/x'$/u, 'the mover announces its pid and start time, then becomes the mover')
   const localTag = /x\.dsh-part-([a-z0-9]+-[a-f0-9]{8})/.exec(stream.copy.localPath)?.[1]
   const remoteTag = /'([a-z0-9]+-[a-f0-9]{8})'/.exec(mover)?.[1]
   assert.ok(localTag !== undefined && remoteTag !== undefined && localTag === remoteTag, 'the copy has one identity: the temp name and the mover marker carry the same tag')
@@ -949,7 +949,7 @@ test('a single-file upload stops at a temp sibling and only then takes the final
   // The mover is a background job *because* the script has something to do after it,
   // so the one number that names it is `$!`, reported before the copy can park in a
   // fifo nobody is reading, and `wait` still hands the copy's status to the `&&`.
-  assert.match(publish, /printf 'dsh-mover %s %s\\n' "\$mp" '[a-z0-9]+-[a-f0-9]{8}' >&2; wait \$mp && rm -f '\/srv\/x\.dsh-part-[a-z0-9-]*'/u)
+  assert.match(publish, /printf 'dsh-mover %s %s %s\\n' "\$mp" '[a-z0-9]+-[a-f0-9]{8}' "\$ms" >&2; wait \$mp && rm -f '\/srv\/x\.dsh-part-[a-z0-9-]*'/u)
   assert.match(publish, /rm -f/)
   assert.match(publish, /mv -f/) // and the fresh-name branch, chosen by the server, not by a stale pre-check
   assert.match(publish, /chmod/) // with the source's bits carried over

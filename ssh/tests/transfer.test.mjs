@@ -61,25 +61,28 @@ function ran (stdout = '', over = {}) {
  * @returns the tag, or `undefined` when the command carries no marker.
  */
 function tagOf (command) {
-  return /printf 'dsh-mover %s %s\\n' "\$(?:\$|mp)" '([a-z0-9-]+)' >&2/u.exec(String(command))?.[1]
+  return /printf 'dsh-mover %s %s %s\\n' "\$(?:\$|mp)" '([a-z0-9-]+)' "\$ms" >&2/u.exec(String(command))?.[1]
 }
 
 /**
- * What a real mover answers with on its own stderr: the pid it reported, and this
- * copy's tag. The fake derives both from the command the plugin actually sent, so a
- * test cannot pass by hard-coding an identity the copy never asked for.
+ * What a real mover answers with on its own stderr: the pid it reported, this
+ * copy's tag, and the kernel start time that number carried. The fake derives the
+ * first two from the command the plugin actually sent, so a test cannot pass by
+ * hard-coding an identity the copy never asked for.
  * @param argvTail - the argv the copy was handed, whose last entry is the mover command.
  * @param pid - the number to answer with, standing in for the server's own.
+ * @param starttime - the start time to stamp beside it; `0` stands for a server
+ *   with no readable `/proc`, the shape K-4 must refuse to kill on.
  * @returns the marker line, newline included.
  */
-function moverStderr (argvTail, pid = 4242) {
+function moverStderr (argvTail, pid = 4242, starttime = 1700000000) {
   const tag = tagOf(String(argvTail.at(-1)))
-  return `dsh-mover ${String(pid)} ${tag ?? 'untagged'}\n`
+  return `dsh-mover ${String(pid)} ${tag ?? 'untagged'} ${String(starttime)}\n`
 }
 
-/** Is this command the cleanup child aimed at a recorded mover pid? */
+/** Is this command the cleanup child aimed at a recorded mover identity? */
 function isReap (command) {
-  return /^P='[0-9]+'; p=/.test(String(command))
+  return /^P='[0-9]+'; K='[0-9]*'; p=/.test(String(command))
 }
 
 // ── the remote path, shaped for a shell that expands a leading tilde ────────
@@ -115,7 +118,12 @@ test('publishCommand replaces through the file, and only renames when there is n
   // process, and K-4 needs the one that holds the part file (0.0.36 settled for
   // killing anything whose command line looked like this copy's, which on a shared
   // path is not the same thing).
-  assert.match(command, /printf 'dsh-mover %s %s\\n' "\$mp" 'aaa1-bbbbbbbb' >&2; wait \$mp && rm -f '\/srv\/x\.dsh-part-1'/u)
+  assert.match(command, /printf 'dsh-mover %s %s %s\\n' "\$mp" 'aaa1-bbbbbbbb' "\$ms" >&2; wait \$mp && rm -f '\/srv\/x\.dsh-part-1'/u)
+  // K-4: the marker carries a kernel start time, read from the mover's own `/proc`
+  // entry, because a bare pid is a number that gets recycled and an heir must not
+  // eat the cleanup's SIGKILL. The `0` default is the shape of a server that states
+  // no `/proc` at all — which the cleanup then refuses to kill on.
+  assert.match(command, /ms=0; \{ IFS= read -r _t <\/proc\/"\$mp"\/stat/u, 'the mover’s start time is probed before it is announced')
   // `wait` hands the copy's own status to the `&&`, so a mover that died keeps the
   // part file for the reader exactly as the sequential form did.
   // The fresh-name branch carries the source's bits through the server's umask,
@@ -271,7 +279,7 @@ test('a download that grows past the ceiling after the pre-check is stopped and 
   // cannot tell this copy's mover from another copy of the same file.
   const reaper = state.calls.filter(c => c.kind === 'run').map(c => c.command).find(isReap)
   assert.ok(reaper, 'the interrupted download fired a cleanup child')
-  assert.match(String(reaper), /^P='4242'; p='\/srv\/x'; /u, 'aimed at the recorded pid, with the path only as the identity to confirm')
+  assert.match(String(reaper), /^P='4242'; K='1700000000'; p='\/srv\/x'; /u, 'aimed at the recorded pid and its start time, with the path only as the identity to confirm')
   assert.equal(String(reaper).includes('pkill'), false, 'and nothing is killed for matching a path')
   assert.match(String(out.notes?.join(' ') ?? ''), /ended its own server-side mover of \/srv\/x \(pid 4242\), confirmed from that pid's command line/u, 'the result says what the cleanup proved')
 })
@@ -369,7 +377,7 @@ test('a failed publish asks the server to end the mover it left writing the part
   const out = await transfer(runner, TARGET, SETTINGS, {}, base({ direction: 'upload', localPath: local, maxBytes: 1024 }))
   assert.equal(out.status, 'failed')
   assert.match(out.message, /could not take its final place/)
-  assert.match(part, /^P='4711'; p='\/srv\/x\.dsh-part-[a-z0-9-]+'; /u, 'the cleanup names the pid this publish reported, and its own part file')
+  assert.match(part, /^P='4711'; K='1700000000'; p='\/srv\/x\.dsh-part-[a-z0-9-]+'; /u, 'the cleanup names the pid and the start time this publish reported, and its own part file')
   assert.equal(part.includes('pkill'), false, 'it does not search the process table for a path')
   assert.match(out.notes.join('\n'), /ended its own server-side mover of \/srv\/x\.dsh-part-/u, 'and the result says the cleanup ran')
   assert.match(out.notes.join('\n'), /confirmed from that pid's command line/u, 'saying what the kill was proved by')
@@ -492,7 +500,7 @@ test('an upload asks for the ssh channel and a tree asks for scp, each with its 
   // authority as one argument — no `host:path` grammar, which belongs to scp — and it
   // says its own pid on stderr first, so a stopped copy has one process to name.
   const remote = String(call.argvTail[call.argvTail.length - 1])
-  assert.match(remote, /^printf 'dsh-mover %s %s\\n' "\$\$" '[a-z0-9-]+' >&2; exec cat -- '\/srv\/x'$/u)
+  assert.match(remote, /^ms=0; \{ IFS= read -r _t <\/proc\/"\$\$"\/stat 2>\/dev\/null && \{ set -- \$\{_t##\*\) \}; ms=\$\{20:-0\}; \}; \} 2>\/dev\/null; printf 'dsh-mover %s %s %s\\n' "\$\$" '[a-z0-9-]+' "\$ms" >&2; exec cat -- '\/srv\/x'$/u)
   assert.equal(call.argvTail[call.argvTail.length - 2], 'deploy@10.0.0.9')
 })
 
@@ -635,6 +643,32 @@ test('a recursive download keeps its half tree out of the destination when the c
 
 // ── K-4: one copy, one identity, one process it is allowed to kill ───────────
 
+test('a mover on a server that states no start time is refused, not killed on the number alone (K-4)', async () => {
+  // 0.0.37 answered “no readable /proc entry” with `killed-unverified`: a SIGKILL
+  // aimed at a bare number, which lands on whoever inherited that number if the
+  // mover had already left. The 0.0.38 cleanup refuses instead, and the copy's note
+  // says the mover was left running rather than dressing a refused cleanup as one
+  // that ended something.
+  const dir = tree()
+  const local = join(dir, 'x')
+  const { runner, state } = fakeRunner()
+  let reaped
+  state.nextRun = command => isReap(command)
+    ? (reaped = command, ran('dsh-reap unverifiable'))
+    : ran('99 regular file')
+  // The marker carries the pid, the tag, and a start time of `0` — the shape of a
+  // server whose `/proc` is absent or hidden.
+  state.streamImpl = argv => ({ outcome: 'timeout', exitCode: null, bytes: 10, stdout: '', stderr: moverStderr(argv, 909, 0), durationMs: 2 })
+  const out = await transfer(runner, TARGET, SETTINGS, {}, base({ direction: 'download', localPath: local, remotePath: '/srv/x', maxBytes: 4096 }))
+  assert.equal(out.status, 'failed')
+  assert.match(String(reaped), /^P='909'; K='0'; p='\/srv\/x'; /u, 'the cleanup carries the recorded zero and must refuse on it')
+  const note = out.notes.join('\n')
+  assert.match(note, /left its server-side mover of \/srv\/x \(pid 909\) running/u, 'the residual is named as still running')
+  assert.match(note, /could not be proved still its mover's/u, 'and the reason is the missing identity, not a failure to try')
+  assert.equal(/ended its .*mover/u.test(note), false, 'and nothing is claimed as ended')
+  assert.equal(/killed-unverified/u.test(note), false, 'the unverified kill is gone from the vocabulary')
+})
+
 test('two downloads of the same remote path each clean up only their own mover', async () => {
   // The 0.0.36 mechanism and the reason it is not a fix: two conversations pulling
   // the same file put the same words in `pkill -f`'s pattern, so the copy that was
@@ -677,26 +711,30 @@ test('every verdict a cleanup can give is reported for what it is', () => {
   // silence, and silence reads as tidied.
   assert.equal(guards.moverVerdictNote('gone', 7, '/srv/x', 'host'), undefined, 'a mover that left with the channel needs no sentence')
   assert.match(String(guards.moverVerdictNote('killed', 7, '/srv/x', 'host')), /ended its own server-side mover of \/srv\/x \(pid 7\), confirmed from that pid's command line/u)
-  assert.match(String(guards.moverVerdictNote('killed-unverified', 7, '/srv/x', 'host')), /states no readable \/proc entry/u)
-  assert.match(String(guards.moverVerdictNote('killed-unverified', 7, '/srv/x', 'host')), /the kill was taken on the recorded number alone/u)
-  assert.match(String(guards.moverVerdictNote('foreign', 7, '/srv/x', 'host')), /is now running something else, so nothing was killed/u)
+  assert.match(String(guards.moverVerdictNote('unverifiable', 7, '/srv/x', 'host')), /states no readable \/proc entry/u)
+  assert.match(String(guards.moverVerdictNote('unverifiable', 7, '/srv/x', 'host')), /so the number could not be proved still its mover's/u)
+  assert.match(String(guards.moverVerdictNote('unverifiable', 7, '/srv/x', 'host')), /left its server-side mover .* running/u, 'the note says plainly that the mover was NOT ended')
+  assert.match(String(guards.moverVerdictNote('killed', 7, '/srv/x', 'host')), /command line and start time/u, 'a kill is claimed only with both checks behind it')
+  assert.match(String(guards.moverVerdictNote('killed', 7, '/srv/x', 'host')), /frozen with SIGSTOP/u, 'and the note says the identity was closed before the signal')
+  assert.match(String(guards.moverVerdictNote('foreign', 7, '/srv/x', 'host')), /is no longer that mover.*so nothing was killed/u)
   assert.match(String(guards.moverVerdictNote('refused', 7, '/srv/x', 'host')), /host refused the signal, so that mover may still be running/u)
   assert.match(String(guards.moverVerdictNote('unanswered', 7, '/srv/x', 'host')), /cannot say whether that mover is gone/u)
-  for (const verdict of ['killed', 'killed-unverified', 'foreign', 'refused', 'unanswered']) {
+  for (const verdict of ['killed', 'unverifiable', 'foreign', 'refused', 'unanswered']) {
     const note = String(guards.moverVerdictNote(verdict, 7, '/srv/x', 'host'))
     assert.ok(note.includes('/srv/x'), `${verdict}: names the file at stake`)
     assert.ok(note.includes('pid 7'), `${verdict}: names the process it spoke of`)
   }
 })
 
-test('the cleanup child is built from the pid and the path word, and answers with one verdict', () => {
-  const command = guards.reapMoverCommand(4242, remotePathArg('/srv/a b [x] * ? + .f'))
-  assert.ok(command.startsWith(`P='4242'; p=${remotePathArg('/srv/a b [x] * ? + .f')}; `), 'the pid is quoted as a number and the path stays a shell word the server expands')
-  for (const needle of ['kill -0 "$P"', '/proc/"$P"/cmdline', "tr '\\0' '\\n'", "sed -n 3p", 'kill -9 "$P"']) {
+test('the cleanup child is built from the mover identity and the path word, and answers with one verdict', () => {
+  const command = guards.reapMoverCommand(4242, 1700000000, remotePathArg('/srv/a b [x] * ? + .f'))
+  assert.ok(command.startsWith(`P='4242'; K='1700000000'; p=${remotePathArg('/srv/a b [x] * ? + .f')}; `), 'the pid and its start time are quoted as numbers and the path stays a shell word the server expands')
+  for (const needle of ['kill -0 "$P"', '/proc/"$P"/cmdline', '/proc/"$P"/stat', "tr '\\0' '\\n'", "sed -n 3p", 'kill -STOP "$P"', 'kill -CONT "$P"', 'kill -9 "$P"', '= Z ]']) {
     assert.ok(command.includes(needle), `the script uses ${needle}`)
   }
   assert.equal(command.includes('pkill'), false, 'and it needs nothing that a server may not have installed')
-  for (const verdict of ['gone', 'killed', 'killed-unverified', 'foreign', 'refused']) {
+  assert.equal(command.includes('killed-unverified'), false, 'the 0.0.37 kill-on-the-number-alone is gone from the script')
+  for (const verdict of ['gone', 'killed', 'foreign', 'refused', 'unverifiable']) {
     assert.equal(guards.parseMoverVerdict(`dsh-reap ${verdict}\n`), verdict)
   }
   assert.equal(guards.parseMoverVerdict(''), 'unanswered', 'a server that said nothing is not a server that did nothing')
@@ -705,14 +743,17 @@ test('the cleanup child is built from the pid and the path word, and answers wit
 })
 
 test('a mover pid is bound to the copy that reported it, not to any line that looks alike', () => {
-  assert.equal(guards.moverPid('dsh-mover 4242 aaa1-bbbbbbbb\n', 'aaa1-bbbbbbbb'), 4242)
-  assert.equal(guards.moverPid('dsh-mover 4242 other-tag\n', 'aaa1-bbbbbbbb'), undefined, 'another copy’s marker is not this copy’s mover')
+  assert.deepEqual(guards.moverPid('dsh-mover 4242 aaa1-bbbbbbbb 1700000000\n', 'aaa1-bbbbbbbb'), { pid: 4242, starttime: 1700000000 })
+  // A `0` start time is a server that states no `/proc`: the number is still this
+  // copy's mover, and the cleanup will refuse to kill it on the number alone.
+  assert.deepEqual(guards.moverPid('dsh-mover 4242 aaa1-bbbbbbbb 0\n', 'aaa1-bbbbbbbb'), { pid: 4242, starttime: 0 }, 'the missing time is kept as a known unknown')
+  assert.equal(guards.moverPid('dsh-mover 4242 other-tag 1700000000\n', 'aaa1-bbbbbbbb'), undefined, 'another copy’s marker is not this copy’s mover')
   assert.equal(guards.moverPid('ssh: Permission denied\n', 'aaa1-bbbbbbbb'), undefined, 'and a server that never ran the command has no mover')
   assert.equal(guards.moverPid('dsh-mover not-a-number aaa1-bbbbbbbb\n', 'aaa1-bbbbbbbb'), undefined)
   assert.equal(guards.moverPid(undefined, 'aaa1-bbbbbbbb'), undefined)
   // The marker is this plugin's own sentence: it may not survive into the text the
   // reader is handed as the explanation of a failed copy.
-  const stripped = guards.stripMoverMarker('dsh-mover 4242 aaa1-bbbbbbbb\ncat: /srv/x: Permission denied\n')
+  const stripped = guards.stripMoverMarker('dsh-mover 4242 aaa1-bbbbbbbb 1700000000\ncat: /srv/x: Permission denied\n')
   assert.equal(stripped.includes('dsh-mover'), false, 'the pid line is edited out')
   assert.match(stripped, /Permission denied/u, 'and the server’s own reason is kept')
 })
@@ -732,7 +773,7 @@ test('a stopped download with a path full of shell and regex metacharacters kill
   const out = await transfer(runner, TARGET, SETTINGS, {}, base({ direction: 'download', localPath: local, remotePath: weird, maxBytes: 4096 }))
   assert.equal(out.status, 'failed')
   assert.ok(reaped, 'the copy still cleaned up after itself')
-  assert.match(String(reaped), /^P='909'; p='\/srv\/a b \[x\] \* \? \+ \.f#~'; /u, 'the odd path is one quoted argument, never a pattern')
+  assert.match(String(reaped), /^P='909'; K='1700000000'; p='\/srv\/a b \[x\] \* \? \+ \.f#~'; /u, 'the odd path is one quoted argument, never a pattern')
   assert.match(String(reaped), /= "\$p"/u, 'and it is compared as a string against the mover’s own third argument')
   const note = out.notes.join('\n')
   assert.ok(note.includes(`ended its own server-side mover of ${weird} (pid 909)`), 'the note names this copy\u2019s path and its mover, in plain words, not as a pattern')
@@ -780,9 +821,9 @@ test('the cleanup names the path in the same shell shape the mover was given, fo
     assert.ok(remotePathSchema.safeParse(path).success, `${path}: the gate admits this shape`)
     const word = remotePathArg(path)
     const mover = guards.downloadMoverCommand(word, 'aaa1-bbbbbbbb')
-    const reaped = guards.reapMoverCommand(4242, word)
+    const reaped = guards.reapMoverCommand(4242, 1700000000, word)
     const inMover = /exec cat -- (.+)$/.exec(mover)?.[1]
-    const inReap = /^P='4242'; p=(.*); if ! kill/.exec(reaped)?.[1]
+    const inReap = /^P='4242'; K='1700000000'; p=(.*?); if ! kill/.exec(reaped)?.[1]
     assert.equal(inMover, word, `${path}: the mover gets exactly the word the transport shaped`)
     assert.equal(inReap, word, `${path}: and the cleanup compares against that same word`)
     assert.equal(reaped.includes('pkill'), false, `${path}: no pattern is searched across the process table`)
