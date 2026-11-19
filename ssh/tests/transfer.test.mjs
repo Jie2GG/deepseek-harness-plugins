@@ -18,6 +18,9 @@ import { transfer, scanLocal, remoteParts, publishCommand } from '../lib/transfe
 import { remotePathArg } from '../lib/transport.js'
 import { fakeRunner } from './helpers.mjs'
 
+/** The whole transfer module, for the K-4 helpers a named import would only clutter. */
+const guards = await import('../lib/transfer.js')
+
 const iso = new Date().toISOString()
 const SETTINGS = {
   maxOutputBytes: 65_536,
@@ -52,6 +55,33 @@ function ran (stdout = '', over = {}) {
   return { status: 'succeeded', at: iso, exitCode: 0, stdout, stderr: '', durationMs: 1, ...over }
 }
 
+/**
+ * The task identity this plugin wrote into a mover command's marker line.
+ * @param command - the remote command string the copy was given.
+ * @returns the tag, or `undefined` when the command carries no marker.
+ */
+function tagOf (command) {
+  return /printf 'dsh-mover %s %s\\n' "\$(?:\$|mp)" '([a-z0-9-]+)' >&2/u.exec(String(command))?.[1]
+}
+
+/**
+ * What a real mover answers with on its own stderr: the pid it reported, and this
+ * copy's tag. The fake derives both from the command the plugin actually sent, so a
+ * test cannot pass by hard-coding an identity the copy never asked for.
+ * @param argvTail - the argv the copy was handed, whose last entry is the mover command.
+ * @param pid - the number to answer with, standing in for the server's own.
+ * @returns the marker line, newline included.
+ */
+function moverStderr (argvTail, pid = 4242) {
+  const tag = tagOf(String(argvTail.at(-1)))
+  return `dsh-mover ${String(pid)} ${tag ?? 'untagged'}\n`
+}
+
+/** Is this command the cleanup child aimed at a recorded mover pid? */
+function isReap (command) {
+  return /^P='[0-9]+'; p=/.test(String(command))
+}
+
 // ── the remote path, shaped for a shell that expands a leading tilde ────────
 test('remotePathArg keeps a home-relative tilde outside the quotes and everything else inside them', () => {
   assert.equal(remotePathArg('/srv/x'), "'/srv/x'")
@@ -76,10 +106,18 @@ test('remoteParts gives the parent in the form that still expands', () => {
 })
 
 test('publishCommand replaces through the file, and only renames when there is nothing to keep', () => {
-  const command = publishCommand('/srv/x.dsh-part-1', "'/srv/x'", 0o755)
+  const command = publishCommand('/srv/x.dsh-part-1', "'/srv/x'", 0o755, 'aaa1-bbbbbbbb')
   // The existing-file branch is the one that keeps the inode, the mode, and the
   // hardlinks a `mv` would drop on the floor.
-  assert.match(command, /^if \[ -e '\/srv\/x' \] \|\| \[ -L '\/srv\/x' \]; then cat '\/srv\/x\.dsh-part-1' > '\/srv\/x' && rm -f/)
+  assert.match(command, /^if \[ -e '\/srv\/x' \] \|\| \[ -L '\/srv\/x' \]; then cat -- '\/srv\/x\.dsh-part-1' > '\/srv\/x' & mp=\$!;/u)
+  // The mover is a background job with its pid reported before it can block, because
+  // this script has work left to do after the copy — so `$$` would name the wrong
+  // process, and K-4 needs the one that holds the part file (0.0.36 settled for
+  // killing anything whose command line looked like this copy's, which on a shared
+  // path is not the same thing).
+  assert.match(command, /printf 'dsh-mover %s %s\\n' "\$mp" 'aaa1-bbbbbbbb' >&2; wait \$mp && rm -f '\/srv\/x\.dsh-part-1'/u)
+  // `wait` hands the copy's own status to the `&&`, so a mover that died keeps the
+  // part file for the reader exactly as the sequential form did.
   // The fresh-name branch carries the source's bits through the server's umask,
   // the measured scp outcome (777 arrived as 755 under umask 0022).
   assert.match(command, /else mv -f '\/srv\/x\.dsh-part-1' '\/srv\/x' && \{ u=\$\(umask\); m=\$\(\(0755 & ~\(0\$u\)\)\);/)
@@ -88,7 +126,10 @@ test('publishCommand replaces through the file, and only renames when there is n
   assert.match(command, /c=\$\(printf "%o" "\$m"\)/)
   assert.match(command, /if \[ -n "\$c" \]; then chmod "\$c" '\/srv\/x'; fi/)
   // No mode to carry: the rename stands alone, and nothing is claimed about bits.
-  assert.equal(publishCommand('/p', "'/d'").includes('chmod'), false)
+  assert.equal(publishCommand('/p', "'/d'", undefined, 'aaa1-cccccccc').includes('chmod'), false)
+  // The rename branch has no mover that could stall, so it gets no marker — and the
+  // copy layer says so rather than reporting a pid it never learned.
+  assert.ok(command.indexOf('dsh-mover') < command.indexOf('else mv -f'), 'the marker sits in the overwrite branch only')
 })
 
 // ── scanLocal: the walk every upload runs through ──────────────────────────
@@ -205,8 +246,8 @@ test('a download that grows past the ceiling after the pre-check is stopped and 
   const { runner, state } = fakeRunner()
   // The server said 10 bytes. The channel then carried 5000 against a 4096 ceiling:
   // only a count taken while the bytes move can tell those two apart.
-  state.nextRun = () => ran('10 regular file')
-  state.streamImpl = (_argv, copy) => ({ outcome: 'over-limit', exitCode: null, bytes: 5000, stdout: '', stderr: '', durationMs: 9 })
+  state.nextRun = command => isReap(command) ? ran('dsh-reap killed') : ran('10 regular file')
+  state.streamImpl = (argv, copy) => ({ outcome: 'over-limit', exitCode: null, bytes: 5000, stdout: '', stderr: moverStderr(argv), durationMs: 9 })
   writeFileSync(join(dir, 'marker'), 'the part file below is written by the fake')
   const out = await transfer(runner, TARGET, SETTINGS, {}, base({ direction: 'download', localPath: local, maxBytes: 4096 }))
   assert.equal(out.status, 'refused-size')
@@ -224,12 +265,15 @@ test('a download that grows past the ceiling after the pre-check is stopped and 
   const copyLease = state.shares.find(entry => entry.ticket.dropped === 1)?.ticket
   assert.ok(copyLease, 'the stopped copy dropped exactly one lease')
   assert.equal(copyLease.released, 1, 'and released it on the way out')
-  // K-4: a stopped download asks the server, best-effort, to end the mover it may
-  // have left parked on a fifo with no writer — a channel close cannot reach that.
-  const reaper = state.calls.filter(c => c.kind === 'run').map(c => c.command).find(command => command.startsWith('pkill -f -- '))
-  assert.ok(reaper, 'the interrupted download fired a server-side cleanup child')
-  assert.match(String(reaper), /\[c\]at -- /u, 'and it is written so pkill cannot match its own shell')
-  assert.match(String(out.notes?.join(' ') ?? ''), /ended a leftover server-side mover/u, 'the result says the cleanup ran')
+  // K-4: a stopped download asks the server to end **the mover it created**, named by
+  // the pid that mover reported on the channel. A channel close cannot reach a `cat`
+  // parked in a fifo with no writer, and a pattern searched across the process table
+  // cannot tell this copy's mover from another copy of the same file.
+  const reaper = state.calls.filter(c => c.kind === 'run').map(c => c.command).find(isReap)
+  assert.ok(reaper, 'the interrupted download fired a cleanup child')
+  assert.match(String(reaper), /^P='4242'; p='\/srv\/x'; /u, 'aimed at the recorded pid, with the path only as the identity to confirm')
+  assert.equal(String(reaper).includes('pkill'), false, 'and nothing is killed for matching a path')
+  assert.match(String(out.notes?.join(' ') ?? ''), /ended its own server-side mover of \/srv\/x \(pid 4242\), confirmed from that pid's command line/u, 'the result says what the cleanup proved')
 })
 
 test('a download stopped by the ceiling leaves a file that was already there alone', async () => {
@@ -283,7 +327,8 @@ test('an upload publishes through an existing file, which is how the inode and t
   const commands = state.calls.filter(c => c.kind === 'run').map(c => c.command)
   const publish = commands.find(command => command.includes('if [ -e'))
   assert.ok(publish)
-  assert.match(publish, /cat '\/srv\/x\.dsh-part-[^']*' > '\/srv\/x'/)
+  assert.match(publish, /cat -- '\/srv\/x\.dsh-part-[^']*' > '\/srv\/x' & mp=\$!;/u)
+  assert.ok(tagOf(publish) !== undefined, 'and the mover it backgrounded announced the identity the cleanup will need')
   assert.equal(out.limitMode, 'in-flight')
 })
 
@@ -305,8 +350,9 @@ test('an upload whose publish step failed says where the complete bytes still ar
 
 test('a failed publish asks the server to end the mover it left writing the part file', async () => {
   // K-4: a publish that ran out of its budget writing through a fifo with no reader
-  // strands a server-side `cat part > dest`. After the failure the transfer fires a
-  // pkill naming that mover — matched by the part path, which is unique per copy.
+  // strands a server-side `cat -- part > dest`. That mover reported its pid before it
+  // blocked, so the cleanup names one process rather than every process that looks
+  // like this copy.
   const dir = tree()
   const local = join(dir, 'x')
   writeFileSync(local, 'payload')
@@ -314,37 +360,59 @@ test('a failed publish asks the server to end the mover it left writing the part
   let part = ''
   state.nextRun = command => {
     if (command.startsWith('stat ')) return ran('')
-    if (command.startsWith('pkill -f -- ')) { part = command; return ran('', { status: 'succeeded', exitCode: 0 }) }
-    // the publish itself: the server had no reader for the fifo, so it came back nonzero
-    return ran('', { status: 'timeout', exitCode: null, stderr: 'ssh: timed out' })
+    if (isReap(command)) { part = command; return ran('dsh-reap killed') }
+    // the publish itself: the server had no reader for the fifo, so it came back
+    // stalled, and its stderr carries the marker the backgrounded mover printed.
+    return ran('', { status: 'timeout', exitCode: null, stderr: `${moverStderr([command], 4711)}ssh: timed out` })
   }
   state.streamImpl = (_argv, copy) => streamed(7)
   const out = await transfer(runner, TARGET, SETTINGS, {}, base({ direction: 'upload', localPath: local, maxBytes: 1024 }))
   assert.equal(out.status, 'failed')
   assert.match(out.message, /could not take its final place/)
-  assert.match(part, /pkill -f -- '\[c\]at \/srv\/x\.dsh-part-/, 'the cleanup names the mover by its unique part path')
-  assert.match(out.notes.join('\n'), /ended a leftover server-side mover/u, 'and the result says the cleanup ran')
+  assert.match(part, /^P='4711'; p='\/srv\/x\.dsh-part-[a-z0-9-]+'; /u, 'the cleanup names the pid this publish reported, and its own part file')
+  assert.equal(part.includes('pkill'), false, 'it does not search the process table for a path')
+  assert.match(out.notes.join('\n'), /ended its own server-side mover of \/srv\/x\.dsh-part-/u, 'and the result says the cleanup ran')
+  assert.match(out.notes.join('\n'), /confirmed from that pid's command line/u, 'saying what the kill was proved by')
   // The part file itself is NOT removed by a publish failure — the complete bytes are
   // kept for the reader — so the reaper is a kill, not an rm.
   assert.ok(!state.calls.some(c => c.kind === 'run' && /^rm -f/.test(c.command)), 'no temp removal was ordered for a copy that reached the server whole')
 })
 
-test('a download the clock stopped on a no-pkill server says so instead of blaming the copy', async () => {
-  // K-4 best-effort honesty: when the server has no pkill, the cleanup child cannot
-  // promise anything. The transfer still refuses the way the deadline dictates, and
-  // the note says the mover may linger — the residual, stated rather than hidden.
+test('a publish that never reached the overwrite branch says it killed nothing', async () => {
+  // The rename branch has no mover, so there is no pid to name. The honest answer is
+  // that nothing was killed, not a claim about a process this call never met.
+  const dir = tree()
+  const local = join(dir, 'x')
+  writeFileSync(local, 'payload')
+  const { runner, state } = fakeRunner()
+  state.nextRun = command => command.startsWith('stat ')
+    ? ran('')
+    : ran('', { status: 'exit-nonzero', exitCode: 1, stderr: 'mv: cannot move to /srv/x: Read-only file system' })
+  state.streamImpl = (_argv, copy) => streamed(7)
+  const out = await transfer(runner, TARGET, SETTINGS, {}, base({ direction: 'upload', localPath: local, maxBytes: 1024 }))
+  assert.equal(out.status, 'failed')
+  assert.match(out.message, /mv: cannot move/, "the server's own sentence is what the reader is told")
+  assert.match(out.notes.join('\n'), /never reported a mover pid/u)
+  assert.match(out.notes.join('\n'), /nothing was killed on the server/u)
+  assert.equal(state.calls.filter(c => c.kind === 'run' && isReap(c.command)).length, 0, 'and no cleanup child was spent on a pid that was never named')
+})
+
+test('a download the clock stopped on a server that cannot be asked says so instead of blaming the copy', async () => {
+  // K-4 best-effort honesty: the cleanup child could not answer — here it timed out.
+  // The transfer still refuses the way the deadline dictates, and the note names the
+  // residual rather than claiming the server was tidied.
   const dir = tree()
   const local = join(dir, 'x')
   const { runner, state } = fakeRunner()
-  state.nextRun = command => command.startsWith('pkill -f -- ')
-    ? ran('', { status: 'exit-nonzero', exitCode: 127, stderr: 'pkill: not found' })
+  state.nextRun = command => isReap(command)
+    ? { status: 'timeout', at: iso, exitCode: null, stdout: '', stderr: 'ssh: timed out', durationMs: 10_000 }
     : ran('10 regular file')
-  state.streamImpl = (_argv, copy) => ({ outcome: 'timeout', exitCode: null, bytes: 340, stdout: '', stderr: '', durationMs: 4 })
+  state.streamImpl = (argv, copy) => ({ outcome: 'timeout', exitCode: null, bytes: 340, stdout: '', stderr: moverStderr(argv), durationMs: 4 })
   const out = await transfer(runner, TARGET, SETTINGS, {}, base({ direction: 'download', localPath: local, maxBytes: 4096 }))
   assert.equal(out.status, 'failed')
   assert.match(out.message, /ran out of its deadline/, 'the refusal stands on its own')
-  assert.match(out.notes.join('\n'), /may have left a server-side mover/u)
-  assert.match(out.notes.join('\n'), /has no pkill to end it/)
+  assert.match(out.notes.join('\n'), /got no answer, so this plugin cannot say whether that mover is gone/u)
+  assert.equal(/ended its own server-side mover/u.test(out.notes.join('\n')), false, 'and no success is claimed for a cleanup that never reported one')
 })
 
 test('a copy the caller cancelled or timed out cleans its part file and quotes the bytes it moved', async () => {
@@ -420,9 +488,11 @@ test('an upload asks for the ssh channel and a tree asks for scp, each with its 
   assert.equal(call.signal, controller.signal)
   assert.deepEqual(call.lane, { kind: 'file transfers', cap: SETTINGS.maxConcurrentTransfers })
   assert.equal(call.program, '/usr/bin/ssh')
-  // The far end of a single-file copy is a `cat` of the quoted path, run on the
-  // authority as one argument — no `host:path` grammar, which belongs to scp.
-  assert.equal(call.argvTail[call.argvTail.length - 1], "cat -- '/srv/x'")
+  // The far end of a single-file download is a `cat` of the quoted path, run on the
+  // authority as one argument — no `host:path` grammar, which belongs to scp — and it
+  // says its own pid on stderr first, so a stopped copy has one process to name.
+  const remote = String(call.argvTail[call.argvTail.length - 1])
+  assert.match(remote, /^printf 'dsh-mover %s %s\\n' "\$\$" '[a-z0-9-]+' >&2; exec cat -- '\/srv\/x'$/u)
   assert.equal(call.argvTail[call.argvTail.length - 2], 'deploy@10.0.0.9')
 })
 
@@ -561,4 +631,191 @@ test('a recursive download keeps its half tree out of the destination when the c
   // The destination was never created: the tree lived and died as a sibling.
   assert.deepEqual(readdirSync(dir), [])
   assert.equal(readdirSync(dir).filter(name => name.includes('.dsh-part-')).length, 0)
+})
+
+// ── K-4: one copy, one identity, one process it is allowed to kill ───────────
+
+test('two downloads of the same remote path each clean up only their own mover', async () => {
+  // The 0.0.36 mechanism and the reason it is not a fix: two conversations pulling
+  // the same file put the same words in `pkill -f`'s pattern, so the copy that was
+  // interrupted took the copy that was still running down with it. Here the only thing
+  // the cleanup has in common with its target is the pid that mover reported.
+  const dir = tree()
+  const localA = join(dir, 'a')
+  const localB = join(dir, 'b')
+  const reaps = []
+  const mk = pid => {
+    const { runner, state } = fakeRunner()
+    state.nextRun = command => {
+      if (!isReap(command)) return ran('99 regular file')
+      reaps.push({ pid: command.match(/^P='([0-9]+)'/u)?.[1], command })
+      return ran('dsh-reap killed')
+    }
+    state.streamImpl = argv => ({ outcome: 'timeout', exitCode: null, bytes: 120, stdout: '', stderr: moverStderr(argv, pid), durationMs: 3 })
+    return { runner, local: pid === 4242 ? localA : localB }
+  }
+  const a = mk(4242)
+  const b = mk(9999)
+  const both = await Promise.all([
+    transfer(a.runner, TARGET, SETTINGS, {}, base({ direction: 'download', localPath: a.local, maxBytes: 4096 })),
+    transfer(b.runner, TARGET, SETTINGS, {}, base({ direction: 'download', localPath: b.local, maxBytes: 4096 })),
+  ])
+  assert.deepEqual(both.map(out => out.status), ['failed', 'failed'])
+  assert.equal(reaps.length, 2, 'each stopped copy fired exactly one cleanup')
+  assert.equal(new Set(reaps.map(r => r.pid)).size, 2, 'and the two cleanups named different processes')
+  assert.notEqual(reaps[0].command.includes("P='9999'"), reaps[0].command.includes("P='4242'"), 'one command, one pid')
+  for (const reap of reaps) {
+    assert.match(String(reap.command), /p='\/srv\/x'; /u, 'the shared path is only the identity to confirm for that pid')
+    assert.equal(reap.command.includes('pkill'), false)
+    assert.equal(reap.command.includes('pgrep'), false, 'and no search of the process table is involved at all')
+  }
+  for (const out of both) assert.match(out.notes.join('\n'), /ended its own server-side mover/u)
+})
+
+test('every verdict a cleanup can give is reported for what it is', () => {
+  // The note is the product here: 0.0.36 could answer a cleanup that had not run with
+  // silence, and silence reads as tidied.
+  assert.equal(guards.moverVerdictNote('gone', 7, '/srv/x', 'host'), undefined, 'a mover that left with the channel needs no sentence')
+  assert.match(String(guards.moverVerdictNote('killed', 7, '/srv/x', 'host')), /ended its own server-side mover of \/srv\/x \(pid 7\), confirmed from that pid's command line/u)
+  assert.match(String(guards.moverVerdictNote('killed-unverified', 7, '/srv/x', 'host')), /states no readable \/proc entry/u)
+  assert.match(String(guards.moverVerdictNote('killed-unverified', 7, '/srv/x', 'host')), /the kill was taken on the recorded number alone/u)
+  assert.match(String(guards.moverVerdictNote('foreign', 7, '/srv/x', 'host')), /is now running something else, so nothing was killed/u)
+  assert.match(String(guards.moverVerdictNote('refused', 7, '/srv/x', 'host')), /host refused the signal, so that mover may still be running/u)
+  assert.match(String(guards.moverVerdictNote('unanswered', 7, '/srv/x', 'host')), /cannot say whether that mover is gone/u)
+  for (const verdict of ['killed', 'killed-unverified', 'foreign', 'refused', 'unanswered']) {
+    const note = String(guards.moverVerdictNote(verdict, 7, '/srv/x', 'host'))
+    assert.ok(note.includes('/srv/x'), `${verdict}: names the file at stake`)
+    assert.ok(note.includes('pid 7'), `${verdict}: names the process it spoke of`)
+  }
+})
+
+test('the cleanup child is built from the pid and the path word, and answers with one verdict', () => {
+  const command = guards.reapMoverCommand(4242, remotePathArg('/srv/a b [x] * ? + .f'))
+  assert.ok(command.startsWith(`P='4242'; p=${remotePathArg('/srv/a b [x] * ? + .f')}; `), 'the pid is quoted as a number and the path stays a shell word the server expands')
+  for (const needle of ['kill -0 "$P"', '/proc/"$P"/cmdline', "tr '\\0' '\\n'", "sed -n 3p", 'kill -9 "$P"']) {
+    assert.ok(command.includes(needle), `the script uses ${needle}`)
+  }
+  assert.equal(command.includes('pkill'), false, 'and it needs nothing that a server may not have installed')
+  for (const verdict of ['gone', 'killed', 'killed-unverified', 'foreign', 'refused']) {
+    assert.equal(guards.parseMoverVerdict(`dsh-reap ${verdict}\n`), verdict)
+  }
+  assert.equal(guards.parseMoverVerdict(''), 'unanswered', 'a server that said nothing is not a server that did nothing')
+  assert.equal(guards.parseMoverVerdict('dsh-reap maybe'), 'unanswered')
+  assert.equal(guards.parseMoverVerdict('cat: /proc/1/cmdline: Permission denied'), 'unanswered')
+})
+
+test('a mover pid is bound to the copy that reported it, not to any line that looks alike', () => {
+  assert.equal(guards.moverPid('dsh-mover 4242 aaa1-bbbbbbbb\n', 'aaa1-bbbbbbbb'), 4242)
+  assert.equal(guards.moverPid('dsh-mover 4242 other-tag\n', 'aaa1-bbbbbbbb'), undefined, 'another copy’s marker is not this copy’s mover')
+  assert.equal(guards.moverPid('ssh: Permission denied\n', 'aaa1-bbbbbbbb'), undefined, 'and a server that never ran the command has no mover')
+  assert.equal(guards.moverPid('dsh-mover not-a-number aaa1-bbbbbbbb\n', 'aaa1-bbbbbbbb'), undefined)
+  assert.equal(guards.moverPid(undefined, 'aaa1-bbbbbbbb'), undefined)
+  // The marker is this plugin's own sentence: it may not survive into the text the
+  // reader is handed as the explanation of a failed copy.
+  const stripped = guards.stripMoverMarker('dsh-mover 4242 aaa1-bbbbbbbb\ncat: /srv/x: Permission denied\n')
+  assert.equal(stripped.includes('dsh-mover'), false, 'the pid line is edited out')
+  assert.match(stripped, /Permission denied/u, 'and the server’s own reason is kept')
+})
+
+test('a stopped download with a path full of shell and regex metacharacters kills by pid alone', async () => {
+  // remotePathSchema allows spaces, brackets, glob characters and `+`; a `pkill -f`
+  // pattern built from those is a regular expression built from a user's sentence.
+  const weird = '/srv/a b [x] * ? + .f#~'
+  const dir = tree()
+  const local = join(dir, 'x')
+  const { runner, state } = fakeRunner()
+  let reaped
+  state.nextRun = command => isReap(command)
+    ? (reaped = command, ran('dsh-reap killed'))
+    : ran('999 regular file')
+  state.streamImpl = argv => ({ outcome: 'timeout', exitCode: null, bytes: 10, stdout: '', stderr: moverStderr(argv, 909), durationMs: 2 })
+  const out = await transfer(runner, TARGET, SETTINGS, {}, base({ direction: 'download', localPath: local, remotePath: weird, maxBytes: 4096 }))
+  assert.equal(out.status, 'failed')
+  assert.ok(reaped, 'the copy still cleaned up after itself')
+  assert.match(String(reaped), /^P='909'; p='\/srv\/a b \[x\] \* \? \+ \.f#~'; /u, 'the odd path is one quoted argument, never a pattern')
+  assert.match(String(reaped), /= "\$p"/u, 'and it is compared as a string against the mover’s own third argument')
+  const note = out.notes.join('\n')
+  assert.ok(note.includes(`ended its own server-side mover of ${weird} (pid 909)`), 'the note names this copy\u2019s path and its mover, in plain words, not as a pattern')
+})
+
+test('a download stopped before its mover spoke is told as an unnamed residual, not as a tidied server', async () => {
+  const dir = tree()
+  const local = join(dir, 'x')
+  const { runner, state } = fakeRunner()
+  let children = 0
+  state.nextRun = command => {
+    if (isReap(command)) children += 1
+    return ran('900 regular file')
+  }
+  // The channel died with nothing on stderr: no marker, so no pid, so no kill.
+  state.streamImpl = () => ({ outcome: 'timeout', exitCode: null, bytes: 512, stdout: '', stderr: 'ssh: connect to host closed\n', durationMs: 2 })
+  const out = await transfer(runner, TARGET, SETTINGS, {}, base({ direction: 'download', localPath: local, maxBytes: 4096 }))
+  assert.equal(children, 0, 'no cleanup child was spent guessing at a process')
+  assert.match(out.notes.join('\n'), /never reported a server-side mover pid for \/srv\/x/u)
+  assert.match(out.notes.join('\n'), /a mover may still be holding that fifo or file/u)
+  assert.equal(/ended .*mover/u.test(out.notes.join('\n')), false, 'and nothing is claimed as ended')
+})
+
+// ── K-4 / 执行层寻址: the mover and its cleanup address one and the same word ──
+
+test('the cleanup names the path in the same shell shape the mover was given, for every path the gate accepts', async () => {
+  // The identity check in `reapMoverCommand` compares the mover's third argv field
+  // with `$p`, and `$p` is assigned from the path *word*, not from a string this
+  // process reconstructed. If the two ever drifted — one quoted, one not, a tilde
+  // expanded on one side only — a `~/x` copy would stop being killable, and the copy
+  // would say so as a residual instead of killing the wrong process.
+  const shapes = [
+    '/srv/x',
+    '/srv/a b/x',
+    '/srv/a b [x] * ? + .f#~',
+    '/srv/a\tb',
+    "/srv/it's",
+    '~/x',
+    '~/a b/x',
+    '/srv/x.bin',
+    '/srv/ünïcode/x',
+  ]
+  const { remotePathSchema } = await import('../lib/storage.js')
+  for (const path of shapes) {
+    assert.ok(remotePathSchema.safeParse(path).success, `${path}: the gate admits this shape`)
+    const word = remotePathArg(path)
+    const mover = guards.downloadMoverCommand(word, 'aaa1-bbbbbbbb')
+    const reaped = guards.reapMoverCommand(4242, word)
+    const inMover = /exec cat -- (.+)$/.exec(mover)?.[1]
+    const inReap = /^P='4242'; p=(.*); if ! kill/.exec(reaped)?.[1]
+    assert.equal(inMover, word, `${path}: the mover gets exactly the word the transport shaped`)
+    assert.equal(inReap, word, `${path}: and the cleanup compares against that same word`)
+    assert.equal(reaped.includes('pkill'), false, `${path}: no pattern is searched across the process table`)
+  }
+})
+
+test('the gate refuses the shapes the mover command could not carry, and says so before a round trip', async () => {
+  // Not a K-4 fix so much as the boundary that makes K-4 provable: a path with `;`,
+  // a backtick, a `$`, a parenthesis or a newline in it is refused by
+  // `remotePathSchema`, which is what lets `remotePathArg` and the `/proc` comparison
+  // below it be one quoted word apiece. A test that only checks the accepted half
+  // would pass even if the gate widened.
+  const { remotePathSchema } = await import('../lib/storage.js')
+  for (const path of ['/srv/a;b', '/srv/a|b', '/srv/a&b', '/srv/a<b', '/srv/a>b', '/srv/$(id)', '/srv/`id`', '/srv/a\nb', '/srv/a\rb', 'srv/x', './x', '']) {
+    assert.equal(remotePathSchema.safeParse(path).success, false, `${JSON.stringify(path)}: refused at the gate`)
+  }
+  // A tab is *not* a shell word boundary once the path is quoted, and the gate knows
+  // it: this is the shape that would have been refused by a `\s` ban, and the mover and
+  // the `/proc` comparison both have to carry it unchanged to stay addressed.
+  for (const path of ['/srv/a b', '/srv/a\tb', '/srv/[x]', '/srv/*.f', '/srv/x+y', '/srv/~x', '~/x', "/srv/it's"]) {
+    assert.equal(remotePathSchema.safeParse(path).success, true, `${JSON.stringify(path)}: still addressable`)
+  }
+  // `transfer.ts` sits **below** the gate and still quotes whatever it is handed, so a
+  // path that reached it by another route is still addressed as one word; the gate in
+  // `ops.ts` is what keeps the *identity* comparison safe as well (the ops suite's
+  // `a relative or punctuated path refuses before any round trip` pins that half).
+  const dir = tree()
+  const { runner, state } = fakeRunner()
+  state.nextRun = () => ran('5 regular file')
+  state.streamImpl = (_argv, copy) => writeBack(copy.localPath, 'hello')
+  const out = await transfer(runner, TARGET, SETTINGS, {}, base({ direction: 'download', localPath: join(dir, 'x'), remotePath: '/srv/a;b', maxBytes: 1024 }))
+  assert.equal(out.status, 'moved', 'the copy itself answered in the ordinary vocabulary')
+  const stream = state.calls.find(c => c.kind === 'streamFile')
+  assert.ok(stream, 'and it was dialed with the odd path inside one quoted word')
+  assert.match(String(stream.argvTail.at(-1)), /exec cat -- '\/srv\/a;b'$/u)
 })

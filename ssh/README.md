@@ -568,8 +568,9 @@ next round does not have to re-derive them:
   - **Landing, both directions.** A download writes a unique `.dsh-part-<pid>-<entropy>`
     sibling and renames it into place only after a clean finish; an upload lands in
     a sibling *on the server* and then takes its final name. Replacing an existing
-    file happens *through* it (`cat part > dest`): measured on a live server, `scp`
-    did the same — inode, `mode 640`, owner, and a second hardlink all surviving the
+    file happens *through* it (`cat -- part > dest`, run as a background job so the
+    mover has a pid of its own to report): measured on a live server, `scp` did the
+    same — inode, `mode 640`, owner, and a second hardlink all surviving the
     overwrite, the link's other name seeing the new bytes. A rename would have
     quietly broken all three. A fresh name is renamed, then carries the source's
     permission bits through the server's umask (`777` arrived as `755` under
@@ -711,7 +712,13 @@ still open:
   concurrent operation slots until it settles. Explicitly backgrounded jobs are
   capped at `maxRunningJobs` (default 8) of those slots — a reservation inside
   the existing lane counter, not a second scheduler — so even eight abandoned
-  long-running commands cannot busy-lock the plugin against foreground work; a
+  long-running commands cannot busy-lock the plugin against foreground work. **The
+  ceiling itself cannot be raised past the reservation** (since 0.0.37): the
+  configuration schema's maximum *is* `16 − 8`, `bounds.ts` caps any settings object
+  that still carries a higher number and says so in a note the settings page shows,
+  and the transport clamps the same way again at the moment it admits a child — so
+  the eight held-back slots are a property of the code, not of a comment, and the
+  number a refusal quotes is the number that was in force. A
   start refused by that ceiling names it and points at `job_kill`, and since 0.0.34
   the refusal is answered **in the frame that asked** — `status: 'refused'`, no id
   to poll — rather than starting a job and letting the lane turn it into a failed
@@ -783,19 +790,34 @@ still open:
 - When a copy is stopped, the **local** child is gone: the provider is waited out
   across its TERM→KILL grace before the answer is given, and the live check proves
   no `ssh` of ours is left holding a slot. Since 0.0.36 the plugin also tries to
-  clean up the far end: after a copy is stopped it fires one short, bounded,
-  best-effort command asking the server to end the mover it may have stranded —
-  named by the argument it is moving (a download's source path, an upload's unique
-  part file), written `[c]at …` so it cannot match its own shell. Why it is only
-  best-effort, measured honestly: a remote `cat` blocked writing to a pipe dies at
-  once when the channel closes, but one parked in `open()` on a fifo with no writer
-  never touches the channel, so sshd without a pty lets it sit (it was seen
-  outliving its call by hours) — closing the channel cannot interrupt a syscall it
-  is not in, so this asks the server to signal it instead. A server with no `pkill`
-  is told the mover may linger rather than having the copy's own outcome rewritten.
-  The live check now *asserts* this: the stranded reader of a timed-out download is
-  gone within the cleanup window (measured 213 ms) with no one reaching for `pkill`
-  by hand.
+  clean up the far end: before a mover starts it prints one line about itself —
+  `dsh-mover <pid> <tag>` — on **stderr**, the channel the copy already reads whole;
+  a download then `exec`s into the mover so the number it reported and the process
+  holding the file are one and the same, and an upload's publish runs its mover as a
+  background job so `$!` names the mover rather than the shell waiting on it. After a
+  copy is stopped, one short, bounded, best-effort command asks the server to end
+  **that pid**: it checks `kill -0`, reads `/proc/<pid>/cmdline` one argument at a
+  time, and compares those arguments as plain strings with the argv this copy was
+  given; only a match is killed. Why it is only best-effort, measured honestly: a
+  remote `cat` blocked writing to a pipe dies at once when the channel closes, but one
+  parked in `open()` on a fifo with no writer never touches the channel, so sshd
+  without a pty lets it sit (it was seen outliving its call by hours) — closing the
+  channel cannot interrupt a syscall it is not in, so this asks the server to signal
+  it instead. What changed in 0.0.37 is *which* process that is: through 0.0.36 the
+  cleanup was `pkill -f '[c]at -- <path>'`, and the path is the one thing two copies
+  of the same file share, so interrupting one copy stopped the other one's mover too —
+  and a remote path is allowed to contain `[`, `*`, `?`, `+` and `.`, all of which are
+  regular-expression syntax to `pkill -f`. A pid is not. The verdict the cleanup gets
+  back is reported rather than smoothed over: `gone` says nothing (the mover left with
+  the channel), `killed` and `killed-unverified` name the pid and say whether the
+  command line confirmed it (a server without a readable `/proc` gets said so),
+  `foreign` says the number is running something else and was left alone, `refused`
+  says the server would not let this user signal it, and `unanswered` says the cleanup
+  got no reply and nothing is claimed. A copy that never learned a pid kills nothing
+  and says the residual is unnamed. The live check asserts all of it on two movers of
+  one path: after one copy's cleanup the other's mover is still parked, still
+  deliverable, and its channel closes with the payload whole (measured on `proxy`,
+  pids 2747830/2747840, 2026-11-19 10:46).
 - Spill files — the full-output recovery files the subprocess provider writes when
   a stream passes its ceiling — stay the **provider's**. It owns the directory,
   closes them, keeps completed ones until something outside the process cleans

@@ -21,6 +21,7 @@
 
 import { clampTimeout } from '@deepseek-ai/dsh-timeout'
 import { DEFAULTS, type SshConfig } from './config.ts'
+import { FOREGROUND_RESERVED_OPS, MAX_CONCURRENT_OPS, MAX_JOB_LANES } from './storage.ts'
 import { SshError } from './types.ts'
 import type { SshSettings, StoredSettings } from './types.ts'
 
@@ -76,7 +77,12 @@ export interface Bounds {
   readonly maxTransferTotalBytes: number
   /** How many file transfers may hold an operation slot at once. */
   readonly maxConcurrentTransfers: number
-  /** How many background jobs may hold an operation slot at once. */
+  /**
+   * How many background jobs may hold an operation slot at once, after this module
+   * clamped what the profile asked for to {@link MAX_JOB_LANES}: a job can outlive
+   * every clock this plugin arms, so {@link FOREGROUND_RESERVED_OPS} of the
+   * {@link MAX_CONCURRENT_OPS} slots are never a job's to take.
+   */
   readonly maxRunningJobs: number
   readonly probeTimeoutMs: number
   readonly statTimeoutMs: number
@@ -109,6 +115,20 @@ export function readBounds(config: SshConfig): Bounds {
   const [outputBytes, maxOutputBytes] = pair('outputBytes', config.outputBytes.get(), config.maxOutputBytes.get())
   const [transferBytes, maxTransferBytes] = pair('transferBytes', config.transferBytes.get(), config.maxTransferBytes.get())
   const [transferTimeoutMs, maxTransferTimeoutMs] = pair('transferTimeoutMs', config.transferTimeoutMs.get(), config.maxTransferTimeoutMs.get())
+  // A job lane has a ceiling the profile does not get to choose: a background job can
+  // hold its operation slot for the life of a conversation, so `MAX_JOB_LANES` of the
+  // `MAX_CONCURRENT_OPS` slots are what jobs may ever occupy and the rest are held
+  // back for calls a reader is waiting on. Asking above it is corrected here, in the
+  // same voice every other correction in this file uses, so the settings page prints
+  // the number the transport will actually run with rather than the one a profile
+  // hoped for — and `transport.ts` clamps the same way again where the slot is taken.
+  const jobLane = (label: string, asked: number, ceiling: number): number => {
+    const value = Math.min(ceiling, Math.max(1, asked))
+    if (value !== asked) {
+      notes.push(`${label}: the configured ${String(asked)} is outside the range 1 to ${String(ceiling)}, and this plugin runs it as ${String(value)} — ${String(FOREGROUND_RESERVED_OPS)} of the ${String(MAX_CONCURRENT_OPS)} operation slots stay held back for foreground calls`)
+    }
+    return value
+  }
   return {
     timeoutMs,
     maxTimeoutMs,
@@ -121,8 +141,8 @@ export function readBounds(config: SshConfig): Bounds {
     maxTransferTimeoutMs,
     maxTransferFiles: Math.max(1, config.maxTransferFiles.get()),
     maxTransferTotalBytes: Math.max(1, config.maxTransferTotalBytes.get()),
-    maxConcurrentTransfers: Math.min(16, Math.max(1, config.maxConcurrentTransfers.get())),
-    maxRunningJobs: Math.min(16, Math.max(1, config.maxRunningJobs.get())),
+    maxConcurrentTransfers: Math.min(MAX_CONCURRENT_OPS, Math.max(1, config.maxConcurrentTransfers.get())),
+    maxRunningJobs: jobLane('maxRunningJobs', config.maxRunningJobs.get(), MAX_JOB_LANES),
     probeTimeoutMs: config.probeTimeoutMs.get(),
     statTimeoutMs: config.statTimeoutMs.get(),
     promoteOnTimeout: config.promoteOnTimeout.get(),

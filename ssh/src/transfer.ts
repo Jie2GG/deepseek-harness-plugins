@@ -174,13 +174,20 @@ export function remoteParts(path: string): { parent: string; base: string } {
 }
 
 /**
- * Suffix that makes one temp name this process's own: its id in base 36 plus three
+ * Suffix that makes one temp name this process's own: its id in base 36 plus four
  * bytes of entropy, because two conversations may pull the same remote file into
  * the same directory at the same moment.
- * @returns the middle of a temp name.
+ *
+ * The same token doubles as a copy's **task identity** on the server (K-4), which
+ * is why it is wider than a temp name alone would need: nothing may be killed on
+ * the strength of a tag that two live copies could share, and four bytes make a
+ * collision inside one Host process a one-in-four-billion event rather than a
+ * one-in-sixteen-million one. It stays `[a-z0-9-]` on purpose: that shape cannot
+ * be mistaken for a shell or a regex metacharacter wherever it is embedded.
+ * @returns the middle of a temp name, and the identity of one copy.
  */
 function entropy(): string {
-  return `${process.pid.toString(36)}-${randomBytes(3).toString('hex')}`
+  return `${process.pid.toString(36)}-${randomBytes(4).toString('hex')}`
 }
 
 /**
@@ -514,8 +521,13 @@ async function copyStream(
   // end of the channel this process controls.
   const sinkPath = request.direction === 'download' ? (localPart as string) : request.localPath
   const destArg = remotePathArg(request.remotePath)
+  // A download announces its mover and then becomes it (K-4), so the pid the
+  // cleanup has to aim at is a number this copy learned from its own channel. An
+  // upload's stream mover needs no announcement: it reads the channel, so it dies
+  // on the EOF the teardown sends. The upload's stranded mover is the **publish**
+  // step, and that one is framed where it is built.
   const command = request.direction === 'download'
-    ? `cat -- ${destArg}`
+    ? downloadMoverCommand(destArg, tag)
     : `cat > ${remotePathArg(remotePart as string)}`
   /** Take back the partial sink, in whichever filesystem it was written to. */
   const abandon = async (): Promise<void> => {
@@ -553,21 +565,29 @@ async function copyStream(
       request.signal,
       { kind: TRANSFER_LANE, cap: settings.maxConcurrentTransfers },
     )
-    const text = `${copy.stderr}\n${copy.stdout}`
+    // This plugin's own mover marker travels on stderr so a cleanup can name the
+    // process it is allowed to touch. Everywhere the channel's output is read as an
+    // *explanation* — a classification, or the sentence a failure quotes back — the
+    // marker is edited out first: a pid is not a reason.
+    const copyDetail = stripMoverMarker(copy.stderr)
+    const text = `${copyDetail}\n${copy.stdout}`
     // A copy that ran to an ending proved the connection; one stopped by its
     // ceiling, by the clock, or by the reader did not, and the master goes back.
     transport.noteShared(lease, copy.outcome === 'exit' && (copy.exitCode ?? 0) === 0 && !transport.sessionBroken(text))
     // A copy stopped short can leave a mover stranded on the server. Only a
-    // **download** does this in a way the local teardown cannot reach: its mover is
-    // `cat -- <source>`, which parks in a fifo with no writer without ever touching
-    // the channel, so closing that channel signals it nothing (K-4). Upload movers
-    // read the channel and die on EOF, and never get this far with a stranded child.
-    // The cleanup is best-effort and bounded; its note is appended only when it had
-    // something to say.
-    const reapDownload = async (): Promise<string | undefined> =>
-      request.direction === 'download'
-        ? await reapRemoteMover(transport, target, settings, auth, '[c]at -- ', request.remotePath)
-        : undefined
+    // **download** does this in a way the local teardown cannot reach: its mover
+    // parks in a fifo with no writer without ever touching the channel, so closing
+    // that channel signals it nothing (K-4). Upload stream movers read the channel
+    // and die on EOF, and never get this far with a stranded child. The cleanup is
+    // best-effort and bounded, and its note is appended only when it had something
+    // to say — including the case where there is no pid to aim at, which is said
+    // out loud rather than passed over as though the server had been tidied.
+    const mover = moverPid(copy.stderr, tag)
+    const reapDownload = async (): Promise<string | undefined> => {
+      if (request.direction !== 'download') return undefined
+      if (mover === undefined) return moverPidMissingNote(copy.outcome, copy.bytes, request.remotePath)
+      return await reapStoppedMover(transport, target, settings, auth, mover, destArg, request.remotePath)
+    }
     if (copy.outcome === 'over-limit') {
       await abandon()
       const reap = await reapDownload()
@@ -669,19 +689,24 @@ async function copyStream(
     // the same file after the overwrite. For a fresh name it is a rename, and the
     // source's permission bits are re-applied the way the server would have
     // applied them to a new file.
-    const published = await transport.run(target, settings, auth, publishCommand(remotePart as string, destArg, sourceMode), {
+    const published = await transport.run(target, settings, auth, publishCommand(remotePart as string, destArg, sourceMode, tag), {
       timeoutMs: Math.min(request.timeoutMs, PUBLISH_BUDGET_MS),
       ...(request.signal === undefined ? {} : { signal: request.signal }),
     })
     if (published.status !== 'succeeded') {
-      const why = (published.stderr ?? '').trim()
+      const why = stripMoverMarker(published.stderr ?? '').trim()
       // A publish that ran out of its own budget most often did so writing through
       // a fifo with no reader (K-4): the local ssh was taken down, but the server's
-      // `cat part > dest` is blocked in a write the channel cannot interrupt, so it
-      // lingers holding the part file. Ask the server, best-effort, to end it. This
-      // does not touch the part file itself — the complete bytes are kept for the
-      // reader, exactly as the message says.
-      const reap = await reapRemoteMover(transport, target, settings, auth, '[c]at ', remotePart as string)
+      // `cat -- part > dest` is blocked in a write the channel cannot interrupt, so
+      // it lingers holding the part file. That branch reports its pid before it
+      // blocks, so the cleanup has the same per-task handle a download gets — and
+      // a branch that reported no pid had no mover to wait on, which is said rather
+      // than passed off as a tidy server. This does not touch the part file itself:
+      // the complete bytes are kept for the reader, exactly as the message says.
+      const publishedMover = moverPid(published.stderr, tag)
+      const reap = publishedMover === undefined
+        ? 'the stuck publish never reported a mover pid, which says it was not writing through an existing destination — the rename branch has no mover that could stall: nothing was killed on the server.'
+        : await reapStoppedMover(transport, target, settings, auth, publishedMover, remotePathArg(remotePart as string), remotePart as string)
       return {
         status: 'failed',
         durationMs: Date.now() - startedAt,
@@ -716,8 +741,94 @@ export const PUBLISH_BUDGET_MS = 120_000
 /** How long one best-effort server-side cleanup command may take before it is given up on. */
 const REAP_BUDGET_MS = 10_000
 
+/** What the copy's own server-side mover is called with, as its first argument. */
+const MOVER_PROGRAM = 'cat'
+
 /**
- * End, on the server, the mover an interrupted copy left stranded.
+ * The line a copy's server-side mover prints about itself, on **stderr**.
+ *
+ * `dsh-mover <pid> <tag>`. The pid is the process doing the moving, not the shell
+ * that started it: a download ends its shell with `exec` so the two are the same
+ * process, and a publish starts its mover as a background job and records *that*
+ * job's pid. The tag is the copy's own task identity, echoed back so the near end
+ * can prove the line came from the command it ran and not from something the
+ * server printed on its own. It travels on stderr because stderr is a channel this
+ * copy's parent already reads whole, whatever direction the bytes are moving, and
+ * because stdout is the payload itself.
+ */
+const MOVER_MARKER = /^dsh-mover ([0-9]{1,7}) ([a-z0-9-]+)$/mu
+
+/**
+ * What one cleanup child says about the process it was pointed at.
+ *
+ * - `gone` — the recorded pid is no longer running: the mover noticed the channel
+ *   close on its own, which is the healthy answer and gets no note.
+ * - `killed` — the pid was running **and its recorded command line was this
+ *   copy's mover**, and SIGKILL was delivered.
+ * - `killed-unverified` — the pid was killed on the strength of the recorded number
+ *   alone, because this server states no readable `/proc/<pid>/cmdline` (not Linux,
+ *   or `/proc` mounted `hidepid`).
+ * - `foreign` — the pid is running something that is not this copy's mover: either
+ *   the mover already finished and the number was handed to another process, or the
+ *   process has no command line to check (a zombie, a kernel thread). Nothing was
+ *   touched, because killing an unrelated process is worse than a leftover mover.
+ * - `refused` — the server would not let this user signal that pid.
+ * - `unanswered` — the cleanup child itself never got an answer to read: the call
+ *   timed out, the channel died, or the shell could not run the script.
+ */
+export type MoverVerdict = 'gone' | 'killed' | 'killed-unverified' | 'foreign' | 'refused' | 'unanswered'
+
+/** The verdicts a cleanup child may print, and nothing else, counts as an answer. */
+const REAP_VERDICT = /^dsh-reap (gone|killed|killed-unverified|foreign|refused)$/mu
+
+/**
+ * The one line {@link MOVER_MARKER} matches, as a command.
+ * @param pidExpression - what to report: this shell's `$$`, or a background job's `$!`.
+ * @param tag - this copy's task identity, echoed so the near end can bind the line.
+ * @returns a `printf` that writes the marker to stderr and a `; ` to follow.
+ */
+function moverMarker (pidExpression: string, tag: string): string {
+  return `printf 'dsh-mover %s %s\\n' ${pidExpression} ${shellQuote(tag)} >&2; `
+}
+
+/**
+ * The remote command one download runs: announce the mover's pid, then **become**
+ * the mover.
+ *
+ * `exec` is what makes the announcement true. sshd starts a shell for the command
+ * line; `$$` is that shell, and `exec cat -- <path>` replaces it with the same
+ * process, so the number printed and the number holding the file descriptor are
+ * one number. Without `exec` the recorded pid would name a shell that is waiting,
+ * and the stranded `cat` would be its child — the exact shape a path-matching
+ * `pkill` was invented to work around, and the shape that could not tell two
+ * concurrent copies of the same file apart (K-4).
+ * @param destArg - the remote source, already shaped for the remote shell.
+ * @param tag - this copy's task identity.
+ * @returns one POSIX command whose stdout is the file.
+ */
+export function downloadMoverCommand (destArg: string, tag: string): string {
+  return `${moverMarker('"$$"', tag)}exec ${MOVER_PROGRAM} -- ${destArg}`
+}
+
+/**
+ * The first two arguments a mover this plugin started is seen with, in `/proc` form.
+ *
+ * `/proc` is only a fact if the expected shape is stated, so both ends of the check
+ * are built here: these two fields, and the script in {@link reapMoverCommand} that
+ * reads them back one per line. The third field is the path, and it comes from the
+ * caller because it is the one thing the server may still expand (`~/x`).
+ *
+ * A `cat` pointed at the same path by a *different* task looks identical to this
+ * check, which is why the check is run against **this task's recorded pid** and never
+ * against a pattern searched across the whole process table.
+ * @returns the program name and its `--`, in the order `tr '\\0' '\\n'` prints them.
+ */
+function moverArgvLines (): readonly [string, string] {
+  return [MOVER_PROGRAM, '--']
+}
+
+/**
+ * Take back, on the server, the mover an interrupted copy left stranded.
  *
  * Killing the **local** `ssh` child only guarantees the local half is gone. OpenSSH
  * without a pseudo-terminal does not signal a remote command that is parked in a
@@ -726,55 +837,162 @@ const REAP_BUDGET_MS = 10_000
  * reading. Those writers of bytes exit when the channel closes (stdin EOF, stdout
  * SIGPIPE), but those two readers/writers of a *fifo* do not touch the channel at
  * all, so sshd lets them sit; on a live server they were seen outliving their calls
- * by eight to eleven hours. After the teardown this plugin fires one short, bounded
- * command to kill exactly that mover, matched by the argument it is moving: an
- * upload's part path is unique per copy, and a download's source path names only
- * this one. The `pkill` pattern is written `[c]at …` so it cannot match the very
- * shell that runs it, a match on nothing (`exit 1`) is the normal healthy answer,
- * and a server with no `pkill` is left as it was rather than having the copy's own
- * outcome rewritten.
+ * by eight to eleven hours.
+ *
+ * What gets killed is therefore **the pid this copy reported**, and the pid alone:
+ * a `pkill -f` pattern built from a remote path cannot separate two copies of the
+ * same file, because the path is the one thing they share, and a path is a regular
+ * expression to `pkill -f` besides (`[`, `*`, `?`, `+` and `.` are all legal in a
+ * remote path). This command needs no `pkill` and no `pgrep` either — `kill -0`,
+ * `kill -9`, `tr` and `sed` are the whole toolkit, which is a wider set of servers
+ * than 0.0.36 could clean at all.
+ *
+ * Before the signal, the target is identified from the inside out: `/proc/<pid>/cmdline`
+ * is read one argument per line and compared, as plain strings, with the argv this
+ * plugin handed that process (`cat`, `--`, and the path *the server's own shell*
+ * expanded, which is why the path word is assigned to a variable rather than
+ * quoted twice — `~/x` has to expand the same way it did for the mover). A pid
+ * whose command line says something else is left alone and reported, because a
+ * recycled number is not this copy's mover.
+ * @param pid - the number the mover reported about itself.
+ * @param pathWord - the remote path in the exact shell shape the mover was given.
+ * @returns one POSIX command that answers with one `dsh-reap <verdict>` line.
+ */
+export function reapMoverCommand (pid: number, pathWord: string): string {
+  const [program, dashdash] = moverArgvLines()
+  return `P=${shellQuote(String(pid))}; p=${pathWord}; `
+    + `if ! kill -0 "$P" 2>/dev/null; then echo 'dsh-reap gone'; exit 0; fi; `
+    + `if [ ! -r /proc/"$P"/cmdline ]; then if kill -9 "$P" 2>/dev/null; then echo 'dsh-reap killed-unverified'; else echo 'dsh-reap refused'; fi; exit 0; fi; `
+    + `a=$(tr '\\0' '\\n' < /proc/"$P"/cmdline 2>/dev/null); `
+    + `if [ "$(printf '%s\\n' "$a" | sed -n 1p)" != ${shellQuote(program)} ] || [ "$(printf '%s\\n' "$a" | sed -n 2p)" != ${shellQuote(dashdash)} ] || [ "$(printf '%s\\n' "$a" | sed -n 3p)" != "$p" ]; then echo 'dsh-reap foreign'; exit 0; fi; `
+    + `if kill -9 "$P" 2>/dev/null; then echo 'dsh-reap killed'; else echo 'dsh-reap refused'; fi`
+}
+
+/**
+ * The pid a stopped copy's mover reported, when it reported one.
+ * @param stderr - the stderr this copy collected from its own channel.
+ * @param tag - the identity this copy wrote into the marker, which is what makes
+ *   the line *this* copy's and not a stray line that happens to look like one.
+ * @returns the mover's pid, or `undefined` when this copy never got one.
+ */
+export function moverPid (stderr: string | undefined, tag: string): number | undefined {
+  const marker = MOVER_MARKER.exec(stderr ?? '')
+  if (marker === null || marker[2] !== tag) return undefined
+  const pid = Number(marker[1])
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined
+}
+
+/**
+ * Remove this plugin's own mover marker from a copy's stderr.
+ *
+ * The stderr of a stopped copy is quoted back to the reader as the explanation, and
+ * a line about a pid is not an explanation — it would sit in front of the server's
+ * own sentence, and on a copy that produced nothing else it would *be* the sentence.
+ * @param stderr - the raw stderr tail the channel carried.
+ * @returns the same text with the marker line(s) dropped.
+ */
+export function stripMoverMarker (stderr: string | undefined): string {
+  return (stderr ?? '').split('\n').filter(line => !MOVER_MARKER.test(line)).join('\n')
+}
+
+/**
+ * Read the one verdict a cleanup child stated.
+ * @param stdout - the raw stdout of the cleanup child.
+ * @returns the verdict, or `unanswered` when the server said none of them.
+ */
+export function parseMoverVerdict (stdout: string | undefined): MoverVerdict {
+  const verdict = REAP_VERDICT.exec(stdout ?? '')
+  return verdict?.[1] === undefined ? 'unanswered' : verdict[1] as Exclude<MoverVerdict, 'unanswered'>
+}
+
+/**
+ * Say what one cleanup attempt achieved, in the words the evidence supports.
+ * @param verdict - what the server reported about the pid it was pointed at.
+ * @param pid - the mover pid this copy had recorded.
+ * @param path - the remote path, named so a reader knows which file is at stake.
+ * @param host - the server, for the sentences that need one.
+ * @returns a note to show the reader, or `undefined` when there is nothing to tell.
+ * @throws never: a failed cleanup is a sentence, not a second failure.
+ */
+export function moverVerdictNote (
+  verdict: MoverVerdict,
+  pid: number,
+  path: string,
+  host: string,
+): string | undefined {
+  switch (verdict) {
+    case 'gone':
+      // The mover closed with the channel on its own. Silence is the honest answer:
+      // 0.0.36 called this "matched nothing" and said nothing either.
+      return undefined
+    case 'killed':
+      return `the interrupted copy ended its own server-side mover of ${path} (pid ${String(pid)}), confirmed from that pid's command line before the signal.`
+    case 'killed-unverified':
+      return `the interrupted copy ended its server-side mover of ${path} (pid ${String(pid)}); ${host} states no readable /proc entry for that pid, so the kill was taken on the recorded number alone.`
+    case 'foreign':
+      return `the pid this copy recorded as its mover of ${path} (pid ${String(pid)}) is now running something else, so nothing was killed: the mover had already gone, and an unrelated process holds that number.`
+    case 'refused':
+      return `the interrupted copy could not end its own server-side mover of ${path} (pid ${String(pid)}): ${host} refused the signal, so that mover may still be running.`
+    case 'unanswered':
+      return `the interrupted copy asked ${host} to end its own server-side mover of ${path} (pid ${String(pid)}) and got no answer, so this plugin cannot say whether that mover is gone.`
+  }
+}
+
+/**
+ * The note for a stopped copy that never learned its mover's pid.
+ *
+ * Two ways this happens, and they deserve different sentences. A copy whose channel
+ * never carried a command (a connection that died, a credential the server refused)
+ * has no mover and should stay quiet. A copy that moved bytes into a fifo and then
+ * stopped *had* a mover, and the honest report is that this plugin cannot name it.
+ * @param outcome - how the copy ended.
+ * @param bytes - how many bytes crossed the channel.
+ * @param path - the remote path.
+ * @returns a note, or `undefined` when nothing was started.
+ */
+function moverPidMissingNote (outcome: string, bytes: number, path: string): string | undefined {
+  if (outcome === 'error' && bytes === 0) return undefined
+  return `the interrupted copy never reported a server-side mover pid for ${path}, so no process was killed on the server: a mover may still be holding that fifo or file, and this plugin will not guess at which one.`
+}
+
+/**
+ * End one stranded mover, identified by the pid it reported.
  * @param transport - the shared transport, to spend one small child on the cleanup.
  * @param target - the server the mover is parked on.
  * @param settings - the ceilings the cleanup child runs under.
  * @param auth - the credentials for this target.
- * @param argvLead - the front of the mover's command line to match, written with
- *   its first letter in a bracket class so `pkill` cannot match the very shell that
- *   runs it: `[c]at -- ` for a download reading a path, `[c]at ` for a publish
- *   writing one.
- * @param pathArg - the raw remote path that argument carries, unique or specific
- *   enough to name this copy's mover and no one else's.
- * @returns a sentence to append to the notes when there was one to tell, otherwise
- *   `undefined` — silence means either nothing was stranded or nothing could be done.
+ * @param pid - the mover pid this copy recorded on its own channel.
+ * @param pathWord - the remote path in the shell shape the mover was handed.
+ * @param path - the path as the reader names it, for the note.
+ * @returns a sentence when there was one to tell, otherwise `undefined`.
  */
-async function reapRemoteMover (
+async function reapStoppedMover (
   transport: SshTransport,
   target: RemoteTarget,
   settings: SshSettings,
   auth: RemoteAuth,
-  argvLead: string,
-  pathArg: string,
+  pid: number,
+  pathWord: string,
+  path: string,
 ): Promise<string | undefined> {
-  const pattern = `${argvLead}${pathArg}`
   let reaped
   try {
-    reaped = await transport.run(target, settings, auth, `pkill -f -- ${shellQuote(pattern)}`, {
+    reaped = await transport.run(target, settings, auth, reapMoverCommand(pid, pathWord), {
       timeoutMs: Math.min(settings.statTimeoutMs, REAP_BUDGET_MS),
     })
   } catch {
-    // The copy already said what went wrong; a cleanup child that could not even
-    // open a connection is not worth layering a second failure on top of it.
-    return undefined
+    // The copy already said what went wrong. Here the cleanup could not even be
+    // asked, which is a residual worth naming rather than a silence: 0.0.36 said
+    // nothing in exactly this case and read as though the server had been tidied.
+    return moverVerdictNote('unanswered', pid, path, target.host)
   }
-  if (reaped.status === 'succeeded') {
-    return `the interrupted copy also ended a leftover server-side mover of ${pathArg}.`
+  const verdict = parseMoverVerdict(reaped.stdout)
+  if (verdict === 'unanswered' && reaped.status !== 'succeeded') {
+    // The child answered, but not with a verdict: a shell that could not parse the
+    // script, or a server that ended it. Same residual, same honesty.
+    return moverVerdictNote('unanswered', pid, path, target.host)
   }
-  // `exit 1` is pkill reporting it matched nothing — the healthy case: the mover
-  // noticed the channel close on its own and is already gone. Nothing to say.
-  if (reaped.exitCode === 1) return undefined
-  if (reaped.exitCode === 127 || /not found/iu.test(String(reaped.stderr ?? ''))) {
-    return `the interrupted copy may have left a server-side mover of ${pathArg} running: ${target.host} has no pkill to end it from here.`
-  }
-  return undefined
+  return moverVerdictNote(verdict, pid, path, target.host)
 }
 
 /**
@@ -807,7 +1025,7 @@ export function transferCallCeiling (ceilings: {
  *
  * The two branches answer a question this plugin cannot freeze between its own
  * round trips — does the destination exist yet — and they are not
- * interchangeable. Replacing an existing file *through* it (`cat part > dest`)
+ * interchangeable. Replacing an existing file *through* it (`cat -- part > dest`)
  * keeps the inode, the owner, the mode, and every hardlink pointing at it, which
  * is what the overwrite branch of `scp` did and what a `mv` would quietly undo. A
  * fresh name has nothing to keep, so it is renamed — and then carries the source's
@@ -815,15 +1033,27 @@ export function transferCallCeiling (ceilings: {
  * (`777` arrived as `755` under `umask 0022`, `640` stayed `640`) and the
  * difference between an uploaded script that still runs and one that stopped.
  *
+ * The overwrite branch runs its mover **as a background job and waits for it**, and
+ * that shape is not cosmetic (K-4): the script has something to do after the mover
+ * (`rm` the part, and only on success), so the shell cannot `exec` its way into the
+ * copy, so the mover is a child with a pid of its own. Reporting `$!` on stderr
+ * before blocking is the only way the near end ever learns which process to take
+ * back, and `wait` still hands the copy's own exit status to the caller's `&&`. Measured
+ * on a live server in `sh`, `dash` and `bash`: a good copy leaves the destination
+ * holding the payload with the part gone and status 0, and a destination that
+ * cannot be written (a directory in the way) still reports the server's own sentence
+ * with a nonzero status and the part file kept.
+ *
  * A `chmod` the server refuses does not fail a copy whose bytes already landed:
  * the mode was the thing being carried, and the content already is.
  * @param remotePart - the server path holding the complete payload.
  * @param destArg - the destination, already shaped for the remote shell.
  * @param sourceMode - this machine's permission bits for the source, when one
  *   could be stated; omit it and a fresh destination keeps the server's default.
+ * @param tag - this copy's task identity, echoed in the mover's marker line.
  * @returns one POSIX shell command, with nothing from the caller outside quotes.
  */
-export function publishCommand(remotePart: string, destArg: string, sourceMode?: number): string {
+export function publishCommand(remotePart: string, destArg: string, sourceMode?: number, tag = ''): string {
   const partArg = remotePathArg(remotePart)
   // The mode is this plugin's own number, rendered octal with the leading `0` the
   // shell's arithmetic needs; nothing caller-shaped reaches here unquoted. Three
@@ -835,7 +1065,8 @@ export function publishCommand(remotePart: string, destArg: string, sourceMode?:
   const carry = sourceMode === undefined
     ? ''
     : ` && { u=$(umask); m=$((0${sourceMode.toString(8)} & ~(0$u))); c=$(printf "%o" "$m"); if [ -n "$c" ]; then chmod "$c" ${destArg}; fi; }`
-  return `if [ -e ${destArg} ] || [ -L ${destArg} ]; then cat ${partArg} > ${destArg} && rm -f ${partArg}; `
+  return `if [ -e ${destArg} ] || [ -L ${destArg} ]; then cat -- ${partArg} > ${destArg} & mp=$!; `
+    + `${moverMarker('"$mp"', tag)}wait $mp && rm -f ${partArg}; `
     + `else mv -f ${partArg} ${destArg}${carry}; fi`
 }
 

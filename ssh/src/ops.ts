@@ -10,7 +10,7 @@
  * @module @jie2gg/dsh-plugin-ssh/ops
  */
 
-import { connectionInputSchema, draftSecretSchema, remotePathSchema, transferInputSchema, sessionTargetInputSchema, CONTROL_PERSIST_SECONDS, MAX_CONCURRENT_OPS, MAX_CONNECTIONS, MAX_LIVE_MASTERS, probeDraftSchema, remoteRunSchema, secretPatchSchema, settingsInputSchema } from './storage.ts'
+import { connectionInputSchema, draftSecretSchema, remotePathSchema, transferInputSchema, sessionTargetInputSchema, CONTROL_PERSIST_SECONDS, FOREGROUND_RESERVED_OPS, MAX_CONCURRENT_OPS, MAX_CONNECTIONS, MAX_LIVE_MASTERS, probeDraftSchema, remoteRunSchema, secretPatchSchema, settingsInputSchema } from './storage.ts'
 import { defaultBounds, resolveSettings } from './bounds.ts'
 import type { Bounds, CeilingLayers, ResolvedSettings } from './bounds.ts'
 import { SshError } from './types.ts'
@@ -23,6 +23,7 @@ import {
   buildEditWrite,
   buildEditRestore,
   splitEditVersion,
+  verifyEditBody,
   digestHex,
   parseWriteReport,
   parseRepairReport,
@@ -40,7 +41,7 @@ import {
 import type { RepairReport } from './edit.ts'
 import { startRemoteJob } from './jobs.ts'
 import type { JobRegistry } from './jobs.ts'
-import { remotePathArg, shellQuote, leadingProgram, classifyCollectedRun, JOB_LANE } from './transport.ts'
+import { remotePathArg, shellQuote, leadingProgram, classifyCollectedRun, effectiveLaneCap, JOB_LANE } from './transport.ts'
 import type { RemoteAuth, RemoteTarget, SshTransport } from './transport.ts'
 import type { TargetStore } from './store.ts'
 import type { TargetSecrets } from './secrets.ts'
@@ -229,11 +230,23 @@ export interface ListResult {
     maxSpillBytes: number
     graceMs: number
     promoteOnTimeout: boolean
+    /**
+     * How many of the operation slots a background job may hold at once, as this
+     * Host resolved it — the number the transport admits against, not the number a
+     * profile asked for.
+     */
+    maxRunningJobs: number
+    /** The same number for one file copy. */
+    maxConcurrentTransfers: number
+    /** Every operation slot there is, jobs and copies and probes alike. */
+    concurrentOps: number
+    /** The slots a job can never take, which is what keeps a call answerable. */
+    foregroundReservedOps: number
     effective: SshSettings
     notes: readonly string[]
   }
   /** Whether calls on this Host can share a connection, and how many masters do. */
-  pool: { ready: boolean; liveMasters: number; transfers: number; failure?: string }
+  pool: { ready: boolean; liveMasters: number; transfers: number; jobs: number; failure?: string }
   /** This process's spill accounting: what it asked the provider to keep, and what the budget refused. */
   spill: { used: number; files: number; refusals: number; max: number }
   /** What this Host's startup collected from its own temp namespace, if it looked. */
@@ -1072,6 +1085,14 @@ export function createOps(deps: OpsDeps): Ops {
           maxSpillBytes: bounds.maxSpillBytes,
           graceMs: bounds.graceMs,
           promoteOnTimeout: bounds.promoteOnTimeout,
+          // The lane numbers belong in the same payload as the ceilings they are
+          // derived from: a page that printed a job ceiling of its own invention is
+          // how 0.0.36 came to show a probe timeout that was not the one the Host
+          // dialed with.
+          maxRunningJobs: effectiveLaneCap({ kind: JOB_LANE, cap: bounds.maxRunningJobs }),
+          maxConcurrentTransfers: bounds.maxConcurrentTransfers,
+          concurrentOps: MAX_CONCURRENT_OPS,
+          foregroundReservedOps: FOREGROUND_RESERVED_OPS,
           effective: resolved.settings,
           notes: resolved.notes,
         },
@@ -1084,6 +1105,10 @@ export function createOps(deps: OpsDeps): Ops {
           // done anything wrong — two copies are moving and a third is turned away
           // — and until now the refusal was the only place its number appeared.
           transfers: runner.transfersInFlight,
+          // The job lane is the one that can be full for hours and stay invisible,
+          // because nothing is waiting on a job: this is where a reader finds out why
+          // the next `background: true` was refused.
+          jobs: runner.laneUsage(JOB_LANE),
           ...(runner.mux.failure === undefined ? {} : { failure: runner.mux.failure.slice(0, 512) }),
         },
         probing: runner.inFlight,
@@ -1378,13 +1403,42 @@ export function createOps(deps: OpsDeps): Ops {
           hint: 'Raise the output ceiling in Settings → Remote connections, or replace the file with write.',
         }
       }
-      // The read answered with two markers and then the file: the `stat` token, and
-      // the digest this server computed over the bytes it was about to hand over. A
-      // server whose `stat` cannot state a token, or that has no checksum tool,
-      // leaves that marker empty, and the edit runs without the corresponding guard
-      // rather than refusing to run — the safety copy and the checks that follow
-      // still stand, and the result says which guard was in force.
-      const { version, digest: originalSha256, content } = splitEditVersion(read.stdout ?? '')
+      // The read answered with three markers and then the file: the `stat` token, the
+      // digest this server computed over the bytes it was about to hand over, and how
+      // many of those bytes there were. A server whose `stat` cannot state a token,
+      // that has no checksum tool, or whose `wc -c` could not run leaves that marker
+      // empty, and the edit runs without the corresponding guard rather than refusing
+      // to run — the safety copy and the checks that follow still stand, and the
+      // result says which guard was in force.
+      const { version, digest: originalSha256, bodyBytes, content } = splitEditVersion(read.stdout ?? '')
+      // K-6: the byte count and the digest the server stated are not decoration. They
+      // are the only evidence available that the text this call is about to edit *is*
+      // the file — that nothing was clipped below the ceiling, that the stream did not
+      // carry a line from outside the file, and that the bytes were not silently
+      // rewritten by decoding a file that is not valid UTF-8. An edit that went ahead
+      // on a body like that would replace the file with something the server never
+      // agreed to, and the loss would be exactly the part nobody saw. This is checked
+      // before the match, before any dry-run preview, and long before anything is
+      // copied or truncated.
+      const integrity = verifyEditBody(content, {
+        ...(bodyBytes === undefined ? {} : { bytes: bodyBytes }),
+        ...(originalSha256 === undefined ? {} : { digest: originalSha256 }),
+      })
+      if (!integrity.ok) {
+        return {
+          action: 'edit',
+          ok: false,
+          status: 'exit-nonzero',
+          target,
+          path,
+          type: 'file',
+          contentVerified: false,
+          versionChecked: version !== undefined,
+          ...(read.durationMs === undefined ? {} : { durationMs: read.durationMs }),
+          message: `${path} was read, but the body of that read is not provably the file, so nothing was written and the file is unchanged. ${integrity.message}`,
+          hint: integrity.hint,
+        }
+      }
       const outcome = applyEdit({
         content,
         oldText,
@@ -1433,9 +1487,17 @@ export function createOps(deps: OpsDeps): Ops {
           versionChecked: version !== undefined,
           ...(read.durationMs === undefined ? {} : { durationMs: read.durationMs }),
           ...(originalSha256 === undefined
-            ? { notes: [`this server stated no SHA-256 for ${path}, so the same call without dryRun would be refused before writing and the file left unchanged`] }
+            ? { notes: [`this server stated no usable SHA-256 for ${path}, so a safe edit is not available here: the same call without dryRun is refused before anything is copied or written, and the file is left unchanged`] }
             : {}),
-          hint: 'Dry run: nothing was written and no backup was taken. The same call without dryRun applies this change.',
+          // K-1: the preview has to say what the matching write would really do. On a
+          // server that cannot state a usable digest that write is **refused**, so the
+          // sentence this branch used to carry — "the same call without dryRun applies
+          // this change" — invited a reader to treat `dryRun` as the thing standing in
+          // the way. It is not: no value of this flag lets an uncheckable overwrite
+          // through, and the hint now says so on the flag's own terms.
+          hint: originalSha256 === undefined
+            ? 'Dry run: nothing was written and no backup was taken. The same call without dryRun would be refused on this server, which states no usable SHA-256, so turning this flag off does not make the edit apply.'
+            : 'Dry run: nothing was written and no backup was taken. The same call without dryRun applies this change.',
         }
       }
       // K-1: the SHA-256 capability is decided here, before anything is copied or
@@ -1462,8 +1524,8 @@ export function createOps(deps: OpsDeps): Ops {
           bytesBefore: outcome.bytesBefore,
           bytesAfter: outcome.bytesAfter,
           ...(read.durationMs === undefined ? {} : { durationMs: read.durationMs }),
-          message: `${record.host} could not state a SHA-256 for ${path}, so this edit was not written and the file is unchanged: an overwrite that cannot be checked after it lands would have left the new bytes unverified and the old ones at the mercy of the copy step.`,
-          hint: `Put a checksum tool (sha256sum, shasum, or openssl) on ${record.host} and re-run, replace the whole file with \`write\` (which needs no read-verify), or re-run with dryRun: true to preview the change without touching the file.`,
+          message: `${record.host} stated no usable SHA-256 for ${path} — no checksum tool, or a value that is not a digest — so this edit was not written and the file is unchanged: an overwrite that cannot be checked after it lands would have left the new bytes unverified and the old ones at the mercy of the copy step.`,
+          hint: `Put a checksum tool (sha256sum, shasum, or openssl) on ${record.host} and re-run, or replace the whole file with \`write\` (which needs no read-verify). \`dryRun\` only previews a change: no setting of it lets this edit write on a server that cannot attest the bytes.`,
         }
       }
       // The write is guarded, copied, checked, and — if any of that goes wrong
@@ -1861,15 +1923,20 @@ export function createOps(deps: OpsDeps): Ops {
       // ceiling in its words. The reservation itself is unchanged — the lane is
       // still taken by the child when it spawns, and a start that loses the race to
       // another call still ends as a failed job with the same sentence.
-      if (!runner.laneRoom({ kind: JOB_LANE, cap: settings.maxRunningJobs })) {
+      // The number quoted here is the number the transport will hold the lane to
+      // (`effectiveLaneCap`), not whatever a profile's settings object happens to
+      // carry: a refusal that names a ceiling nobody can reach sends the reader off to
+      // change a knob that would not have helped.
+      const jobCap = effectiveLaneCap({ kind: JOB_LANE, cap: settings.maxRunningJobs })
+      if (!runner.laneRoom({ kind: JOB_LANE, cap: jobCap })) {
         return {
           action: 'exec',
           ok: false,
           status: 'refused',
           target: { id: record.id, label: record.label, host: record.host },
           command: input.command,
-          message: `At most ${String(settings.maxRunningJobs)} ${JOB_LANE} may run at once, and all ${String(settings.maxRunningJobs)} slots are taken.`,
-          hint: 'Stop one with `job_kill`, wait for one to settle, or raise the ceiling in the plugin\u2019s configuration.',
+          message: `At most ${String(jobCap)} ${JOB_LANE} may run at once, and all ${String(jobCap)} slots are taken.`,
+          hint: 'Stop one with `job_kill` or wait for one to settle. That ceiling is the part of the operation table a job may hold at all: a job keeps its slot until it ends, and the rest of the slots stay open for the commands a reader is waiting on.',
           connections: await viewsOf(state),
         }
       }

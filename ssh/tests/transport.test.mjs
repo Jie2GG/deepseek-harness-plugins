@@ -7,7 +7,8 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
-import { shellQuote, leadingProgram, classifyProbe, classifyRun, classifyCollectedRun, tail, HOST_KEY_SETTING, SshTransport, probeArgvTail, remotePathArg, TRANSFER_LANE } from '../lib/transport.js'
+import { shellQuote, leadingProgram, classifyProbe, classifyRun, classifyCollectedRun, tail, HOST_KEY_SETTING, SshTransport, probeArgvTail, remotePathArg, effectiveLaneCap, JOB_LANE } from '../lib/transport.js'
+import { MAX_CONCURRENT_OPS, MAX_JOB_LANES } from '../lib/storage.js'
 
 test('shellQuote makes any path one word for the remote shell', () => {
   assert.equal(shellQuote('/tmp/a b'), "'/tmp/a b'")
@@ -376,6 +377,74 @@ test('eight jobs cannot busy-lock the plugin: the job ceiling stops starts, not 
   plain.kill()
   await plain.finished
   assert.equal(transport.inFlight, 0)
+})
+
+test('a job ceiling a profile set above the reservation is still held to eight, and the reserved slots stay open', async () => {
+  // The promise 0.0.36 kept only in a comment: "eight slots always stay open for
+  // interactive work". A settings object that carried `maxRunningJobs: 16` — an older
+  // profile, a hand-built one, a ceiling raised past what the schema now accepts —
+  // could fill every operation slot with jobs and leave a foreground call refused by
+  // work nobody was waiting on. The clamp lives where the slot is taken, so the
+  // comment and the code cannot drift apart again.
+  const transport = new SshTransport({
+    subprocess: {
+      resolveExecutable: async () => '/usr/bin/ssh',
+      spawn (options) {
+        return {
+          done: new Promise(resolve => {
+            options.signal.addEventListener('abort', () => resolve({ exitCode: null, signal: 'SIGTERM' }))
+          }),
+          collected: {
+            stdout: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) },
+            stderr: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) }
+          },
+          terminate () {},
+          waitForExit: async () => true
+        }
+      }
+    }
+  })
+  const settings = { ...CEILINGS, maxSpillBytes: 0, probeTimeoutMs: 30_000, statTimeoutMs: 10_000, graceMs: 100, maxRunningJobs: 16 }
+  const jobs = []
+  for (let i = 0; i < 8; i += 1) jobs.push(await transport.startRun({ host: '10.0.0.9' }, settings, {}, `sleep ${String(i)}`, { timeoutMs: 0, job: true }))
+  assert.equal(transport.inFlight, 8, 'eight jobs, eight slots — no more, whatever the ceiling asked for')
+  assert.equal(transport.laneUsage('background jobs'), 8)
+  assert.equal(transport.laneRoom({ kind: 'background jobs', cap: 16 }), false, 'the peek is held to the same cap as the admission')
+  let err
+  try {
+    await transport.startRun({ host: '10.0.0.9' }, settings, {}, 'sleep 1d', { timeoutMs: 0, job: true })
+  } catch (error) { err = error }
+  assert.equal(err?.code, 'busy')
+  assert.match(err.message, /At most 8 background jobs may run at once, and all 8 slots are taken/u, 'the refusal quotes the cap that was actually in force, not 16')
+  assert.match(err.hint, /8 is as high as this ceiling goes/u, 'and says plainly that raising the knob would not have helped')
+  assert.match(err.hint, /8 of the 16 operation slots are held back/u)
+  // The other half of the table is still there: eight foreground children fit on top of
+  // a full job lane, which is the whole point of the reservation.
+  const plain = []
+  for (let i = 0; i < 8; i += 1) plain.push(await transport.startRun({ host: '10.0.0.9' }, settings, {}, 'uptime', { timeoutMs: 0 }))
+  assert.equal(transport.inFlight, 16, 'eight held for foreground calls, and eight used by them')
+  let over
+  try {
+    await transport.startRun({ host: '10.0.0.9' }, settings, {}, 'uptime', { timeoutMs: 0 })
+  } catch (error) { over = error }
+  assert.equal(over?.code, 'busy', 'the global ceiling is still the global ceiling')
+  assert.match(over?.message, /At most 16 remote operations/u)
+  for (const handle of [...jobs, ...plain]) {
+    handle.kill()
+    await handle.finished
+  }
+  assert.equal(transport.inFlight, 0, 'and every slot came back')
+  assert.equal(transport.laneUsage('background jobs'), 0)
+  assert.equal(transport.laneRoom({ kind: 'background jobs', cap: 16 }), true)
+})
+
+test('effectiveLaneCap clamps jobs only, and clamps them to the reserved-rest', async () => {
+  assert.equal(effectiveLaneCap({ kind: 'background jobs', cap: 16 }), 8)
+  assert.equal(effectiveLaneCap({ kind: 'background jobs', cap: 9 }), 8)
+  assert.equal(effectiveLaneCap({ kind: 'background jobs', cap: 8 }), 8)
+  assert.equal(effectiveLaneCap({ kind: 'background jobs', cap: 1 }), 1, 'a profile that wants fewer slots for jobs gets them')
+  assert.equal(effectiveLaneCap({ kind: 'file transfers', cap: 16 }), 16, 'the transfer lane is bounded by its own deadline, so its ceiling is the whole table')
+  assert.equal(MAX_CONCURRENT_OPS - MAX_JOB_LANES, 8, 'and the two numbers add up to the table they are cut from')
 })
 
 test('sixteen children fill the global ceiling and the seventeenth is refused', async () => {
@@ -874,6 +943,77 @@ test('a copy that outlives its deadline is a timeout, and one the reader stopped
   stoppedByReader.abort(new Error('the conversation went away'))
   const cancelled = await transport.streamFile('/usr/bin/ssh', ['host', 'cat -- /srv/f'], COPY_SETTINGS, undefined, 5_000, 'file transfer', { direction: 'download', localPath: join(mkdtempSync(join(tmpdir(), 'dshssh-stream-')), 'g'), maxBytes: 1024 }, stoppedByReader.signal)
   assert.equal(cancelled.outcome, 'cancelled') // not a timeout: nobody should go blame the server
+})
+
+test('a copy whose child died on a signal while its channel reached a clean end is an interruption, not a completed copy', async () => {
+  // The shape the offline suite had never modelled, and a live server produced on
+  // 2026-11-19: the local `ssh` is stopped by the call's own cancellation before the
+  // remote command has written anything, its stdout closes at **end of file** (a dead
+  // process's pipe gives EOF, it does not error), and the child settles with **no exit
+  // status** because it went down on a signal. 0.0.36 read those two facts as "pump
+  // finished, child finished" and returned `exit` with `exitCode: null` — which the
+  // transfer layer then counted as a copy that had arrived: `moved`, 0 bytes, an empty
+  // destination file, and no mover cleanup at all, because nothing had been stopped.
+  const reader = text => ({ readFrom: () => ({ text, nextOffset: Buffer.byteLength(text, 'utf8'), lossy: false }) })
+  const spawned = []
+  const transport = new SshTransport({
+    subprocess: {
+      resolveExecutable: async () => '/usr/bin/ssh',
+      spawn (spec) {
+        const stdout = new Readable({ read () {} })
+        let finish
+        let settled = false
+        const handle = {
+          stdout,
+          stdin: undefined,
+          collected: { stderr: reader('') },
+          done: new Promise(resolve => { finish = resolve }),
+          terminations: 0,
+          terminate () {
+            handle.terminations += 1
+            // A dead child: the pipe ends cleanly, the process reports a signal.
+            if (!stdout.destroyed) stdout.push(null)
+            if (!settled) {
+              settled = true
+              finish({ exitCode: null, signal: 'SIGTERM' })
+            }
+          },
+          waitForExit: async () => true
+        }
+        spec.signal.addEventListener('abort', () => handle.terminate(), { once: true })
+        spawned.push(handle)
+        return handle
+      }
+    }
+  })
+  const local = tempLocal()
+  const out = await transport.streamFile('/usr/bin/ssh', ['host', 'cat -- /srv/f'], COPY_SETTINGS, undefined, 30, 'file transfer', { direction: 'download', localPath: local.path, maxBytes: 1024 })
+  assert.equal(out.outcome, 'timeout', 'a deadline that stops a statusless child is the deadline answering, whatever the clean EOF looked like')
+  assert.equal(out.exitCode, null)
+  assert.equal(out.bytes, 0, 'and the count it quotes is the bytes that arrived, not a promise about the file')
+  assert.equal(spawned[0].terminations >= 1, true, 'the copy still went through the managed teardown')
+  // The sibling no one was watching: a signalled child with no abort in flight is an
+  // error too — an exit status is the only thing allowed to call a copy finished.
+  const unwatched = new SshTransport({
+    subprocess: {
+      resolveExecutable: async () => '/usr/bin/ssh',
+      spawn (spec) {
+        const stdout = new Readable({ read () {} })
+        stdout.push(null)
+        return {
+          stdout,
+          stdin: undefined,
+          collected: { stderr: reader('') },
+          done: Promise.resolve({ exitCode: null, signal: 'SIGKILL' }),
+          terminate () {},
+          waitForExit: async () => true
+        }
+      }
+    }
+  })
+  const orphan = await unwatched.streamFile('/usr/bin/ssh', ['host', 'cat -- /srv/f'], COPY_SETTINGS, undefined, 5_000, 'file transfer', { direction: 'download', localPath: tempLocal().path, maxBytes: 1024 })
+  assert.equal(orphan.outcome, 'error', 'a child that died on a signal nobody asked for is not a completed copy either')
+  assert.match(String(orphan.error), /without an exit status/u, 'and the reason says which evidence is missing')
 })
 
 test('the transfer lane comes back whole after success, failure, a timeout, and a cancellation', async () => {

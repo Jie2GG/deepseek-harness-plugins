@@ -17,6 +17,115 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.37
+
+The directed round that took the 0.0.36 source audit at its word: two of its
+findings were real defects and are fixed with counterexamples, two were
+promises the code had not kept, and one was a protocol the audit had already
+credited correctly — kept as it was, with the claim now actually enforced.
+
+- **Fixed (K-4, blocker) — a stopped copy cleans up after *itself*, not after
+  everything that looks like it.** Through 0.0.36 the cleanup of a stranded
+  server-side mover was `pkill -f -- '[c]at -- <remote path>'`: correct about not
+  matching its own shell, wrong about concurrency, because the path is the one thing
+  two copies of the same file share. Measured on a live server (`proxy`, 2026-11-19
+  10:40): two movers parked on one fifo, one path-wide `pkill`, exit 0 — **zero
+  survivors**, i.e. the interrupted copy killed the running one. A remote path may
+  also contain `[`, `*`, `?`, `+` and `.`, all regular-expression syntax to
+  `pkill -f`, so the pattern was not even a literal search. Each mover now reports
+  itself on stderr (`dsh-mover <pid> <tag>`) before it can block: a download
+  `exec`s into the mover so the reported number *is* the mover, and an upload's
+  publish step backgrounds its `cat` and reports `$!` while `wait` still hands the
+  copy's status to the `&&` that guards the part file. The cleanup aims at that one
+  pid and confirms it first — reading `/proc/<pid>/cmdline` one argument at a time
+  and comparing the three arguments against the argv this copy was given, as plain
+  strings, with the path word assigned so `~/x` expands the same way it did for the
+  mover. Six verdicts each get their own sentence: `gone` says nothing (the mover
+  left with the channel), `killed` and `killed-unverified` name the pid and state
+  whether the command line confirmed it, `foreign` says the number is running
+  something else and was left alone, `refused` says the server would not let this
+  user signal it, and `unanswered` says the cleanup got no reply. A copy that never
+  learned a pid kills nothing and names the residual. `pkill`/`pgrep` are no longer
+  needed at all, which widens the servers this can tidy rather than narrowing them.
+  The task identity is one tag, now four entropy bytes wide, carried in both the temp
+  file name and the mover marker. `scripts/live-check.mjs --case=reap` proves it on a
+  real server: after one copy's cleanup the other's mover is still parked, still
+  deliverable, and its channel closes with the payload whole; a wrong path word
+  returns `foreign` and costs that mover nothing; a recycled pid running `sleep` is
+  refused; three repeated stops leave nothing parked.
+- **Fixed (K-6, blocker) — the byte count the read states is now consumed, and it
+  closes a silent content loss.** The audit credited 0.0.36 with framing the body by
+  its declared length; the protocol did state it (`ssh-plugin-bytes:` from the
+  server's own `wc -c`) and `splitEditVersion` surfaced it, but `ops.ts` destructured
+  `version`, `digest` and `content` and **threw the count away**, so no caller ever
+  proved the body was the file. Counterexample, run against a real `/bin/sh` and a
+  file that is not valid UTF-8: a body starting `FF 41 0A` with the word `TARGET`
+  later in it, one ASCII word replaced, and every check 0.0.36 owned passed — the
+  length matched the length that was sent, the digest matched the digest of the bytes
+  that were sent — while the file's own `FF` had become `EF BF BD` on disk, reported
+  as `contentVerified: true`. `verifyEditBody` now compares the split's body against
+  the stated digest first and the stated count second, before the match and before a
+  `dryRun` preview, and refuses with the reason (`not-the-same-bytes`, `body-short`,
+  `body-long`) — the file is never copied, truncated or written on a body this call
+  cannot vouch for. A stated SHA-256 that is not 64 hex is read as *no* digest (a
+  sentence about the file is not a fingerprint of its bytes), which sends such a
+  server to the pre-write refusal rather than to a comparison against text. The
+  protocol itself is unchanged: 0.0.37 found no defect in the framing design, so no
+  marker was added, removed or reordered, and the legacy two-marker read is still
+  accepted (evidence falls back to the digest, then to `none`).
+- **Fixed — a copy stopped by its own teardown is no longer reported as finished.**
+  Found while measuring K-4 on a live server, and in K-4's own terms: a download
+  cancelled while its fresh connection was still authenticating came back as
+  `moved` with **0 bytes** — its stdout reached a clean end-of-file because the
+  process that owned it had died, and the child had no exit status because it died on
+  a signal, and `streamFile` read that pair as a completed copy. The destination was
+  created empty, the transfer said nothing was wrong, and the mover cleanup a stopped
+  copy owes the server was skipped because nothing had been stopped. A status-less
+  child is now an interrupted copy whenever this call was the one standing at the
+  teardown, and an `error` with the missing evidence named even when it was not: an
+  exit status is the only thing allowed to call a copy finished.
+- **Fixed — the eight operation slots held back for foreground calls are enforced,
+  not promised.** `config.ts` said "even with the job allowance full, eight slots
+  always stay open" while its schema let `maxRunningJobs` be configured to 16, which
+  is the whole table: a profile that did so could busy-lock the plugin behind eight
+  abandoned background commands and every foreground call answered `busy`. The
+  ceiling is now a number (`MAX_JOB_LANES = MAX_CONCURRENT_OPS - FOREGROUND_RESERVED_OPS`)
+  that the schema refuses above, that `bounds.ts` caps a settings object still
+  carrying more (with a note the settings page shows, so the displayed number is the
+  one in force), and that `transport.ts` clamps again at `laneRoom` and `#takeLane`
+  — the refusal and the admission cannot quote different numbers. The job lane's
+  running count and its ceiling are now both reported by `list` and printed on the
+  bounds card, and the job refusal's hint no longer suggests raising a ceiling that
+  cannot be raised. `scripts/live-check.mjs --case=jobcap` measures it with real
+  children: eight jobs admitted with a 16 asked for, the ninth refused "At most 8",
+  foreground calls running freely beside a full job lane, and a one-job lane holding
+  exactly one job.
+- **Fixed — the settings page no longer shows a probe timeout the Host does not use.**
+  The browser's fallback for a Host that predates the `bounds` payload said
+  `10 000 ms` while the Host had been dialing with `30 000 ms` since 0.0.23. The
+  fallback is now the same default, and a new suite
+  (`tests/client-fallbacks.test.mjs`) compares every number the page falls back to
+  against the running Host's own `list` payload and against `config.ts`, so neither
+  half can drift again; it also asserts the page prefers the Host's live value
+  wherever one is sent, and that every label it renders is defined in both
+  dictionaries. The row's copy was reworded from "Probe timeout is fixed at" to
+  "Probe timeout in force", which is what a retunable ceiling is.
+- **Changed — `lib/` is emptied before every build, and a stale artifact is gone.**
+  `tsc` writes and overwrites but never forgets, and `files` ships `lib/`, so
+  `lib/ssh.js` and `lib/ssh.d.ts` — the last build of the probe module that was split
+  up in 0.0.31, imported by nothing — were still being packed and installed. The
+  build now runs `scripts/clean-lib.mjs` first, so every byte in `lib/` is one the
+  current compiler put there.
+
+K-1 and K-8 were verified rather than rewritten. K-1's pre-write capability gate is
+intact and its `dryRun` wording was corrected: a preview on a server that cannot
+attest the bytes no longer promises that "the same call without dryRun applies this
+change" — that call is refused, and no setting of the flag makes an uncheckable
+overwrite happen. K-8's incremental spill accounting is intact and now also pinned
+for several jobs growing at once: three interleaved reports bill each path to its
+newest offset, count three files rather than nine reports, keep billing files that
+really grew after the budget was spent, and refund nothing when a child settles.
+
 ## 0.0.36
 
 The directed close-out the 0.0.35 release-readiness report left as known

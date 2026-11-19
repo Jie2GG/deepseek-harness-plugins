@@ -633,7 +633,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
           {
             type: 'object',
             additionalProperties: false,
-            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'get_connection', required: true }, selectedId: { type: 'string' }, selectedLabel: { type: 'string' }, selectedHost: { type: 'string' }, selectedUser: { type: 'string' }, selectedVia: { type: 'string' }, transfers: { type: 'integer' }, targets: { type: 'array', items: { type: 'object', properties: TARGET_SHAPE, additionalProperties: false } }, count: { type: 'integer' } },
+            properties: { ...OUTCOME_SHAPE, action: { type: 'string', const: 'get_connection', required: true }, selectedId: { type: 'string' }, selectedLabel: { type: 'string' }, selectedHost: { type: 'string' }, selectedUser: { type: 'string' }, selectedVia: { type: 'string' }, transfers: { type: 'integer' }, jobs: { type: 'integer' }, targets: { type: 'array', items: { type: 'object', properties: TARGET_SHAPE, additionalProperties: false } }, count: { type: 'integer' } },
           },
           {
             type: 'object',
@@ -730,7 +730,7 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
             host: resolved.host,
             ...(resolved.user === undefined ? {} : { user: resolved.user }),
             via: (call.target ?? '').trim() !== '' ? 'argument' : stored !== undefined ? 'session' : 'only-target',
-          }, listed.pool?.transfers) as never
+          }, listed.pool?.transfers, listed.pool?.jobs) as never
         }
         case 'exec': {
           if (call.command === undefined || call.command.trim() === '') {
@@ -911,6 +911,8 @@ export function buildRemoteTool(deps: RemoteToolDeps): ToolDefinition {
  * @param connections - the stored rows.
  * @param settings - the shared ceilings, folded into the summary line.
  * @param selected - the resolved target and how it was reached.
+ * @param transfers - how many copies the transfer lane is holding right now.
+ * @param jobs - how many background jobs the job lane is holding right now.
  * @returns the canonical payload.
  */
 function listedResult(
@@ -918,6 +920,7 @@ function listedResult(
   bounds: Awaited<ReturnType<Ops['list']>>['bounds'],
   selected?: { id: string; label: string; host: string; user?: string | undefined; via: string } | undefined,
   transfers?: number | undefined,
+  jobs?: number | undefined,
 ): Record<string, unknown> {
   return {
     action: 'get_connection',
@@ -928,6 +931,9 @@ function listedResult(
     // model that can see the lane is one that does not have to guess whether to
     // wait, kill a job, or give up on the ceiling entirely.
     ...(transfers === undefined ? {} : { transfers }),
+    // The job lane is the ceiling a model can run into without ever being waiting on
+    // the work that filled it — eight backgrounded commands and the ninth is refused.
+    ...(jobs === undefined ? {} : { jobs }),
     targets: connections.map(row => ({
       id: row.id,
       label: row.label,
@@ -955,7 +961,7 @@ function listedResult(
       // Stated as default / cap / in force, because a call that asks above the cap
       // is capped rather than refused — and a model that cannot see the cap has no
       // way to know its number was changed on it.
-      : `Ceilings as this Host resolves them (default to cap, and what is in force): command ${String(bounds.timeoutMs)}–${String(bounds.maxTimeoutMs)} ms, in force ${String(bounds.effective.remoteTimeoutMs)} ms; output ${String(bounds.outputBytes)}–${String(bounds.maxOutputBytes)} bytes per stream, in force ${String(bounds.effective.maxOutputBytes)}; transfer ${String(bounds.transferBytes)}–${String(bounds.maxTransferBytes)} bytes, in force ${String(bounds.effective.maxTransferBytes)}; file copies at once ${String(bounds.effective.maxConcurrentTransfers ?? '—')}${transfers === undefined ? '' : `, ${String(transfers)} running now`}. A number past the cap is capped to it, not refused.`,
+      : `Ceilings as this Host resolves them (default to cap, and what is in force): command ${String(bounds.timeoutMs)}–${String(bounds.maxTimeoutMs)} ms, in force ${String(bounds.effective.remoteTimeoutMs)} ms; output ${String(bounds.outputBytes)}–${String(bounds.maxOutputBytes)} bytes per stream, in force ${String(bounds.effective.maxOutputBytes)}; transfer ${String(bounds.transferBytes)}–${String(bounds.maxTransferBytes)} bytes, in force ${String(bounds.effective.maxTransferBytes)}; file copies at once ${String(bounds.effective.maxConcurrentTransfers ?? '—')}${transfers === undefined ? '' : `, ${String(transfers)} running now`}; background jobs at once ${String(bounds.maxRunningJobs ?? '—')}${jobs === undefined ? '' : `, ${String(jobs)} running now`}, with ${String(bounds.foregroundReservedOps ?? '—')} of ${String(bounds.concurrentOps ?? '—')} operation slots held back for calls that wait. A number past the cap is capped to it, not refused.`,
   }
 }
 

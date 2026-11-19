@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, symlinkSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { buildEditRead, buildEditWrite, buildEditRestore, splitEditVersion, digestHex, parseWriteReport, parseRepairReport } from '../lib/edit.js'
+import { buildEditRead, buildEditWrite, buildEditRestore, splitEditVersion, digestHex, parseWriteReport, parseRepairReport, verifyEditBody } from '../lib/edit.js'
 import { shellQuote } from '../lib/transport.js'
 
 const sha = text => createHash('sha256').update(text, 'utf8').digest('hex')
@@ -363,3 +363,100 @@ test('only a result a digest vouches for is allowed to drop the copy', { skip: S
 // The temp tree is the fixture; the process owns it, so it goes with the run.
 if (typeof globalThis.after === 'function') globalThis.after(() => rmSync(dir, { recursive: true, force: true }))
 else process.on('exit', () => rmSync(dir, { recursive: true, force: true }))
+
+// ── K-6: the framing the server states has to be honoured by the caller ──────
+//
+// `splitEditVersion` surfaced `ssh-plugin-bytes` and nothing consumed it, so 0.0.36
+// shipped a protocol that could *describe* a damaged body and would edit it anyway.
+// These run the read under a real /bin/sh, hand the body to `verifyEditBody`, and
+// refuse or accept on the evidence the shell itself gave — then show that a refusal
+// left the file exactly as it was.
+
+/** Read one file the way an edit does, and return the split plus its verdict. */
+function readAndFrame (file, bin = full) {
+  const res = run(buildEditRead(shellQuote(file)), { bin })
+  assert.equal(res.status, 0, 'the read ran')
+  const parsed = splitEditVersion(res.stdout)
+  return {
+    res,
+    parsed,
+    check: verifyEditBody(parsed.content, {
+      ...(parsed.bodyBytes === undefined ? {} : { bytes: parsed.bodyBytes }),
+      ...(parsed.digest === undefined ? {} : { digest: parsed.digest }),
+    }),
+  }
+}
+
+test('a file whose bytes are not valid UTF-8 is refused by the digest, not rewritten as replacements', { skip: SKIP }, () => {
+  // The content-loss case the work order calls a release blocker: a latin-1 file read
+  // through a decoding transport comes back as text that *looks* fine, and an edit
+  // would push the replacement characters into the file. `wc -c` alone cannot see it
+  // (the length moved, but a reader who trusts the length has no way to know which
+  // bytes were invented); the server's own digest can.
+  const f = join(dir, 'latin1')
+  const raw = Buffer.from([0xff, 0xfe, 0x41, 0x0a, 0x80, 0x42])
+  writeFileSync(f, raw)
+  const { parsed, check } = readAndFrame(f)
+  assert.equal(parsed.content.includes('\uFFFD'), true, 'the decode invented replacement characters')
+  assert.equal(check.ok, false, 'and the guard refuses to edit them')
+  assert.equal(check.reason, 'not-the-same-bytes')
+  assert.equal(Buffer.compare(readFileSync(f), raw), 0, 'the file on disk is still the bytes it was')
+})
+
+test('bodies made of blank lines, CJK, emoji, tabs and NULs frame as themselves', { skip: SKIP }, () => {
+  const cases = {
+    empty: '',
+    'leading and trailing blank lines': '\n\nmiddle\n\n',
+    'no final newline': 'tail without a newline',
+    'CJK and emoji': '中文与 emoji 🎉 混排\nsecond 行\n',
+    'tabs and carriage returns': 'a\tb\r\nc\td\n',
+    'a NUL byte': 'before\0after\n',
+    'the plugin\u2019s own first line': 'ssh-plugin: \nsecond line\n',
+    'all three markers as the first lines': 'ssh-plugin: 1|2|3\nssh-plugin-sha256: zz\nssh-plugin-bytes: 7\nrest\n',
+  }
+  for (const [label, body] of Object.entries(cases)) {
+    const f = join(dir, `frame-${label.replace(/[^a-z0-9]/giu, '-')}`)
+    writeFileSync(f, body)
+    const { parsed, check } = readAndFrame(f)
+    assert.equal(parsed.content, body, `${label}: the read hands the file back whole`)
+    assert.deepEqual(check, { ok: true, evidence: 'digest' }, `${label}: and the framing proves it`)
+    assert.equal(Buffer.compare(readFileSync(f), Buffer.from(body)), 0, `${label}: the file stands`)
+  }
+  // A 256 KiB body, because a framing rule that only works on small files is a
+  // framing rule that works on the test.
+  const big = join(dir, 'frame-big')
+  const bigBody = '中文字符abc\n'.repeat(20_000)
+  writeFileSync(big, bigBody)
+  assert.ok(Buffer.byteLength(bigBody) > 200_000, 'the body is big enough to be worth calling big')
+  const framed = readAndFrame(big)
+  assert.equal(framed.parsed.content, bigBody, 'a long body is not clipped by the split')
+  assert.deepEqual(framed.check, { ok: true, evidence: 'digest' })
+  assert.equal(framed.parsed.bodyBytes, Buffer.byteLength(bigBody), 'and the count the server stated is its real size')
+})
+
+test('a body the stream clipped, or lengthened with a line of its own, is refused by the count', { skip: SKIP }, () => {
+  // Without a checksum tool the byte count is the only claim the read carries, so it
+  // has to answer for both directions of disagreement. `noTool` is a PATH with no
+  // sha256sum, shasum or openssl on it — the same shape as the tool-less servers this
+  // protocol was designed around.
+  const f = join(dir, 'framing-count')
+  writeFileSync(f, original)
+  const { parsed, res } = readAndFrame(f, noTool)
+  assert.equal(parsed.digest, undefined, 'this server states no digest')
+  assert.equal(parsed.bodyBytes, Buffer.byteLength(original))
+  assert.deepEqual(verifyEditBody(parsed.content, { bytes: parsed.bodyBytes }), { ok: true, evidence: 'bytes' })
+  // Short by the last line: what a clipped channel hands back.
+  const clipped = verifyEditBody(parsed.content.slice(0, 6), { bytes: parsed.bodyBytes })
+  assert.equal(clipped.ok, false)
+  assert.equal(clipped.reason, 'body-short')
+  // Long by a line the server printed after the payload: what a banner looks like.
+  const extra = verifyEditBody(`${parsed.content}a warning the file never had\n`, { bytes: parsed.bodyBytes })
+  assert.equal(extra.ok, false)
+  assert.equal(extra.reason, 'body-long')
+  // And the same noise, seen through a digest: the stronger claim answers for it.
+  const withDigest = verifyEditBody(`${parsed.content}a warning the file never had\n`, { bytes: parsed.bodyBytes, digest: sha(original) })
+  assert.equal(withDigest.ok, false)
+  assert.equal(withDigest.reason, 'not-the-same-bytes')
+  assert.equal(readFileSync(f, 'utf8'), original, 'and through all of it the file kept what it had')
+  assert.ok(res.stdout.startsWith('ssh-plugin: '), 'the read really did run against that PATH')
+})

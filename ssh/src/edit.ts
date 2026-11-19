@@ -235,6 +235,97 @@ export const EDIT_CONTENT_MISMATCH = 28
 /** The write ended at the right size, and this server cannot state a digest to prove it is the right content. */
 export const EDIT_CONTENT_UNVERIFIED = 29
 
+/** How one read's body failed to be the file it came from. */
+export type EditBodyFault = 'body-short' | 'body-long' | 'not-the-same-bytes'
+
+/** What {@link verifyEditBody} says about the body a read handed back. */
+export type EditBodyCheck =
+  | {
+      /** The body is the file, as far as this read's own claims can prove. */
+      ok: true
+      /** Which claim the proof rested on: a digest, a byte count, or neither. */
+      evidence: 'digest' | 'bytes' | 'none'
+    }
+  | {
+      ok: false
+      /** How the body and the file parted company. */
+      reason: EditBodyFault
+      /** Bytes the body in hand actually is. */
+      bytes: number
+      /** The byte count the server stated for the body, when it stated one. */
+      declared?: number
+      message: string
+      hint: string
+    }
+
+/**
+ * Prove that the body a read handed back **is** the file the server measured.
+ *
+ * The read states two things about the bytes that follow its header: how many there
+ * are (`ssh-plugin-bytes:`, counted by the server with `wc -c`) and what they digest
+ * to (`ssh-plugin-sha256:`, computed by the server over the file it was about to
+ * hand over). Stating them is only half of a guard. Until this function existed the
+ * caller parsed the byte count, surfaced it, and threw it away: an edit ran on
+ * whatever text the split happened to produce, and a body that was short, or long by
+ * a line the server added after the payload, or not the file's bytes at all once the
+ * transport decoded it, went quietly into the write that replaced the file. That is
+ * the class of fault this closes, and it is why the length is used as a **check on
+ * the whole body** rather than as a slice: the bytes the server counted have already
+ * been decoded into text by the time anyone here can count them, and cutting a
+ * decoded string at a byte offset is how a UTF-8 character gets split in half.
+ *
+ * The digest is the stronger of the two claims, and it is computed here over exactly
+ * the body that was split out — not over the raw stream and not over what the write
+ * is about to send. A file that is not valid UTF-8 round-trips through this read into
+ * a text whose bytes are *similar in shape and different in fact* (each undecodable
+ * byte comes back as `EF BF BD`), and only a digest notices that. So:
+ *
+ * - a digest stated and matching → **the body is the file**, byte for byte;
+ * - a digest stated and not matching → the body is not the file the server measured,
+ *   whether the file moved mid-read or the read had to decode bytes that are not text;
+ * - no digest, a byte count stated → the length is all this server can support, and a
+ *   length that disagrees with the body is a truncated or an extended body either way;
+ * - neither stated (an older read, or a server whose tools could not run) → nothing is
+ *   claimed, and the write path's own guards stand as they did.
+ *
+ * A refusal here happens **before** anything is copied, truncated, or written, so the
+ * server keeps its file.
+ * @param body - the text {@link splitEditVersion} produced, exactly as held.
+ * @param declared - what the read's header stated about those bytes.
+ * @returns the verdict, with the reader-facing sentence when the body failed.
+ */
+export function verifyEditBody (
+  body: string,
+  declared: { bytes?: number | undefined; digest?: string | undefined },
+): EditBodyCheck {
+  const bytes = Buffer.byteLength(body, 'utf8')
+  const { digest, bytes: count } = declared
+  if (digest !== undefined) {
+    if (digestHex(body) === digest) return { ok: true, evidence: 'digest' }
+    return {
+      ok: false,
+      reason: 'not-the-same-bytes',
+      bytes,
+      ...(count === undefined ? {} : { declared: count }),
+      message: `The ${String(bytes)} bytes this read handed over do not digest to the SHA-256 the server stated for the file${count === undefined ? '' : count === bytes ? `, although the length matches the ${String(count)} bytes it counted` : `, and the length is not the ${String(count)} bytes it counted either`}, so the text in hand is not the file on disk and an edit here would write bytes the server never agreed to.`,
+      hint: 'A file that is not valid UTF-8 comes back through this read as text whose bytes are not the ones on disk; a file that changed while it was being read does the same. Read it with `read` or copy it with `download` to see what is really there, and replace the whole file with `write` if that is what is wanted.',
+    }
+  }
+  if (count !== undefined) {
+    if (bytes === count) return { ok: true, evidence: 'bytes' }
+    const short = bytes < count
+    return {
+      ok: false,
+      reason: short ? 'body-short' : 'body-long',
+      bytes,
+      declared: count,
+      message: `The server said ${String(count)} bytes of file would follow its header and this read carries ${String(bytes)}, so the body this read produced is ${short ? 'short of' : 'longer than'} the file on disk: an edit here could not put the whole file back.`,
+      hint: `Read the file again${short ? ' — the channel stopped short of the end of it' : ' — the stream held more than the file itself'}. If it reads back whole, re-run the edit; if it does not, the ceiling is the thing to raise (Settings → Remote connections).`,
+    }
+  }
+  return { ok: true, evidence: 'none' }
+}
+
 /**
  * The read an edit begins from: the file's bytes, and what the server says about
  * those bytes at the same moment.
@@ -276,6 +367,17 @@ export function buildEditRead (pathArg: string): string {
 const STAT_TOKEN = /^\d+\|\d+\|/u
 /** The byte count a `wc -c | tr -dc 0-9` can produce: empty when it could not run. */
 const DECIMAL_OR_EMPTY = /^[0-9]*$/u
+/**
+ * A SHA-256 as this protocol states one: 64 lowercase hex, nothing else.
+ *
+ * A value in another shape is not a digest the plugin can stand on. `remoteDigest`
+ * reduces the three checksum tools it knows to bare hex; anything else that comes
+ * back — a tool complaining it cannot open the file, a wrapper printing its own
+ * banner — is text about the file, not a fingerprint of its bytes. Treating it as
+ * "no digest" is the fail-closed reading: the edit is then refused before anything
+ * is written rather than written and compared against a value nothing defines.
+ */
+const DIGEST_HEX = /^[0-9a-f]{64}$/u
 
 /**
  * Split the markers a read answered with from the file itself, without ever
@@ -344,13 +446,17 @@ export function splitEditVersion (text: string): {
       rest = first.restIfCommitted
     }
   }
-  // 2. the digest marker — only reached when a version marker was recognized.
+  // 2. the digest marker — only reached when a version marker was recognized. A
+  // value that is not 64 hex is the server saying something *about* the file rather
+  // than a fingerprint of its bytes, and it is read as no digest at all: the line is
+  // still consumed (it is a header line), but nothing downstream may claim a digest
+  // guard this server never stated.
   if (sawVersion) {
     const second = peekLine(rest)
     if (second !== undefined && /^ssh-plugin-sha256:/u.test(second.line)) {
       sawDigest = true
       const value = second.line.replace(/^ssh-plugin-sha256:[ \t]*/u, '').trim()
-      digest = value === '' ? undefined : value
+      digest = DIGEST_HEX.test(value) ? value : undefined
       rest = second.restIfCommitted
     }
     // else: the line here is the file's own first line; leave it in the body.

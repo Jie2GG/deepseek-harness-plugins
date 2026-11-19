@@ -176,3 +176,40 @@ test('a background file that grows is charged up to its newest size, not frozen 
   assert.match(String(refused.note), /spill budget is spent/u)
   assert.match(String(refused.note), /1200 of 1000 bytes already written/u)
 })
+
+test('three jobs growing at once top up the same ledger without stepping on each other', () => {
+  // K-8, the part one path cannot show: a busy stretch has several background jobs
+  // re-reading their own spill files, and their reports arrive interleaved. Each path
+  // keeps its own high-water mark, and the total is the sum of the marks — not the sum
+  // of every report, and not the first report of each file frozen in place.
+  const budget = new spill.SpillBudget(1_000, 8)
+  const reports = [
+    ['/tmp/a.log', [100, 400, 400, 900]],
+    ['/tmp/b.log', [50, 50, 300]],
+    ['/tmp/c.log', [200]],
+  ]
+  // Interleave them the way three settled children would, round by round.
+  for (let round = 0; round < 4; round += 1) {
+    const batch = reports
+      .map(([path, sizes]) => (sizes[round] === undefined ? [] : [{ path, bytes: sizes[round] }]))
+      .flat()
+    budget.observe(batch)
+  }
+  assert.equal(budget.used, 900 + 300 + 200, 'the ledger holds each file at its newest size')
+  assert.equal(budget.files, 3, 'and counts three files, not nine reports')
+  // A spent budget authorizes no new spill file, and that is the whole guarantee: the
+  // asking stops. The bytes the earlier children already left on disk stay counted.
+  const stopped = budget.ask(64)
+  assert.equal(stopped.maxBytes, 0, 'a spent budget grants nothing further')
+  assert.match(String(stopped.note), /spill budget is spent \(1400 of 1000 bytes already written\)/u, 'and names which limit answered')
+  assert.equal(budget.ask(8).maxBytes, 0, 'a smaller ask is refused too: the grant is never cut to the remainder')
+  // A job settling is not a refund. The budget belongs to the Host process, and a
+  // spill file outlives the child that wrote it, so the ledger stays where the bytes
+  // are until the process itself ends.
+  budget.observe([{ path: '/tmp/a.log', bytes: 900 }])
+  assert.equal(budget.used, 1_400, 'a re-report at the same size charges nothing')
+  assert.equal(budget.files, 3, 'and the file count stands at three, not at the number of reports')
+  budget.observe([{ path: '/tmp/a.log', bytes: 1_500 }])
+  assert.equal(budget.used, 2_000, 'while a file that really grew is topped up by the difference')
+  assert.equal(budget.ask(64).maxBytes, 0, 'and a refusal spends nothing: the total moved because the disk moved')
+})

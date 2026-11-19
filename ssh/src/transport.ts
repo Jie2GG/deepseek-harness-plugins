@@ -25,7 +25,7 @@ import { createReadStream, createWriteStream } from 'node:fs'
 import { Transform } from 'node:stream'
 import type { Readable, Writable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
-import { MAX_CONCURRENT_OPS, SCP_EXECUTABLE, SCP_FALLBACK_PATHS, SSH_EXECUTABLE, SSH_FALLBACK_PATHS } from './storage.ts'
+import { MAX_CONCURRENT_OPS, MAX_JOB_LANES, SCP_EXECUTABLE, SCP_FALLBACK_PATHS, SSH_EXECUTABLE, SSH_FALLBACK_PATHS } from './storage.ts'
 import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
 
 /**
@@ -166,6 +166,27 @@ export const TRANSFER_LANE = 'file transfers'
 
 /** The reservation kind one explicitly backgrounded command counts against. */
 export const JOB_LANE = 'background jobs'
+
+/**
+ * The cap a reservation is admitted **against**, which is not always the cap it was
+ * asked with.
+ *
+ * A background job can outlive every clock this plugin arms, so `MAX_JOB_LANES` of the
+ * `MAX_CONCURRENT_OPS` operation slots are held back for calls a reader is waiting on.
+ * `bounds.ts` clamps the configured number to that already, and this is the same rule
+ * stated where the slot is actually taken: a caller that hands a ceiling in from
+ * somewhere else — a settings object built by an older bounds layer, a hand-written
+ * one in a test — still cannot let jobs fill the last of the table. Both the
+ * ask-first check ({@link SshTransport.laneRoom}) and the take (`#takeLane`) read the
+ * number through here, so a refusal and an admission can never disagree about what the
+ * ceiling was.
+ * @param lane - the reservation kind and the ceiling its caller asked for.
+ * @returns the ceiling this transport will hold that kind to.
+ */
+export function effectiveLaneCap (lane: { readonly kind: string; readonly cap: number }): number {
+  if (lane.kind !== JOB_LANE) return lane.cap
+  return Math.min(lane.cap, MAX_JOB_LANES)
+}
 
 /**
  * How long to wait for the provider to drain the pipes after termination.
@@ -761,7 +782,7 @@ export class SshTransport {
    */
   laneRoom(lane: { readonly kind: string; readonly cap: number }): boolean {
     if (this.#inFlight >= MAX_CONCURRENT_OPS) return false
-    return (this.#lanesByKind.get(lane.kind) ?? 0) < lane.cap
+    return (this.#lanesByKind.get(lane.kind) ?? 0) < effectiveLaneCap(lane)
   }
 
   /** Whether this Host can share connections at all, and why not when it cannot. */
@@ -1026,10 +1047,16 @@ export class SshTransport {
       })
     }
     if (lane !== undefined) {
+      // The cap the refusal quotes is the cap the admission used: a reader told "at
+      // most 12" by a number a profile asked for, while this transport only ever
+      // admitted 8, would go looking for a ceiling that was never in force.
+      const cap = effectiveLaneCap(lane)
       const used = this.#lanesByKind.get(lane.kind) ?? 0
-      if (used >= lane.cap) {
-        throw new SshError('busy', `At most ${String(lane.cap)} ${lane.kind} may run at once, and all ${String(lane.cap)} slots are taken.`, {
-          hint: 'Wait for one to finish (it also frees room for other calls), stop a job with `job_kill`, or raise the ceiling in the plugin\u2019s configuration.',
+      if (used >= cap) {
+        throw new SshError('busy', `At most ${String(cap)} ${lane.kind} may run at once, and all ${String(cap)} slots are taken.`, {
+          hint: lane.kind === JOB_LANE
+            ? `Wait for one to finish, or stop a job with \`job_kill\`. ${String(MAX_JOB_LANES)} is as high as this ceiling goes: a job holds its slot until it settles, so ${String(MAX_CONCURRENT_OPS - MAX_JOB_LANES)} of the ${String(MAX_CONCURRENT_OPS)} operation slots are held back for calls a reader is waiting on.`
+            : 'Wait for one to finish (it also frees room for other calls), stop a job with `job_kill`, or raise the ceiling in the plugin\u2019s configuration.',
         })
       }
       this.#lanesByKind.set(lane.kind, used + 1)
@@ -1362,7 +1389,21 @@ export class SshTransport {
       // Only a copy that did not finish may be blamed on the clock: a deadline
       // that fires a beat after a completed copy is not a timeout, and calling it
       // one sends the reader off to fix a server that was answering normally.
-      const unfinished = child === undefined || state.ended === false
+      //
+      // A copy is equally not "finished" because its channel went quiet. A child this
+      // plugin stopped reports **no exit status at all** — it died on a signal — and its
+      // stdout reaches a clean end-of-file only because the process that owned it is
+      // gone. 0.0.36 read that pair (pump ended + child settled) as a clean exit and
+      // handed back `exit` with `exitCode: null`, which the transfer layer then counted
+      // as a copy that had arrived: measured on a live server, a download cancelled
+      // while its fresh connection was still authenticating came back as `moved` with
+      // **0 bytes**, wrote an empty destination, skipped the mover cleanup a stopped
+      // copy owes the server, and told the reader the file was whole. No number of
+      // bytes can distinguish those two stories; an exit status can. So a child that
+      // left no status is an interrupted copy whenever this call was the one standing
+      // at the teardown, and an error — never a success — even when it was not.
+      const statusless = child !== undefined && child.exitCode === null
+      const unfinished = child === undefined || state.ended === false || (statusless && d.signal.aborted)
       const stopped = unfinished && d.signal.aborted
         ? (timeoutOf(d.signal, SSH_TIMEOUT) === undefined ? 'cancelled' : 'timeout')
         : undefined
@@ -1371,6 +1412,8 @@ export class SshTransport {
         // over, but nothing here can honestly quote an exit status.
         spawnFailure = 'The ssh child did not settle before its pipes were given up on.'
       }
+      const statuslessNote = 'The copy ended without an exit status: the local ssh died on a signal, so this plugin cannot say how much of the file arrived.'
+      const failureNote = spawnFailure ?? state.error ?? (statusless && stopped === undefined ? statuslessNote : undefined)
       const stdoutRead = handle.collected.stdout?.readFrom(0)
       const stderrRead = handle.collected.stderr?.readFrom(0)
       // Why the copy is over, in the order a reader can act on: the ceiling, then a
@@ -1386,7 +1429,9 @@ export class SshTransport {
               ? 'timeout'
               : spawnFailure !== undefined
                 ? 'error'
-                : 'exit'
+                : statusless
+                  ? 'error'
+                  : 'exit'
       return {
         outcome,
         exitCode: child?.exitCode ?? null,
@@ -1394,7 +1439,7 @@ export class SshTransport {
         stdout: stdoutRead?.text ?? '',
         stderr: stderrRead?.text ?? '',
         durationMs: Date.now() - startedAt,
-        ...(spawnFailure === undefined && state.error === undefined ? {} : { error: spawnFailure ?? state.error }),
+        ...(failureNote === undefined ? {} : { error: failureNote }),
       }
     } finally {
       this.#releaseLane(controller, lane)

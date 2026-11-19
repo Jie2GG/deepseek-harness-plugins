@@ -1,6 +1,7 @@
 // The match-and-replace rules of `edit`: exact, counted, and refusing to guess.
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { applyEdit } from '../lib/edit.js'
 
 const req = over => ({ content: 'alpha\nbeta\ngamma\n', oldText: 'beta', newText: 'BETA', ...over })
@@ -107,9 +108,10 @@ test('the edit read asks for the file, its version, and its digest in one round 
 })
 
 test('the version and digest markers split from the file without touching either', () => {
-  const split = guards.splitEditVersion("ssh-plugin: 7|5|2026-01-01 00:00:00.0 +0800\nssh-plugin-sha256: aa\nfirst line\nsecond\n")
+  const stated = 'a'.repeat(64)
+  const split = guards.splitEditVersion(`ssh-plugin: 7|5|2026-01-01 00:00:00.0 +0800\nssh-plugin-sha256: ${stated}\nfirst line\nsecond\n`)
   assert.equal(split.version, '7|5|2026-01-01 00:00:00.0 +0800')
-  assert.equal(split.digest, 'aa')
+  assert.equal(split.digest, stated)
   assert.equal(split.content, 'first line\nsecond\n')
   // A server with no checksum tool prints the marker empty: the edit runs, and the
   // result says the content was never digested.
@@ -118,9 +120,16 @@ test('the version and digest markers split from the file without touching either
   assert.equal(noTool.digest, undefined)
   assert.equal(noTool.content, 'body\n')
   // A server whose `stat` cannot answer leaves the first marker empty.
-  const blind = guards.splitEditVersion('ssh-plugin: \nssh-plugin-sha256: bb\nbody\n')
+  const blind = guards.splitEditVersion(`ssh-plugin: \nssh-plugin-sha256: ${'b'.repeat(64)}\nbody\n`)
   assert.equal(blind.version, undefined)
-  assert.equal(blind.digest, 'bb')
+  assert.equal(blind.digest, 'b'.repeat(64))
+  // A value that is not 64 hex is the server talking *about* the file (a checksum
+  // tool that could not open it, a wrapper with its own banner), not a fingerprint of
+  // its bytes: read as no digest, so the edit is refused rather than written against
+  // a value nothing defines.
+  const odd = guards.splitEditVersion('ssh-plugin: 7|5|t\nssh-plugin-sha256: sha256sum: /f: Permission denied\nbody\n')
+  assert.equal(odd.digest, undefined, 'a non-hex digest is not a digest')
+  assert.equal(odd.content, 'body\n', 'and the marker line is still consumed as a header')
   assert.equal(blind.content, 'body\n')
   // The shape this protocol had before the digest existed is still read correctly:
   // the body starts at the second line, and nothing claims a digest was taken.
@@ -319,4 +328,86 @@ test('the digest a local edit is checked against is the digest of the bytes sent
   assert.equal(guards.digestHex('abc'), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
   assert.equal(guards.digestHex('alpha\nbeta\ngamma\n'), guards.digestHex('alpha\nbeta\ngamma\n'), 'and it is stable')
   assert.notEqual(guards.digestHex('alpha\nbeta\ngamma\n'), guards.digestHex('alpha\nBETA\ngamma\n'), 'a same-size change moves it')
+})
+
+// ── K-6: the declared length and the stated digest are a guard, not a receipt ──
+
+test('a body is proved to be the file by the digest the same read stated', () => {
+  const body = 'alpha\nbeta\n'
+  const hex = guards.digestHex(body)
+  assert.deepEqual(guards.verifyEditBody(body, { bytes: Buffer.byteLength(body), digest: hex }), { ok: true, evidence: 'digest' })
+  // The digest outranks the count: a length that agrees while the bytes do not is
+  // exactly the case `size == size` used to wave through.
+  const check = guards.verifyEditBody(body, { bytes: Buffer.byteLength(body), digest: 'f'.repeat(64) })
+  assert.equal(check.ok, false)
+  assert.equal(check.reason, 'not-the-same-bytes')
+  assert.match(check.message, /do not digest to the SHA-256/u)
+})
+
+test('an empty file digests to a real value and is not read as a missing digest', () => {
+  const empty = guards.digestHex('')
+  assert.equal(empty, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+  assert.deepEqual(guards.verifyEditBody('', { bytes: 0, digest: empty }), { ok: true, evidence: 'digest' })
+})
+
+test('multi-byte UTF-8, CJK and emoji survive as their own bytes', () => {
+  // The text the read decodes is only the file if it digests to what the server
+  // counted. These are the bodies where "it looks the same" and "it is the same"
+  // part company: a code point the transport had to guess at comes back as `EF BF BD`.
+  for (const body of ['中文\n', '😀 emoji 🎉\n', 'e\n\ttab\r\n', 'a b\n', '']) {
+    const hex = guards.digestHex(body)
+    assert.equal(Buffer.byteLength(body, 'utf8'), Buffer.byteLength(Buffer.from(body, 'utf8')), `${JSON.stringify(body)}: JS and Node agree on the length`)
+    assert.deepEqual(guards.verifyEditBody(body, { bytes: Buffer.byteLength(body), digest: hex }), { ok: true, evidence: 'digest' }, JSON.stringify(body))
+  }
+  // A file that is *not* valid UTF-8: one byte in, three bytes back.
+  const raw = Buffer.from([0xff, 0xfe, 0x41, 0x0a])
+  const decoded = raw.toString('utf8')
+  assert.equal(decoded.includes('\uFFFD'), true, 'the transport replaced what it could not decode')
+  const serverHex = createHash('sha256').update(raw).digest('hex')
+  const check = guards.verifyEditBody(decoded, { bytes: raw.length, digest: serverHex })
+  assert.equal(check.ok, false, 'and the guard notices before an edit would rewrite those bytes')
+  assert.equal(check.reason, 'not-the-same-bytes')
+})
+
+test('a declared byte count catches a body that is short or long', () => {
+  // No digest to stand on (a server with no checksum tool), so the length is the
+  // whole claim — and it still has to be honoured.
+  assert.deepEqual(guards.verifyEditBody('abc', { bytes: 3 }), { ok: true, evidence: 'bytes' })
+  const short = guards.verifyEditBody('ab', { bytes: 5 })
+  assert.equal(short.ok, false)
+  assert.equal(short.reason, 'body-short')
+  assert.equal(short.declared, 5)
+  assert.match(short.message, /short of the file on disk/u)
+  const long = guards.verifyEditBody('abcdef', { bytes: 4 })
+  assert.equal(long.ok, false)
+  assert.equal(long.reason, 'body-long')
+  assert.match(long.message, /longer than the file on disk/u)
+  // Neither claim stated: nothing is proved and nothing is invented.
+  assert.deepEqual(guards.verifyEditBody('whatever', {}), { ok: true, evidence: 'none' })
+})
+
+test('a file that speaks the plugin\u2019s own header vocabulary keeps its first line', () => {
+  // The residual hazard of a position-and-shape header split: `ssh-plugin:` with an
+  // empty value IS a well-formed header line, so a file that starts with exactly that
+  // loses its first line to the header. The declared length is what turns that silent
+  // loss into a refusal.
+  const file = 'ssh-plugin: \nsecond line\n'
+  const read = `ssh-plugin: 7|${String(Buffer.byteLength(file))}|2026-01-01 00:00:00.0 +0800\nssh-plugin-sha256: ${guards.digestHex(file)}\nssh-plugin-bytes: ${String(Buffer.byteLength(file))}\n${file}`
+  const split = guards.splitEditVersion(read)
+  assert.equal(split.content, file, 'the scan stops at the markers this read printed, and no further')
+  assert.deepEqual(guards.verifyEditBody(split.content, { bytes: split.bodyBytes, digest: split.digest }), { ok: true, evidence: 'digest' })
+  // A shortened body is caught by the framing even when the file itself is made of the
+  // protocol's own words: cut the body in half and no proof is offered.
+  const cut = guards.verifyEditBody(split.content.slice(0, 6), { bytes: split.bodyBytes, digest: split.digest })
+  assert.equal(cut.ok, false, 'a clipped body is refused, not edited')
+  assert.equal(cut.reason, 'not-the-same-bytes')
+  // Without a digest the same fault is still caught, by length alone.
+  const counted = guards.verifyEditBody(split.content.slice(0, 6), { bytes: split.bodyBytes })
+  assert.equal(counted.reason, 'body-short')
+  // And a read with **no** header at all offers no proof: that one line may be lost to
+  // the split, so the only honest answer is `evidence: none` — which is what sends the
+  // write path to its own digest gate instead of to an overwrite.
+  const bare = guards.splitEditVersion('ssh-plugin: \nsecond line\n')
+  assert.equal(bare.content, 'second line\n', 'this is the one case the header run does eat a line')
+  assert.deepEqual(guards.verifyEditBody(bare.content, { bytes: bare.bodyBytes, digest: bare.digest }), { ok: true, evidence: 'none' }, 'and the check invents no proof it was not given')
 })

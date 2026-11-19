@@ -50,7 +50,14 @@ test('list carries the views, the limits, the pool state, and the askpass health
   assert.equal(out.limits.concurrentOps, 16)
   assert.equal(out.limits.maxLiveMasters, 8)
   assert.equal(out.limits.controlPersistSeconds, 300)
-  assert.deepEqual(out.pool, { ready: true, liveMasters: 0, transfers: 0 })
+  assert.deepEqual(out.pool, { ready: true, liveMasters: 0, transfers: 0, jobs: 0 })
+  // The lane numbers the page prints come from this Host, not from a copy of them in
+  // the browser: what a job may hold, what stays held back for a call that waits, and
+  // the total they are both cut out of.
+  assert.equal(out.bounds.maxRunningJobs, 8)
+  assert.equal(out.bounds.foregroundReservedOps, 8)
+  assert.equal(out.bounds.concurrentOps, 16)
+  assert.equal(out.bounds.maxConcurrentTransfers, 2)
   // The resource answers the page needs when an answer says "truncated" or a file
   // it expected is gone: what the spill budget holds, and what this Host's startup
   // collected from its own temp namespace.
@@ -292,7 +299,21 @@ function editRunner (content, over = {}) {
       return done(`${preLine}\nssh-plugin: ok digest ${sha256Hex(landed)}`)
     }
     if (command.startsWith('if [ ! -f')) {
-      return done(`ssh-plugin: ${version}\nssh-plugin-sha256: ${noSha ? '' : sha256Hex(server.file)}\n${server.file}`.replace(/\n$/, ''))
+      // The read answer is the marker lines and then the file's bytes **exactly as
+      // `cat` sends them**. `done()` appends a newline a *marker* wants and a *body*
+      // may not have, and the K-6 check now tells those apart: the byte count and the
+      // digest the server states must describe the body it hands over, trailing
+      // newline included or not. A fixture framed any other way is a server that
+      // would not survive a read-back of its own answer.
+      const body = server.file
+      // `readBytes` / `readDigest` let one fixture stand for a server whose framing
+      // and payload disagree, which is the K-6 case: the markers are the read's own
+      // claim about the bytes that follow, and the guard has to notice when they do
+      // not describe the body that arrived.
+      const stated = over.readDigest === undefined ? (noSha ? '' : sha256Hex(body)) : over.readDigest
+      const lines = [`ssh-plugin: ${version}`, `ssh-plugin-sha256: ${stated}`]
+      if (over.noBytes !== true) lines.push(`ssh-plugin-bytes: ${String(over.readBytes === undefined ? Buffer.byteLength(body) : over.readBytes)}`)
+      return { status: 'succeeded', at: iso, exitCode: 0, stdout: `${lines.join('\n')}\n${body}`, stderr: '', durationMs: 3 }
     }
     if (command.startsWith('size=$(wc -c')) {
       if (stated === 'died') return { status: 'timeout', at: iso, exitCode: undefined, stdout: '', stderr: 'ssh: read timed out\n', durationMs: 4 }
@@ -445,7 +466,15 @@ test('a server with no checksum tool is refused before writing, and its file is 
   const preview = await dry.ops.editRemote({ path: '/f', oldText: 'b', newText: 'z', dryRun: true })
   assert.equal(preview.ok, true)
   assert.equal(preview.dryRun, true)
-  assert.ok(preview.notes?.some(note => /would be refused before writing/u.test(String(note))), 'the preview warns the real run refuses')
+  assert.ok(preview.notes?.some(note => /is refused before anything is copied or written/u.test(String(note))), 'the preview warns the real run refuses')
+  // K-1: the hint may not read as though `dryRun` were the thing in the way. On this
+  // server no setting of the flag lets the overwrite through.
+  assert.match(String(preview.hint), /would be refused on this server/u)
+  assert.equal(/without dryRun applies this change/u.test(String(preview.hint)), false, 'the preview does not promise a write that cannot happen')
+  const withSha = editRunner('abc\n', {})
+  const realPreview = await withSha.ops.editRemote({ path: '/f', oldText: 'b', newText: 'z', dryRun: true })
+  assert.match(String(realPreview.hint), /without dryRun applies this change/u, 'a server that can attest the bytes keeps the plain promise')
+  assert.equal(realPreview.notes, undefined, 'and is not told about a guard that was in force')
 })
 
 test('a repair the server could only count is reported as unknown, never as restored', async () => {
@@ -752,9 +781,14 @@ test('a single-file download rides a counted channel and lands by rename, not in
   assert.equal(out.overwrote, undefined)
   const stream = state.calls.find(c => c.kind === 'streamFile')
   assert.equal(stream.program, '/usr/bin/ssh')
-  // The far end is one `cat` of the quoted path; the sink is a sibling temp file
-  // with this process's id and three bytes of entropy in its name.
-  assert.equal(stream.argvTail.at(-1), `cat -- '/srv/x'`)
+  // The far end is a `cat` of the quoted path that first reports its own pid, so a
+  // cleanup can name the process it is allowed to kill; the sink is a sibling temp
+  // file with this process's id and four bytes of entropy in its name.
+  const mover = String(stream.argvTail.at(-1))
+  assert.match(mover, /^printf 'dsh-mover %s %s\\n' "\$\$" '[a-z0-9]+-[a-f0-9]{8}' >&2; exec cat -- '\/srv\/x'$/u, 'the mover announces its pid, then becomes the mover')
+  const localTag = /x\.dsh-part-([a-z0-9]+-[a-f0-9]{8})/.exec(stream.copy.localPath)?.[1]
+  const remoteTag = /'([a-z0-9]+-[a-f0-9]{8})'/.exec(mover)?.[1]
+  assert.ok(localTag !== undefined && remoteTag !== undefined && localTag === remoteTag, 'the copy has one identity: the temp name and the mover marker carry the same tag')
   assert.match(stream.copy.localPath, /x\.dsh-part-/)
   assert.notEqual(stream.copy.localPath, local)
   assert.equal(stream.copy.direction, 'download')
@@ -911,7 +945,11 @@ test('a single-file upload stops at a temp sibling and only then takes the final
   // The publish step is one small remote command over the same connection.
   const publish = state.calls.filter(c => c.kind === 'run').map(c => c.command).find(command => command.includes('if [ -e'))
   assert.ok(publish, 'the copy asked the server to move the temp into place')
-  assert.match(publish, /cat '\/srv\/x\.dsh-part-[^']*' > '\/srv\/x'/) // through the existing file
+  assert.match(publish, /cat -- '\/srv\/x\.dsh-part-[^']*' > '\/srv\/x' & mp=\$!;/u) // through the existing file
+  // The mover is a background job *because* the script has something to do after it,
+  // so the one number that names it is `$!`, reported before the copy can park in a
+  // fifo nobody is reading, and `wait` still hands the copy's status to the `&&`.
+  assert.match(publish, /printf 'dsh-mover %s %s\\n' "\$mp" '[a-z0-9]+-[a-f0-9]{8}' >&2; wait \$mp && rm -f '\/srv\/x\.dsh-part-[a-z0-9-]*'/u)
   assert.match(publish, /rm -f/)
   assert.match(publish, /mv -f/) // and the fresh-name branch, chosen by the server, not by a stale pre-check
   assert.match(publish, /chmod/) // with the source's bits carried over
@@ -1290,3 +1328,89 @@ test('a promoted hand-over stays cancellable while the call waits, and the start
   assert.equal(bgRun.options.job, true) // and it counts against the job ceiling
 }
 )
+
+// ── K-6: the body an edit is about to write has to be the file it read ───────
+
+test('a body shorter than the count the server gave is refused before the match, not edited', async () => {
+  // The byte count is the framing a tool-less server can still state, so that is the
+  // case where a disagreement has to stop the call. Where a digest *was* stated and the
+  // body matches it, a stale count is not a fault: the body is provably the bytes the
+  // server digested, and the version token re-stats the file at the write.
+  const built = editRunner('one\nTARGET two\n', { noSha: true, readBytes: 99 })
+  const out = await built.ops.editRemote({ path: '/etc/f', oldText: 'TARGET', newText: 'KEPT' })
+  assert.equal(out.ok, false, 'the edit stops')
+  assert.match(out.message, /is not provably the file, so nothing was written and the file is unchanged/u)
+  assert.match(out.message, /short of the file on disk/u, 'and says which way it disagrees')
+  assert.equal(out.matches, undefined, 'the needle was never even counted: a preview of a truncated file is not a preview')
+  assert.equal(built.state.calls.filter(c => c.command.includes('cp -p')).length, 0, 'no safety copy')
+  assert.equal(built.state.calls.filter(c => c.command.includes('cat >')).length, 0, 'no truncating write')
+  assert.equal(built.server.file, 'one\nTARGET two\n', 'the server keeps its file')
+  // A dry run is refused by the same rule: the framing is what makes either answer
+  // worth reading, and it failed.
+  const dry = editRunner('one\nTARGET two\n', { noSha: true, readBytes: 99 })
+  const preview = await dry.ops.editRemote({ path: '/etc/f', oldText: 'TARGET', newText: 'KEPT', dryRun: true })
+  assert.equal(preview.ok, false, 'a preview built on a body that is not the file is not offered')
+  assert.match(preview.message, /not provably the file/u)
+  assert.equal(dry.state.calls.filter(c => c.kind === 'run').length, 1, 'and only the read ran')
+})
+
+test('a body longer than the count the server gave is refused, because the stream carried more than the file', async () => {
+  const built = editRunner('one\nTARGET two\n', { noSha: true, readBytes: 3 })
+  const out = await built.ops.editRemote({ path: '/etc/f', oldText: 'TARGET', newText: 'KEPT' })
+  assert.equal(out.ok, false)
+  assert.match(out.message, /longer than the file on disk/u)
+  assert.match(out.hint, /Read the file again/u, 'and points at the re-read, not at the ceiling')
+  assert.equal(built.state.calls.filter(c => c.command.includes('cat >')).length, 0)
+  assert.equal(built.server.file, 'one\nTARGET two\n')
+})
+
+test('a matching digest outranks a stale byte count, and the edit proceeds on the stronger claim', async () => {
+  // Pinned deliberately: 0.0.37 does not refuse a well-attested body because one
+  // marker disagreed with it. The digest describes the bytes that were handed over;
+  // the count was taken at a different instant, and a file that grew between the two
+  // still arrives whole. What covers the change is the version token, which the write
+  // child re-reads before it truncates anything.
+  const built = editRunner('one\nTARGET two\n', { readBytes: 99 })
+  const out = await built.ops.editRemote({ path: '/etc/f', oldText: 'TARGET', newText: 'KEPT' })
+  assert.equal(out.ok, true)
+  assert.equal(out.contentVerified, true, 'and the answer says which guard stood')
+  assert.equal(built.server.file, 'one\nKEPT two\n')
+})
+
+test('bytes that decode to something other than what the server digested are refused', async () => {
+  // The case a length cannot see: the digest was taken over the file's own bytes, and
+  // the body in hand is what a lossy UTF-8 decode made of them. Same-looking,
+  // different-bytes — and an edit here would push the replacements into the file.
+  const built = editRunner('one\nTARGET two\n', { readDigest: 'f'.repeat(64) })
+  const out = await built.ops.editRemote({ path: '/etc/f', oldText: 'TARGET', newText: 'KEPT' })
+  assert.equal(out.ok, false)
+  assert.equal(out.contentVerified, false)
+  assert.match(out.message, /do not digest to the SHA-256 the server stated/u)
+  assert.match(out.hint, /not valid UTF-8|changed while it was being read/u)
+  assert.equal(built.state.calls.filter(c => c.kind === 'run').length, 1, 'one read, and no write at all')
+  // A stated value that is not a digest at all is read as no digest, which sends the
+  // call to the K-1 gate rather than to a comparison with a word.
+  const odd = editRunner('one\nTARGET two\n', { readDigest: 'sha256sum: /etc/f: Permission denied' })
+  const oddOut = await odd.ops.editRemote({ path: '/etc/f', oldText: 'TARGET', newText: 'KEPT' })
+  assert.equal(oddOut.ok, false)
+  assert.match(oddOut.message, /stated no usable SHA-256/u, 'and the refusal says it had nothing to check against')
+})
+
+test('a read that states no framing still edits, on the digest alone', async () => {
+  // The legacy shape (two markers, no byte count) predates the framing claim, so the
+  // guard rests on the digest and says nothing about a length it was never given.
+  const built = editRunner('one\nTARGET two\n', { noBytes: true })
+  const out = await built.ops.editRemote({ path: '/etc/f', oldText: 'TARGET', newText: 'KEPT' })
+  assert.equal(out.ok, true, 'the edit is not refused for want of a marker this server never had')
+  assert.equal(out.contentVerified, true, 'and the digest that was stated is what proves it')
+  // With neither marker, nothing is provable: the K-1 gate stops the write, and the
+  // preview still runs.
+  const bare = editRunner('one\nTARGET two\n', { noBytes: true, noSha: true })
+  const bareOut = await bare.ops.editRemote({ path: '/etc/f', oldText: 'TARGET', newText: 'KEPT' })
+  assert.equal(bareOut.ok, false)
+  assert.match(bareOut.message, /stated no usable SHA-256/u)
+  const bareDry = editRunner('one\nTARGET two\n', { noBytes: true, noSha: true })
+  const preview = await bareDry.ops.editRemote({ path: '/etc/f', oldText: 'TARGET', newText: 'KEPT', dryRun: true })
+  assert.equal(preview.ok, true, 'a preview costs nothing the server cannot attest')
+  assert.equal(preview.diff.includes('KEPT'), true)
+})

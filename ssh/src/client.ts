@@ -72,15 +72,17 @@ window.__ModuleLoader__.load({
         boundsTargets: 'Targets per profile',
         boundsOps: 'Remote operations at once',
         boundsCopies: 'File copies at once',
+        boundsJobs: 'Background jobs at once',
         boundsSpill: 'Full-output spill files',
         spillLine: '{files} file(s), {used} of {max} bytes',
         spillRefused: ', {refusals} answer(s) kept to the tail',
         tempCollected: 'Startup collected {removed} abandoned temp dir{plural} of {scanned} in its own namespace; {kept} left standing.',
         boundsRunning: 'ceiling {ceiling}, running {running}',
+        boundsJobsReserved: '{reserved} of {total} operation slots held back for calls that wait',
         boundsMasters: 'Servers sharing a connection',
         boundsPersist: 'A shared connection idles out after',
         boundsPerRound: 'Targets per “Test all” round',
-        boundsTimeout: 'Probe timeout is fixed at',
+        boundsTimeout: 'Probe timeout in force',
         boundsOutput: 'Output ceiling accepts',
         boundsRemoteTimeout: 'Command timeout accepts',
         boundsTransfer: 'Transfer ceiling accepts',
@@ -211,15 +213,17 @@ window.__ModuleLoader__.load({
         boundsTargets: '每个 profile 可存的目标数',
         boundsOps: '同时在跑的远程操作数',
         boundsCopies: '同时在跑的文件传输数',
+        boundsJobs: '同时在跑的后台任务数',
         boundsSpill: '完整输出落盘文件',
         spillLine: '{files} 个文件，{used} / {max} 字节',
         spillRefused: '，{refusals} 次回答只留尾部',
         tempCollected: '启动时在本插件命名空间内回收了 {scanned} 个残留中的 {removed} 个临时目录，保留 {kept} 个。',
         boundsRunning: '上限 {ceiling}，正在跑 {running}',
+        boundsJobsReserved: '{total} 个操作槽位中为等待结果的调用保留 {reserved} 个',
         boundsMasters: '共用一条连接的目标数上限',
         boundsPersist: '共享连接空闲多久后断开',
         boundsPerRound: '「全部测试」单轮覆盖的目标数',
-        boundsTimeout: '探测超时固定为',
+        boundsTimeout: '当前生效的探测超时',
         boundsOutput: '输出上限可填范围',
         boundsRemoteTimeout: '命令超时可填范围',
         boundsTransfer: '传输上限可填范围',
@@ -936,13 +940,19 @@ window.__ModuleLoader__.load({
       const [tab, setTab] = React.useState('list')
       const [connections, setConnections] = React.useState([] as ConnectionView[])
       const [settings, setSettings] = React.useState(null as { maxOutputBytes: number; remoteTimeoutMs: number; maxTransferBytes: number } | null)
-      const [limits, setLimits] = React.useState({ maxConnections: 64, concurrentOps: 16, maxLiveMasters: 8, controlPersistSeconds: 300, probeAllLimit: 12, probeTimeoutMs: 10000, remoteTimeoutMinMs: 1000, remoteTimeoutMaxMs: 300000, outputMinBytes: 1024, outputMaxBytes: 4194304, transferMinBytes: 1024, transferMaxBytes: 536870912 })
+      // The numbers a Host that predates the `bounds` payload still has to be shown
+      // something for. They are this release's own defaults, and a test in
+      // `tool.test.mjs` compares each one against the config it is meant to mirror —
+      // 0.0.36 carried a 10 s probe timeout here while the Host it described had been
+      // dialing with 30 s since 0.0.23, which is how a settings page comes to disagree
+      // with the call it is reporting on.
+      const [limits, setLimits] = React.useState({ maxConnections: 64, concurrentOps: 16, maxLiveMasters: 8, controlPersistSeconds: 300, probeAllLimit: 12, probeTimeoutMs: 30_000, maxRunningJobs: 8, foregroundReservedOps: 8, remoteTimeoutMinMs: 1000, remoteTimeoutMaxMs: 300000, outputMinBytes: 1024, outputMaxBytes: 4194304, transferMinBytes: 1024, transferMaxBytes: 536870912 })
       const [askpass, setAskpass] = React.useState('ready')
       // Whether the loaded Host knows about connection sharing at all. A package
       // swapped in place keeps the previous Host module until the restart, and its
       // schema would refuse a `pool` field the new page is ready to send.
       const [pooling, setPooling] = React.useState(false)
-      const [pool, setPool] = React.useState(null as { ready: boolean; liveMasters: number; transfers?: number; failure?: string } | null)
+      const [pool, setPool] = React.useState(null as { ready: boolean; liveMasters: number; transfers?: number; jobs?: number; failure?: string } | null)
       // What this Host process has asked the provider to keep on disk, and what its
       // startup collected from its own temp namespace.
       const [spill, setSpill] = React.useState(null as { used: number; files: number; refusals: number; max: number } | null)
@@ -1715,6 +1725,13 @@ window.__ModuleLoader__.load({
           ...(pooling ? [
             h('div', { class: 'dshssh-bound', key: 'masters' }, h('dt', {}, t('boundsMasters')), h('dd', {}, format(t('boundsRunning'), { ceiling: String(limits.maxLiveMasters), running: String(pool?.liveMasters ?? 0) }))),
             h('div', { class: 'dshssh-bound', key: 'copies' }, h('dt', {}, t('boundsCopies')), h('dd', {}, format(t('boundsRunning'), { ceiling: String(bounds?.effective?.maxConcurrentTransfers ?? '—'), running: String(pool?.transfers ?? 0) }))),
+            // The job lane is the ceiling a reader can run into while nothing appears
+            // to be happening — a backgrounded command holds its slot until it ends —
+            // and it is the one number the profile cannot raise on its own, because
+            // these slots are the ones held back for calls that wait. Both halves are
+            // stated, because a row that only shows the ceiling invites someone to go
+            // looking for a knob that was never there.
+            h('div', { class: 'dshssh-bound', key: 'jobs' }, h('dt', {}, t('boundsJobs')), h('dd', {}, `${format(t('boundsRunning'), { ceiling: String(bounds?.maxRunningJobs ?? limits.maxRunningJobs), running: String(pool?.jobs ?? 0) })} · ${format(t('boundsJobsReserved'), { reserved: String(bounds?.foregroundReservedOps ?? limits.foregroundReservedOps), total: String(bounds?.concurrentOps ?? limits.concurrentOps) })}`)),
             // Spill is the one ceiling whose cost is a file on disk rather than a
             // line in the answer, so the card says what is sitting there now and
             // how many answers the budget already refused to write out.

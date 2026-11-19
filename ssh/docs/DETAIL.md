@@ -252,8 +252,8 @@ call rather than the next restart:
 | `maxTransferFiles` | 500 | — | Pre-check cap on how many files one recursive upload may carry, counted at walk time |
 | `maxTransferTotalBytes` | 512 MiB | — | Pre-check cap on the cumulative bytes of one recursive upload, also at walk time |
 | `maxConcurrentTransfers` | 2 | 16 | How many copies may hold one of the 16 operation slots at once, so transfers cannot starve commands; a copy turned away by a full lane answers as an ordinary `failed` result, with the lane quoted in `message` |
-| `maxRunningJobs` | 8 | 16 | How many explicitly backgrounded jobs may hold a slot at once; the rest stay reserved for foreground calls |
-| `probeTimeoutMs` | 30 s | — | How long a connectivity test waits; the page has no field for it |
+| `maxRunningJobs` | 8 | 8 | How many explicitly backgrounded jobs may hold a slot at once. The cap is not a choice: `16 − 8` of the operation slots are held back for calls that wait, the schema refuses anything above it, `bounds.ts` caps a settings object that still carries more (and says so in a note the page shows), and `transport.ts` clamps again where the slot is taken |
+| `probeTimeoutMs` | 30 s | — | How long a connectivity test waits; the page has no field for it, and since 0.0.37 the browser's fallback for an older Host is the same 30 s it dials with (0.0.36 showed 10 s while the Host had used 30 s since 0.0.23) |
 | `statTimeoutMs` | 10 s | — | The size, type, and tree-counting questions a copy asks before moving bytes |
 | `maxSpillBytes` | 64 MiB | — | How large a spill file may grow; `0` writes none, and the result says there is no file to look for. The whole-process budget below can also stop the asking, and says so |
 | `promoteOnTimeout` | on | — | Hand a command that runs out of time to the job registry instead of killing it |
@@ -365,10 +365,20 @@ classified result.
   fires one short, bounded, best-effort command asking the server to end the mover it
   may have stranded — a `cat` parked reading a fifo with no writer, or writing one with
   no reader, never touches the channel, so closing it cannot wake the syscall it is
-  stuck in (such a reader was seen outliving its call by hours). The mover is named by
-  the argument it is moving and matched `[c]at …` so the cleanup cannot kill its own
-  shell; a server with no `pkill` is told the mover may linger rather than having the
-  copy's outcome rewritten.
+  stuck in (such a reader was seen outliving its call by hours). **Since 0.0.37 that
+  mover is named by a pid, not by a path.** Before it blocks, the mover prints
+  `dsh-mover <pid> <tag>` on stderr (a download `exec`s into the mover so the reported
+  number *is* the mover; a publish backgrounds it and reports `$!`), and the cleanup
+  kills that one process — after reading `/proc/<pid>/cmdline` one argument at a time
+  and comparing it, as plain strings, with the argv this copy was handed. `gone`,
+  `killed`, `killed-unverified`, `foreign`, `refused` and `unanswered` each get their
+  own sentence, and a copy that never saw a pid kills nothing and says the residual is
+  unnamed. The 0.0.36 form, `pkill -f '[c]at -- <path>'`, was not concurrency-safe:
+  the path is the one thing two copies of one file share (measured on a live server:
+  two parked movers, one path-wide `pkill`, zero survivors), and a remote path may
+  contain `[`, `*`, `?`, `+` and `.`, all of which are regex syntax to `pkill -f`. The
+  new form needs no `pkill` or `pgrep` at all, so the servers it can tidy are wider
+  than they were.
   An `edit` reads the file **and its version and its digest** in one trip, copies
   it before truncating, writes through the same inode, checks the size it had to
   leave **and the SHA-256 of the bytes it sent**, and if any of that goes wrong a
@@ -382,7 +392,20 @@ classified result.
   own first line begins with `ssh-plugin:` is no longer eaten), and when this server
   cannot state a SHA-256 at all — no `sha256sum`, `shasum` or `openssl` — the edit
   refuses before copying or truncating and leaves the file exactly as the read found
-  it, instead of landing an unverifiable write the way 0.0.35 did. The
+  it, instead of landing an unverifiable write the way 0.0.35 did. And since **0.0.37**
+  the byte count is not merely stated, it is **used**: `verifyEditBody` compares the
+  body the split produced against the count and against the digest, before the match
+  and before any dry-run preview, and refuses when they disagree. What that closes is
+  a content-loss bug 0.0.36 could not see: a file that is not valid UTF-8 comes back
+  through the transport as text whose bytes are *invented* (each undecodable byte
+  becomes `EF BF BD`), the edit then writes that text back, and every check the old
+  code owned passed — the length it compared was the length it sent, and the digest it
+  verified was the digest of the same replacement bytes. Measured against a real shell:
+  a file starting `FF 41 0A` came back with those bytes replaced by U+FFFD after a
+  0.0.36-style edit of one ASCII word, at the same total length, and the result said
+  `contentVerified: true`. A stated SHA-256 that is not 64 hex is now read as *no*
+  digest, so such a server is refused rather than compared against a sentence about
+  the file. The
   window between noticing a change and making one is now two shell builtins wide
   rather than a network trip, but it is a window: this is a preview-and-confirm
   flow, not a transaction. `dryRun: true` previews the match count and the diff

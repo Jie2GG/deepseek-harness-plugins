@@ -197,12 +197,17 @@ function localProcesses (pattern) {
   return out
     .split('\n')
     .filter((line) => {
-      const rest = line.trim().slice(6) // drop the pid column, whatever its width
-      const comm = rest.split(/\s+/u)[0] ?? ''
-      // The executable's own name, not a substring of the command line: this
-      // repository's path contains a directory named `ssh`, and a check that
-      // matched it against the whole line reported its own witness as a stray.
-      return (comm === 'ssh' || comm === 'scp') && rest.includes(pattern)
+      // `pid=` and `comm=` are padded to the width of the widest value on the
+      // machine, which on a box with seven-digit pids is not the six columns a
+      // fixed-offset slice assumes — and a fixed slice silently turned every
+      // "no child of ours is left" check into one that had nothing to look at.
+      // Splitting the columns is width-independent, and the executable's own name
+      // is still what is compared: this repository's path contains a directory
+      // named `ssh`, and a check that matched it against the whole line reported
+      // its own witness as a stray.
+      const columns = line.trim().split(/\s+/u)
+      const comm = columns[1] ?? ''
+      return (comm === 'ssh' || comm === 'scp') && line.includes(pattern)
     })
 }
 
@@ -228,7 +233,14 @@ async function remoteProcesses (pattern) {
 }
 
 async function copy (direction, localPath, remotePath, options = {}) {
-  return await transfer(transport, target, { ...settings, ...(options.settingsOver ?? {}) }, auth, {
+  // `noPool` addresses the same stored target over its own connection. The job lane
+  // and the transfer lane are shared machinery; a case that wants two copies not to
+  // know about each other says so here rather than discovering it through the pool's
+  // own rule — a transfer that lost its channel stops trusting the shared master, and
+  // every other channel riding it goes with it. That is 0.0.36 behaviour, unrelated to
+  // K-4, and it is why the reap case dials its own connections.
+  const addressed = options.noPool === true ? { ...target, pool: 'off' } : target
+  return await transfer(transport, addressed, { ...settings, ...(options.settingsOver ?? {}) }, auth, {
     direction,
     localPath,
     remotePath,
@@ -489,19 +501,37 @@ cases.tree = async () => {
 
 /** A stalled copy must give its slot back on the way out, by every exit. */
 cases.release = async () => {
+  // This block's writer holds the fifo open from its own ssh channel. A copy that
+  // loses its channel stops trusting the shared master, and a dropped master takes
+  // every other channel with it — which would end the writer, close the fifo, and let
+  // the "cancelled" copy finish instead. Each connection here is therefore its own
+  // (a target whose pool is off), so the cancellation being measured is the only thing
+  // that can stop the copy.
+  const own = { ...target, pool: 'off' }
   // Two ways a copy can stop that are not its ceiling: the reader pressing stop,
   // and the deadline arriving. Each has to hand the transfer lane back, and
   // neither may leave a part file where a download was interrupted.
   const busy = `${REMOTE}/release-busy.fifo`
   const quiet = `${REMOTE}/release-quiet.fifo`
   await remote(`mkdir -p ${q(REMOTE)} && rm -f ${q(busy)} ${q(quiet)} && mkfifo ${q(busy)} && mkfifo ${q(quiet)}`)
-  const writer = await transport.startRun(target, { ...settings, remoteTimeoutMs: 0 }, auth, `{ dd if=/dev/zero bs=65536 count=16 2>/dev/null; sleep 6; } > ${q(busy)}`, {})
+  const writer = await transport.startRun(own, { ...settings, remoteTimeoutMs: 0 }, auth, `{ dd if=/dev/zero bs=65536 count=16 2>/dev/null; sleep 6; } > ${q(busy)}`, {})
   const cancel = new AbortController()
-  const cancelled = copy('download', join(LOCAL, 'r1.bin'), busy, { maxBytes: 8 * 1024 * 1024, timeoutMs: 60_000, signal: cancel.signal })
-  await new Promise(resolve => setTimeout(resolve, 400))
-  check('a copy in flight holds exactly one lane slot', transport.transfersInFlight === 1, `lane ${String(transport.transfersInFlight)}`)
+  const cancelled = copy('download', join(LOCAL, 'r1.bin'), busy, { maxBytes: 8 * 1024 * 1024, timeoutMs: 60_000, signal: cancel.signal, noPool: true })
+  // The lane is taken once the copy itself starts, which on a fresh dial (no shared
+  // master to ride) is behind a pre-check round trip and an authentication. Waiting
+  // for the lane to be held is what makes this an assertion about the lane rather
+  // than about how long this machine takes to connect.
+  let held = 0
+  const laneWaited = Date.now()
+  for (let wait = 0; wait < 80 && held === 0; wait += 1) {
+    await new Promise(resolve => setTimeout(resolve, 100))
+    held = transport.transfersInFlight
+  }
+  check('a copy in flight holds exactly one lane slot', held === 1, `lane ${String(held)} after ${String(Date.now() - laneWaited)} ms`)
+  const writerHolders = (await remoteProcesses('sleep 6')).length
   cancel.abort()
   const out1 = await cancelled
+  evidence(`cancel: copy had held the lane for ${String(held)}; writer channels parked on 'sleep 6': ${String(writerHolders)}; copy delivered ${String(out1.bytes ?? 0)} bytes in ${String(out1.durationMs ?? 0)} ms → ${out1.status}`)
   check('a cancelled copy reports the cancellation and frees its slot', out1.status === 'failed' && /cancel/iu.test(String(out1.message)) && transport.transfersInFlight === 0, `${out1.status}, lane ${String(transport.transfersInFlight)}`)
   writer.kill()
   await writer.finished
@@ -515,16 +545,23 @@ cases.release = async () => {
   // end it after the teardown, so the poll below must find it gone on a server that
   // has pkill. If it lingers, that is a real regression unless the server has no
   // pkill to begin with, which the copy's own notes then say out loud.
-  const toldNoPkill = /no pkill to end it/u.test((out2.notes ?? []).join(' '))
-  const endedMover = /ended a leftover server-side mover/u.test((out2.notes ?? []).join(' '))
-  check('the interrupted download asked the server to end its stranded mover', endedMover || toldNoPkill, `notes: ${(out2.notes ?? []).join(' | ').slice(0, 160) || 'none'}`)
+  // Since 0.0.37 the cleanup names a pid rather than a path, so the sentence it owes
+  // the reader is one of six verdicts. The rule the check holds is the honest one: a
+  // copy either says which process it ended, says plainly that it cannot tell, or says
+  // nothing about a mover at all — and it may never claim an ended mover while one is
+  // still parked on the path.
+  const quietNotes = (out2.notes ?? []).join(' | ')
+  const endedMover = /ended its (own )?server-side mover/u.test(quietNotes)
+  const saidItCannotTell = /got no answer|cannot say whether|now running something else|refused the signal|never reported a server-side mover pid|no readable \/proc/u.test(quietNotes)
+  check('the interrupted download accounted for its own stranded mover by pid', endedMover || saidItCannotTell || /mover/u.test(quietNotes) === false, `notes: ${quietNotes.slice(0, 170) || 'none'}`)
+  check('and the claim is about one process, never about everything matching a path', /pkill|leftover server-side mover of/u.test(quietNotes) === false, quietNotes.slice(0, 60))
   const settledAfter = await untilGone('release-quiet.fifo', 5_000)
   if (settledAfter === null) {
-    check('the stranded server-side reader is gone after the cleanup', toldNoPkill, toldNoPkill
-      ? 'a server with no pkill was told the mover may linger (accepted residual)'
-      : `pkill is present yet the reader of release-quiet.fifo outlived the cleanup: ${String((await remoteProcesses('release-quiet.fifo')).length)} still running`)
-    if (!toldNoPkill) await remote(`pkill -f 'cat -- ${REMOTE}/release-quiet.fifo' || true`) // keep the fixture tidy
-    else evidence(`observation: ${String((await remoteProcesses('release-quiet.fifo')).length)} reader(s) lingered; ${TARGET_LABEL} has no pkill`)
+    check('the stranded server-side reader is gone after the cleanup', saidItCannotTell, saidItCannotTell
+      ? 'the copy said plainly what it could not prove, and the reader is the residual it named (accepted)'
+      : `the cleanup claimed to have ended its mover, yet a reader of release-quiet.fifo outlived it: ${String((await remoteProcesses('release-quiet.fifo')).length)} still running`)
+    if (!saidItCannotTell) await remote(`pkill -f 'cat -- ${REMOTE}/release-quiet.fifo' || true`) // keep the fixture tidy
+    else evidence(`observation: ${String((await remoteProcesses('release-quiet.fifo')).length)} reader(s) lingered, and the copy's own note said so`)
   } else {
     check('the server-side reader of a timed-out copy is gone once the cleanup ran', true, `gone after ${String(settledAfter)} ms`)
   }
@@ -932,7 +969,290 @@ cases.sink = async () => {
   check('the stalled copy freed its lane slot', transport.transfersInFlight === 0, String(transport.transfersInFlight))
 }
 
-const order = ['plain', 'grow', 'overwrite', 'modes', 'tilde', 'lane', 'tree', 'edit', 'capability', 'spill', 'jobs', 'temp', 'sink', 'release']
+/**
+ * K-4, measured where 0.0.36 could only argue: two copies of **one** remote path,
+ * running at the same time, one of them stopped and cleaned up while the other is
+ * still parked. `cat -- <path>` was 0.0.36's answer to a stranded mover, and the path
+ * is the one thing these two copies share — so the copy that was interrupted took the
+ * copy that was working down with it. Here each mover reports its own pid, and the
+ * cleanup may only name that number.
+ */
+cases.reap = async () => {
+  const { reapMoverCommand, downloadMoverCommand, moverPid } = await import('../lib/transfer.js')
+  const own = { ...target, pool: 'off' }
+  // The shape a parked mover's argv really has on the server: `cat -- <path>`, with no
+  // quotes, because the remote shell took care of those. The sshd session that started
+  // the command still carries the quoted form in its own command line, so the unquoted
+  // pattern is the one that counts *movers* rather than shells.
+  const parked = (path) => `cat -- ${path}`
+  const countOn = async (path) => (await remoteProcesses(parked(path))).length
+  const alive = async (pid) => /alive/u.test(String((await remote(`kill -0 ${String(pid)} 2>/dev/null && echo alive || echo dead`)).stdout))
+
+  /**
+   * Start one parked mover, in exactly the shape a download starts it, and hand back
+   * the pid it reported plus the handle that owns its channel.
+   *
+   * The mover is this plugin's command line — `downloadMoverCommand` — and it parks
+   * in `open()` on a fifo nobody has written, which is the state a stopped copy leaves
+   * behind on a real server. Driving it from here rather than from two concurrent
+   * `copy()` calls is what makes the checks deterministic: a copy's own teardown can
+   * end the ssh session, and an ended session takes its child with it, which would let
+   * a *passing* count prove nothing about the cleanup.
+   */
+  async function parkMover (path, tag) {
+    const handle = await transport.startRun(own, { ...settings, remoteTimeoutMs: 120_000 }, auth, downloadMoverCommand(q(path), tag), {})
+    let marker = ''
+    let pid
+    for (let wait = 0; wait < 60 && pid === undefined; wait += 1) {
+      await new Promise(resolve => setTimeout(resolve, 250))
+      const stderrSource = handle?.sources?.find(source => source.channel === 'stderr')
+      marker = String(stderrSource?.read(0).text ?? '')
+      pid = moverPid(marker, tag)
+    }
+    return { handle, marker, pid }
+  }
+
+  await remote(`mkdir -p ${q(REMOTE)}`)
+  const one = `${REMOTE}/reap-one.fifo`
+  const two = `${REMOTE}/reap-two.fifo`
+  const odd = `${REMOTE}/reap a b [x] * ? + .f`
+  await remote(`rm -f ${q(one)} ${q(two)} ${q(odd)} && mkfifo ${q(one)} && mkfifo ${q(two)} && mkfifo ${q(odd)}`)
+
+  // ── 1. the misfire case, on one server, one path, two live movers ─────────
+  const stampTag = (name) => `${name}${stamp}`
+  const aTag = stampTag('a'), bTag = stampTag('b')
+  const moverA = await parkMover(one, aTag)
+  const moverB = await parkMover(one, bTag)
+  check('two movers of one path are parked on it at once', typeof moverA.pid === 'number' && typeof moverB.pid === 'number' && moverA.pid !== moverB.pid && (await countOn(one)) === 2, `pids ${String(moverA.pid)} and ${String(moverB.pid)}, ${String(await countOn(one))} movers`)
+  const reapA = await remote(reapMoverCommand(moverA.pid ?? -1, q(one)))
+  check('the first copy ends its own mover, confirmed from that mover\u2019s command line', /dsh-reap killed/u.test(String(reapA.stdout)), String(reapA.stdout).trim().slice(0, 24))
+  await new Promise(resolve => setTimeout(resolve, 300))
+  check('the mover that belonged to the other copy is still parked', await alive(moverB.pid), `pid ${String(moverB.pid)} alive`)
+  check('and exactly one mover is left on the shared path', (await countOn(one)) === 1, `${String(await countOn(one))} left`)
+  const reapAgain = await remote(reapMoverCommand(moverA.pid ?? -1, q(one)))
+  check('a cleanup run twice says gone, and never claims a second kill', /dsh-reap gone/u.test(String(reapAgain.stdout)), String(reapAgain.stdout).trim().slice(0, 24))
+  // The survivor is not merely a process that still exists: fed, it carries the
+  // payload through the channel its own copy owns.
+  const fed = await transport.startRun(own, { ...settings, remoteTimeoutMs: 20_000 }, auth, `printf 'payload-for-B\\n' > ${q(one)}`, {})
+  let delivered = ''
+  for (let wait = 0; wait < 40 && !delivered.includes('payload-for-B'); wait += 1) {
+    await new Promise(resolve => setTimeout(resolve, 250))
+    const out = moverB.handle?.sources?.find(source => source.channel === 'stdout')
+    delivered = String(out?.read(0).text ?? '')
+  }
+  fed.kill()
+  await fed.finished
+  check('the surviving copy still delivers its payload whole after the other was reaped', delivered.includes('payload-for-B\n'), JSON.stringify(delivered.slice(0, 20)))
+  const survivorDone = await moverB.handle?.finished
+  check('and its own channel closes cleanly, not as a killed transfer', survivorDone?.exitCode === 0, `exit ${String(survivorDone?.exitCode)} signal ${String(survivorDone?.signal)}`)
+  moverA.handle?.kill()
+  await moverA.handle?.finished
+
+  // 2. two movers on **different** paths: neither cleanup can reach the other.
+  const cTag = stampTag('c'), dTag = stampTag('d')
+  const moverC = await parkMover(two, cTag)
+  const moverD = await parkMover(odd, dTag)
+  check('a mover is parked on each of two paths', typeof moverC.pid === 'number' && typeof moverD.pid === 'number', `pids ${String(moverC.pid)} / ${String(moverD.pid)}`)
+  const reapC = await remote(reapMoverCommand(moverC.pid ?? -1, q(two)))
+  const reapD = await remote(reapMoverCommand(moverD.pid ?? -1, q(odd)))
+  check('each is ended by its own cleanup, on a path whose name contains shell metacharacters', /dsh-reap killed/u.test(String(reapC.stdout)) && /dsh-reap killed/u.test(String(reapD.stdout)), `${String(reapC.stdout).trim().slice(0, 12)} | ${String(reapD.stdout).trim().slice(0, 12)}`)
+  check('the odd path holds no mover afterwards', await countOn(odd) === 0, String(await countOn(odd)))
+  moverC.handle?.kill(); await moverC.handle?.finished
+  moverD.handle?.kill(); await moverD.handle?.finished
+
+  // ── 3. the identity rule: a pid that is not this copy's mover is left alone ──
+  const held = await parkMover(one, stampTag('e'))
+  if (typeof held.pid === 'number') {
+    const wrong = await remote(reapMoverCommand(held.pid, q(`${REMOTE}/some-other-copy`)))
+    check('a cleanup aimed with another copy\u2019s path word refuses to kill', /dsh-reap foreign/u.test(String(wrong.stdout)), String(wrong.stdout).trim().slice(0, 20))
+    check('and refusing costs the mover nothing', await alive(held.pid), `pid ${String(held.pid)} still alive`)
+    // A pid that has already been recycled to an unrelated process is the other half
+    // of the same rule: the mover is gone, and the number is not theirs to kill.
+    const sleeper = await transport.startRun(own, { ...settings, remoteTimeoutMs: 30_000 }, auth, 'sleep 30', {})
+    const sleeperLines = await remoteProcesses('sleep 30')
+    const sleeperPid = Number((sleeperLines[0] ?? '').trim().split(/\s+/u)[0])
+    if (Number.isSafeInteger(sleeperPid) && sleeperPid > 0) {
+      const recycled = await remote(reapMoverCommand(sleeperPid, q(one)))
+      check('a recycled pid running something else is reported as foreign, not as cleaned', /dsh-reap foreign/u.test(String(recycled.stdout)), String(recycled.stdout).trim().slice(0, 20))
+      check('and the unrelated process survives it', await alive(sleeperPid), `pid ${String(sleeperPid)} alive`)
+    }
+    sleeper.kill(); await sleeper.finished
+    const right = await remote(reapMoverCommand(held.pid, q(one)))
+    check('the same cleanup, aimed correctly, ends that mover', /dsh-reap killed/u.test(String(right.stdout)), String(right.stdout).trim().slice(0, 20))
+    held.handle?.kill(); await held.handle?.finished
+  }
+  check('the shared path is empty of movers once this case is done', (await untilGone(parked(one), 5_000)) !== null, String(await countOn(one)))
+
+  // ── 4. the product path: a copy this plugin stopped, end to end ────────────
+  // A real download, real deadline, real teardown: the note has to name the mover it
+  // ended by pid, and the path must be left holding nothing.
+  const prod = `${REMOTE}/reap-prod.fifo`
+  await remote(`rm -f ${q(prod)} && mkfifo ${q(prod)}`)
+  for (let round = 1; round <= 3; round += 1) {
+    const out = await copy('download', join(LOCAL, `reap-prod-${String(round)}.bin`), prod, { timeoutMs: 1_500 })
+    const note = String((out.notes ?? []).join(' | ').replace('The copy had moved 0 bytes when the deadline took it down. | ', ''))
+    const parkedNow = await countOn(prod)
+    // Either the copy names the mover it ended, or it says nothing about a mover at
+    // all (the mover left with the channel, which the cleanup reported as `gone`), or it
+    // states a verdict that could not be proved. What may never happen is a claim of an
+    // ended mover while one is still parked, or a claim about "everything matching a
+    // path", which is the 0.0.36 form this release replaced.
+    evidence(`round ${String(round)} mover accounting: ${note === '' ? 'silent (gone with the channel)' : note.slice(0, 150)}`)
+    if (/got no answer/u.test(note)) {
+      // The copy said plainly that it could not prove the outcome. Ask the same
+      // question from a child this case owns, and record what the server answers:
+      // "the cleanup child never got through" and "the mover was already gone" are
+      // different facts, and only the second one is a pass for the server. A transfer
+      // that lost its channel also stops trusting the shared master, so the next child
+      // has to dial again — which is when this can happen at all.
+      const pid = Number(/pid (\d+)/u.exec(note)?.[1])
+      const direct = await remote(reapMoverCommand(Number.isSafeInteger(pid) ? pid : -1, q(prod)))
+      evidence(`  re-ask for pid ${String(pid)}: status ${String(direct.status)}, exit ${String(direct.exitCode)}, said ${JSON.stringify(String(direct.stdout ?? '').trim()).slice(0, 34)}, stderr ${JSON.stringify(String(direct.stderr ?? '').trim()).slice(0, 70)}`)
+    }
+    check(`copy stopped on its deadline (round ${String(round)}): refused, and its mover accounted for`, out.status === 'failed' && /ran out of its deadline/u.test(String(out.message)) && parkedNow === 0 && (/ended its own server-side mover/u.test(note) || /mover/u.test(note) === false || /got no answer|now running something else|refused the signal|no readable \/proc/u.test(note)), `${String(out.status)}, ${String(parkedNow)} mover(s)`)
+  }
+  const cancelled = new AbortController()
+  const running = copy('download', join(LOCAL, 'reap-cancel.bin'), prod, { timeoutMs: 30_000, signal: cancelled.signal })
+  await new Promise(resolve => setTimeout(resolve, 1_500))
+  cancelled.abort()
+  const outCancel = await running
+  const cancelNote = String((outCancel.notes ?? []).join('\n'))
+  await new Promise(resolve => setTimeout(resolve, 500))
+  check('a locally cancelled copy is refused as a cancellation and leaves no mover', outCancel.status === 'failed' && /cancelled/u.test(String(outCancel.message)) && (await countOn(prod)) === 0, `${String(outCancel.status)}, ${String(await countOn(prod))} mover(s), note ${cancelNote === '' ? 'none (nothing was left to end)' : cancelNote.replace(/^.*server-side|^the interrupted/u, m => m.slice(0, 30)).slice(0, 60)}`)
+  const dying = copy('download', join(LOCAL, 'reap-dying.bin'), prod, { timeoutMs: 30_000 })
+  let killedChild = false
+  for (let wait = 0; wait < 40 && !killedChild; wait += 1) {
+    await new Promise(resolve => setTimeout(resolve, 250))
+    const lines = localProcesses(parked(q(prod)))
+    const pid = Number((lines[0] ?? '').trim().split(/\s+/u)[0])
+    if (Number.isSafeInteger(pid) && pid > 0) {
+      process.kill(pid, 'SIGKILL')
+      killedChild = true
+      evidence(`the local ssh child ${String(pid)} was SIGKILLed mid-copy, so the plugin's own teardown never ran for that channel`)
+    }
+  }
+  const died = await dying
+  const diedNote = String((died.notes ?? []).join(' | '))
+  evidence(`copy whose channel was cut: ${String(died.status)} — ${String(died.message).slice(0, 60)}`)
+  evidence(`its own account of the mover: ${diedNote === '' ? 'nothing claimed' : diedNote.slice(0, 150)}`)
+  check('a copy whose channel died is reported, not swallowed', died.status === 'failed', String(died.status))
+  // The honest-report rule, in the one case where the plugin's own teardown never
+  // ran: this child was stopped by force, from outside the plugin. A mover may still
+  // be parked, and that is a pass **only** if the copy said so instead of claiming it
+  // had ended one.
+  const leftAfterCut = await countOn(prod)
+  const claimedAnEnd = /ended its (own )?server-side mover/u.test(diedNote)
+  check('and what it says about the mover matches what the server holds', leftAfterCut === 0 || claimedAnEnd === false, `${String(leftAfterCut)} mover(s) left; claimed an ended mover: ${String(claimedAnEnd)}`)
+  const afterDeath = await untilGone(parked(prod), 4_000)
+  check('either the mover is gone, or the copy named the residual rather than hiding it', afterDeath !== null || /never reported a server-side mover pid|got no answer|cannot say whether/u.test(diedNote), afterDeath === null ? `still parked: ${String(await countOn(prod))}, note ${diedNote.slice(0, 90) || 'none'}` : `gone after ${String(afterDeath)} ms`)
+  if (afterDeath === null) {
+    const strays = await remoteProcesses(parked(prod))
+    for (const line of strays) {
+      const pid = Number(String(line).trim().split(/\s+/u)[0])
+      if (Number.isSafeInteger(pid) && pid > 0) await remote(`kill -9 ${String(pid)} 2>/dev/null || true`)
+    }
+    evidence(`the case ended its own leftover mover(s) so the run leaves nothing parked: ${strays.map(line => String(line).trim().split(/\s+/u)[0]).join(', ')}`)
+  }
+  check('a stopped copy leaves no half file beside the destination', readdirSync(LOCAL).filter(name => name.includes('.dsh-part-')).length === 0)
+  evidence(`honest-report check: the notes a stopped copy may print are only ${JSON.stringify(['ended its own server-side mover (confirmed)', 'gone (silent)', 'foreign (nothing killed)', 'unanswered (cannot tell)']).slice(0, 120)}`)
+  check('and no note ever claims a path-wide kill', /pkill/u.test([diedNote, cancelNote].join(' ')) === false)
+  await remote(`rm -f ${q(one)} ${q(two)} ${q(odd)} ${q(prod)}`)
+}
+
+/**
+ * The reservation behind the job ceiling, measured with real children: 0.0.36's
+ * configuration let a profile hand **all 16** operation slots to background jobs,
+ * while its comment promised eight would always stay open for calls that wait. The
+ * cap is now a number the schema refuses above, a number `bounds.ts` corrects, and a
+ * number the transport clamps again where the slot is taken — this case is the last
+ * of those three, run against a server.
+ */
+cases.jobcap = async () => {
+  const asked = { ...settings, maxRunningJobs: 16 }
+  const held = []
+  for (let i = 0; i < 8; i += 1) {
+    const job = await transport.startRun(target, asked, auth, `sleep 25 && printf 'C%d\\n' ${String(i)}`, { job: true })
+    if (job !== undefined) held.push(job)
+  }
+  check('eight background jobs are admitted, whatever the ceiling asked for', held.length === 8 && transport.laneUsage('background jobs') === 8, `lane ${String(transport.laneUsage('background jobs'))}, table ${String(transport.inFlight)}`)
+  let ninth
+  try {
+    await transport.startRun(target, asked, auth, 'sleep 25', { job: true })
+  } catch (error) { ninth = error }
+  check('the ninth is refused at the cap that is in force, not at 16', /At most 8 background jobs/u.test(String(ninth?.message)), String(ninth?.message ?? 'admitted').slice(0, 90))
+  check('and the refusal says the ceiling cannot simply be raised', /held back for calls a reader is waiting on/u.test(String(ninth?.hint)), String(ninth?.hint ?? '').slice(0, 90))
+  const inline = await ops.runCommand({ target: TARGET_LABEL, command: 'printf RESERVE_OK' })
+  check('a foreground command runs with the job lane full', String(inline.run.stdout ?? '').includes('RESERVE_OK'), String(inline.run.stdout ?? '').trim().slice(0, 40))
+  // Two more foreground children, and the table still has room: the job lane stopped
+  // at 8 while 8 slots of the reservation went unused. Filling all 16 channels here
+  // would test the server's own `MaxSessions` rather than this plugin's arithmetic,
+  // which `tests/transport.test.mjs` already drives to 16 and past it with real
+  // children and no network in the way.
+  const alsoRunning = []
+  for (let i = 0; i < 2; i += 1) {
+    const job = await transport.startRun(target, asked, auth, 'sleep 20', {})
+    if (job !== undefined) alsoRunning.push(job)
+  }
+  check('the reserved half of the table is open for calls that wait: 8 jobs plus 2 commands, 6 slots spare', transport.inFlight === 10 && alsoRunning.length === 2, `in flight ${String(transport.inFlight)}, commands ${String(alsoRunning.length)}`)
+  for (const handle of [...held, ...alsoRunning]) {
+    handle.kill()
+    await handle.finished
+  }
+  check('every slot came back when the children ended', transport.inFlight === 0 && transport.laneUsage('background jobs') === 0, `in flight ${String(transport.inFlight)}`)
+  const one = { ...settings, maxRunningJobs: 1 }
+  const first = await transport.startRun(target, one, auth, 'sleep 20', { job: true })
+  let second
+  try {
+    await transport.startRun(target, one, auth, 'sleep 20', { job: true })
+  } catch (error) { second = error }
+  check('a lane configured to one job holds one job, and no more', first !== undefined && /At most 1 background jobs/u.test(String(second?.message)), String(second?.message ?? 'admitted').slice(0, 60))
+  const free = await ops.runCommand({ target: TARGET_LABEL, command: 'printf ONE_OK' })
+  check('and a single-slot job lane still leaves the table open', String(free.run.stdout ?? '').includes('ONE_OK'), String(free.run.status))
+  if (first !== undefined) {
+    first.kill()
+    await first.finished
+  }
+  check('the whole reservation returns after the smallest lane ends', transport.inFlight === 0 && transport.laneUsage('background jobs') === 0, `in flight ${String(transport.inFlight)}`)
+}
+
+/**
+ * K-6, on a server rather than in a parser: the read states a byte count and a digest,
+ * and the caller has to honour both. The case that matters is the one no length check
+ * can see — a file whose bytes are not valid UTF-8 comes back as text, and an edit
+ * that trusted the text would write replacement characters into the file and call the
+ * result verified, because the bytes it sent are the bytes that landed.
+ */
+cases.framing = async () => {
+  const { verifyEditBody } = await import('../lib/edit.js')
+  const latin = `${REMOTE}/framing-latin1`
+  const big = `${REMOTE}/framing-big`
+  const markers = `${REMOTE}/framing-markers`
+  await remote(`mkdir -p ${q(REMOTE)} && printf '\\377A\\nTARGET' > ${q(latin)} && printf 'ssh-plugin: 1|2|3\\nssh-plugin-sha256: zz\\nssh-plugin-bytes: 7\\nrest\\n' > ${q(markers)} && for i in $(seq 1 2000); do printf '\\344\\270\\255\\346\\226\\207 abc\\n'; done > ${q(big)}`)
+  const frame = async (path) => {
+    const read = await remote(buildEditRead(q(path)))
+    const parsed = splitEditVersion(read.stdout ?? '')
+    return { parsed, check: verifyEditBody(parsed.content, { ...(parsed.bodyBytes === undefined ? {} : { bytes: parsed.bodyBytes }), ...(parsed.digest === undefined ? {} : { digest: parsed.digest }) }) }
+  }
+  const latinFrame = await frame(latin)
+  evidence(`latin-1 read: declared ${String(latinFrame.parsed.bodyBytes)} bytes, body ${String(Buffer.byteLength(latinFrame.parsed.content))} bytes, digest stated: ${latinFrame.parsed.digest === undefined ? 'no' : 'yes'}`)
+  check('a read of bytes that are not UTF-8 notices on the server, not only in a parser', latinFrame.check.ok === false && latinFrame.check.reason === 'not-the-same-bytes', JSON.stringify(latinFrame.check).slice(0, 90))
+  const latinHash = await remote(`sha256sum -- ${q(latin)} 2>/dev/null | cut -c1-12 || true`)
+  check('and the file it refused is the file that was there', /7f|80|ff|[0-9a-f]{12}/u.test(String(latinHash.stdout).trim()), String(latinHash.stdout).trim().slice(0, 20))
+  const bigFrame = await frame(big)
+  check('a 20 KB body of multi-byte text frames as itself', bigFrame.check.ok === true && bigFrame.check.evidence === 'digest', JSON.stringify(bigFrame.check).slice(0, 60))
+  check('the count the server stated is the file it stated', bigFrame.parsed.bodyBytes === Buffer.byteLength(bigFrame.parsed.content), `${String(bigFrame.parsed.bodyBytes)} vs ${String(Buffer.byteLength(bigFrame.parsed.content))}`)
+  const markerFrame = await frame(markers)
+  check('a file that begins with the protocol’s own words keeps its first line', markerFrame.parsed.content.startsWith('ssh-plugin: 1|2|3'), JSON.stringify(String(markerFrame.parsed.content).slice(0, 24)))
+  check('and its framing is still proved, by digest and by count', markerFrame.check.ok === true && markerFrame.check.evidence === 'digest', JSON.stringify(markerFrame.check).slice(0, 60))
+  // A body the stream clipped is a refusal, not a short edit: cut the tail off the
+  // bytes the split produced and the count has to answer for it.
+  const clipped = verifyEditBody(bigFrame.parsed.content.slice(0, -8), { bytes: bigFrame.parsed.bodyBytes })
+  check('a body short of the stated count is refused by the count', clipped.ok === false && clipped.reason === 'body-short', JSON.stringify(clipped).slice(0, 70))
+  const extended = verifyEditBody(`${bigFrame.parsed.content}a line the file never had\n`, { bytes: bigFrame.parsed.bodyBytes, digest: bigFrame.parsed.digest })
+  check('and so is one the stream made longer', extended.ok === false && extended.reason === 'not-the-same-bytes', JSON.stringify(extended).slice(0, 70))
+}
+
+const order = ['plain', 'grow', 'overwrite', 'modes', 'tilde', 'lane', 'tree', 'edit', 'capability', 'spill', 'jobs', 'temp', 'sink', 'reap', 'jobcap', 'framing', 'release']
 process.stdout.write(`\n@jie2gg/dsh-plugin-ssh live check against "${TARGET_LABEL}"\nscratch: ${LOCAL} ⇄ ${REMOTE}\n\n`)
 
 let failure = null

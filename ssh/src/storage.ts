@@ -54,6 +54,28 @@ export const MAX_CONNECTIONS = 64
  */
 export const MAX_CONCURRENT_OPS = 16
 
+/**
+ * How many of those operation slots are **held back for foreground calls**.
+ *
+ * A background job arms no timer: it holds its slot until it settles, is killed, or
+ * loses its conversation, which is the one way this plugin can be busy-locked by
+ * work nobody is waiting on. The reservation is what stops that, and it is a
+ * reservation in code, not in a comment: {@link MAX_JOB_LANES} is the ceiling a job
+ * lane may ever be configured to, and the transport clamps any request above it a
+ * second time at the moment it admits a child. With the shipped numbers that leaves
+ * eight slots a job can take and eight that only an interactive call can use.
+ */
+export const FOREGROUND_RESERVED_OPS = 8
+
+/**
+ * The highest `maxRunningJobs` means anything at, whatever a profile asks for.
+ *
+ * Stated as a number rather than left to prose because three places have to agree
+ * on it: the config schema's own maximum, the value the settings page prints, and
+ * the ceiling the transport admits a job against.
+ */
+export const MAX_JOB_LANES = MAX_CONCURRENT_OPS - FOREGROUND_RESERVED_OPS
+
 /** Ceiling on how many servers may hold an open shared master at once. */
 export const MAX_LIVE_MASTERS = 8
 

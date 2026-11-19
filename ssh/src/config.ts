@@ -20,6 +20,7 @@
 
 import type { Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { MAX_CONCURRENT_OPS, MAX_JOB_LANES } from './storage.ts'
 
 /**
  * A whole positive number of bytes. Schemastery has no `.int()`: `natural` is the
@@ -34,10 +35,25 @@ const ms = z.natural().min(1).max(2_147_483_647)
 const files = z.natural().min(1).max(1_000_000)
 
 /**
- * A whole positive count of concurrent transfers; 16 is every operation slot the
- * plugin can hand out at once, which is the only ceiling this number can have.
+ * A whole positive count of concurrent **transfers**. Every operation slot this
+ * plugin can hand out at once is the ceiling here, because a transfer is bounded by
+ * its own deadline: a copy that stopped holding a slot stopped existing, so the worst
+ * a full transfer lane can do to a command is delay it by one transfer window.
  */
-const lanes = z.natural().min(1).max(16)
+const transferLanes = z.natural().min(1).max(MAX_CONCURRENT_OPS)
+
+/**
+ * A whole positive count of concurrent **background jobs**, and the one ceiling in
+ * this file that is not the whole operation count.
+ *
+ * A job arms no timer and can hold its slot for the life of a conversation, so the
+ * ceiling is `MAX_CONCURRENT_OPS - FOREGROUND_RESERVED_OPS` and eight of the sixteen
+ * slots are kept for calls a reader is waiting on. Anything a profile asks above that
+ * is capped at use and said out loud, exactly like an over-cap deadline; the transport
+ * clamps a request above it a second time where the slot is actually taken, so the
+ * promise does not depend on this schema being the only door.
+ */
+const jobLanes = z.natural().min(1).max(MAX_JOB_LANES)
 
 /**
  * Bounds as this plugin reads them, every one a live value.
@@ -107,11 +123,13 @@ export interface SshConfig {
    * How many background jobs may hold a child slot at once.
    *
    * A job arms no timer — it runs until it settles, is killed, or loses its
-   * conversation — so it can hold one of the 16 operation slots indefinitely.
-   * The ceiling reserves the rest for foreground calls: even with the job
-   * allowance full, eight slots always stay open for interactive work. Commands
-   * that merely *might* promote (a foreground run that outlives its window) are
-   * not counted against it; only jobs started with `background: true` are.
+   * conversation — so it can hold one of the {@link MAX_CONCURRENT_OPS} operation
+   * slots indefinitely. The ceiling is `MAX_CONCURRENT_OPS - FOREGROUND_RESERVED_OPS`
+   * and the schema will not accept more: even with the job allowance full, eight slots
+   * stay open for interactive work, and that is enforced where the slot is taken
+   * (`transport.ts`), not only where the number is configured. Commands that merely
+   * *might* promote (a foreground run that outlives its window) are not counted
+   * against it; only jobs started with `background: true` are.
    */
   maxRunningJobs: Volatile<number>
   /** Deadline for one connectivity probe, in milliseconds. */
@@ -150,11 +168,12 @@ export const DEFAULTS = {
   maxTransferFiles: 500,
   maxTransferTotalBytes: 536_870_912,
   // Two copies at once, so the 16 operation slots keep room for commands even
-  // while big files are moving. Half the ceiling for jobs: an explicitly
-  // backgrounded command can hold its slot forever, and eight such jobs must
-  // never be able to busy-lock the plugin.
+  // while big files are moving. Jobs get half of them — `MAX_JOB_LANES`, which is
+  // the ceiling the schema enforces and the transport clamps to — because an
+  // explicitly backgrounded command can hold its slot forever, and a full set of
+  // those must never be able to busy-lock the plugin for a reader who is waiting.
   maxConcurrentTransfers: 2,
-  maxRunningJobs: 8,
+  maxRunningJobs: MAX_JOB_LANES,
   probeTimeoutMs: 30_000,
   statTimeoutMs: 10_000,
   promoteOnTimeout: true,
@@ -174,8 +193,8 @@ export const Config = z.object({
   maxTransferTimeoutMs: ms.default(DEFAULTS.maxTransferTimeoutMs).volatile(),
   maxTransferFiles: files.default(DEFAULTS.maxTransferFiles).volatile(),
   maxTransferTotalBytes: bytes.default(DEFAULTS.maxTransferTotalBytes).volatile(),
-  maxConcurrentTransfers: lanes.default(DEFAULTS.maxConcurrentTransfers).volatile(),
-  maxRunningJobs: lanes.default(DEFAULTS.maxRunningJobs).volatile(),
+  maxConcurrentTransfers: transferLanes.default(DEFAULTS.maxConcurrentTransfers).volatile(),
+  maxRunningJobs: jobLanes.default(DEFAULTS.maxRunningJobs).volatile(),
   probeTimeoutMs: ms.default(DEFAULTS.probeTimeoutMs).volatile(),
   statTimeoutMs: ms.default(DEFAULTS.statTimeoutMs).volatile(),
   promoteOnTimeout: z.boolean().default(DEFAULTS.promoteOnTimeout).volatile(),
