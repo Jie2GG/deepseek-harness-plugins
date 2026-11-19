@@ -17,6 +17,27 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.39
+
+A hygiene and documentation round: the deliverables that earlier rounds committed
+beside the sources moved out of the plugin tree, and the developer document was
+rewritten in Chinese.
+
+- **Changed — delivered reports and diff dumps no longer live in the plugin
+  root.** `SSH-PLUGIN-0.0.36/0.0.37/0.0.38-{DELIVERY.md,DIFF.patch}`, the six
+  files a version round used to commit next to the sources, now sit under
+  `ssh/artifacts/<version>/`, one folder per release, so a report and the patch
+  it quotes keep their relative link and the plugin root holds sources and
+  shipped resources only. The archive is ignored by git (`artifacts/`), so those
+  six tracked copies left the index while their bytes stay on disk for review.
+  The repository states the rule in `CONTRIBUTING.md`「交付产物与目录卫生」, and
+  names `cordis.patch.yml` out loud as the source file that is not a deliverable.
+- **Added — `README.md` in Chinese.** The document is translated section for
+  section, with every path, identifier, code span, `packages/…:line` citation and
+  quoted server output kept verbatim: those are the facts a reader has to check
+  against the harness, and translating them away would lose them. The English
+  text gives way to this one and stays in the git history.
+
 ## 0.0.38
 
 The directed round that took the 0.0.37 delivery at its own word: two of its

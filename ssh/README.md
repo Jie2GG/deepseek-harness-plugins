@@ -1,174 +1,118 @@
 # @jie2gg/dsh-plugin-ssh
 
-Manage the SSH targets this machine reaches from the Harness settings panel: a
-named inventory written in one address field, two authentication modes (key or
-password) whose secrets live in the credential store, and the connectivity probes
-and client settings that use them. The same operations reach a conversation
-through one agent tool, `ssh_client`, which runs under the policy gate described
-below. User-facing wording lives
-in [docs/DETAIL.md](docs/DETAIL.md) (and
-[docs/DETAIL.zh.md](docs/DETAIL.zh.md) for Chinese).
+在 Harness 设置面板里管理本机能连上的 SSH 目标：一份只靠单个地址字段写成的具名清单、两种认证模式（密钥或密码）且其机密住在凭据库中，再加上使用它们的连通性探测与客户端设置。同样的操作通过一个 agent 工具 `ssh_client` 进入会话，该工具在下文所述的政策闸门下运行。面向用户的文案见 [docs/DETAIL.md](docs/DETAIL.md)（中文见 [docs/DETAIL.zh.md](docs/DETAIL.zh.md)）。
 
-## Layout
+## 目录结构
 
 ```
 ssh/
-├── package.json              # bundle manifest: dsh.bundle.patch + dsh.client
-├── cordis.patch.yml          # inserts one Host plugin row: id `ssh`
-├── tsconfig.json             # NodeNext ESM, src/ → lib/, type-only client imports
-├── icon.svg                  # original artwork (prompt caret + dashed link + server rack)
-├── scripts/finalize-client.mjs  # strips TS's `export {};` and proves the script form
-├── scripts/live-check.mjs      # the same boundaries against a live server, with the real provider
-├── docs/DETAIL.md            # plugin detail page, English
-├── docs/DETAIL.zh.md         # plugin detail page, Chinese
+├── package.json              # bundle 清单：dsh.bundle.patch + dsh.client
+├── cordis.patch.yml          # 插入一行 Host plugin：id 为 `ssh`
+├── tsconfig.json             # NodeNext ESM，src/ → lib/，client 只做类型导入
+├── icon.svg                  # 原创图形（提示符光标 + 虚线链路 + 服务器机架）
+├── scripts/finalize-client.mjs  # 剥掉 TS 的 `export {};` 并证明其脚本形态
+├── scripts/live-check.mjs      # 用真实 provider 对活服务器复测同样的那些边界
+├── docs/DETAIL.md            # 插件详情页，英文
+├── docs/DETAIL.zh.md         # 插件详情页，中文
 ├── locale/en.json            # meta.title / meta.description / meta.detail
-├── locale/zh.json            # same, Chinese; its meta.detail names DETAIL.zh.md
-├── tests/                    # the offline suites: plain node:test against lib/ — build first
-│   ├── helpers.mjs           # fake transport, store, secrets; the payload-schema checker
-│   ├── tool.test.mjs         # gate, resolution, arguments, wording, every payload vs the schema
-│   ├── ops.test.mjs          # every operation at its transport seam, marker protocol included
-│   ├── storage.test.mjs      # the zod bounds and the strict records
-│   ├── transport.test.mjs    # quoting, program extraction, the fingerprint tables, the sharing flags
-│   ├── pool.test.mjs         # the master ledger: what a socket is named by, who is evicted, what gets closed
-│   ├── jobs.test.mjs         # the background-job lifecycle and its outcome classes
-│   ├── edit.test.mjs         # the exact-match rules, refusal by counted occurrence, the guarded write
-│   ├── spill.test.mjs        # the spill budget: what is granted, what is refused, what is counted
-│   ├── tmpgc.test.mjs        # who may be collected from the temp directory, and what may never be
-│   ├── local-path.test.mjs   # the workspace boundary a transfer obeys
-│   └── rpc.test.mjs          # method allowlisting and the failure-code-to-status map
+├── locale/zh.json            # 同上，中文；其 meta.detail 指向 DETAIL.zh.md
+├── tests/                    # 离线测试套件：针对 lib/ 的纯 node:test —— 先构建
+│   ├── helpers.mjs           # 假的 transport、store、secrets；payload 模式校验器
+│   ├── tool.test.mjs         # 闸门、求解、参数、措辞，每个 payload 都对照模式校验
+│   ├── ops.test.mjs          # 每个操作都在其 transport 接缝处，含标记协议
+│   ├── storage.test.mjs      # zod 边界与严格记录
+│   ├── transport.test.mjs    # 引号处理、程序名提取、指纹表、共享开关
+│   ├── pool.test.mjs         # 主台账：socket 由什么命名、谁被驱逐、什么被关闭
+│   ├── jobs.test.mjs         # 后台作业的生命周期及其结果分类
+│   ├── edit.test.mjs         # 精确匹配规则、按出现次数拒绝、受保护的写入
+│   ├── spill.test.mjs        # spill 预算：给出什么、拒绝什么、计入什么
+│   ├── tmpgc.test.mjs        # 临时目录里谁可被回收，以及什么绝不可被回收
+│   ├── local-path.test.mjs   # 传输必须遵守的工作区边界
+│   └── rpc.test.mjs          # 方法白名单，以及失败 code 到 HTTP status 的映射
 └── src/
-    ├── index.ts              # Host entry: name, inject, apply (domain open + route)
-    ├── types.ts              # route path, method list, failure codes (client type-only)
-    ├── storage.ts            # the `ssh_targets` domain: zod schemas, bounds, limits
-    ├── store.ts              # typed reads/writes over the opened domain
-    ├── transport.ts          # SshTransport: one option set, one child, run + probe, one lease
-    ├── pool.ts               # MuxPool: the per-target shared connections and their ledger
-    ├── secrets.ts            # password and passphrase records in the credential store
-    ├── askpass.ts            # the private helper that answers an ssh prompt
-    ├── tool.ts               # the agent-facing `ssh_client` tool and its policy gate
-    ├── transfer.ts           # one file on a counted channel, a tree on scp -r, both guarded where they land
-    ├── spill.ts                # how much spill one Host process will ask the provider to keep
-    ├── tmpgc.ts                # which temp directories are ours to collect, and on what evidence
-    ├── local-path.ts         # the workspace boundary a local transfer path obeys
-    ├── edit.ts               # the pure match-and-replace rules behind `edit`
-    ├── jobs.ts               # a backgrounded remote command on the harness job registry
-    ├── ops.ts                # every capability in one transport-agnostic object; the page and the tool share it
-    ├── rpc.ts                # Request → Response, failure code → HTTP status
-    ├── client.ts             # browser half: the page, its tabs, and its icon
-    └── client-globals.d.ts   # ambient window/navigator; never emitted to lib/
+    ├── index.ts              # Host 入口：name、inject、apply（打开 domain + 注册路由）
+    ├── types.ts              # 路由路径、方法清单、失败 code（对 client 仅为类型）
+    ├── storage.ts            # `ssh_targets` domain：zod 模式、边界、限制
+    ├── store.ts              # 在已打开的 domain 上做带类型的读写
+    ├── transport.ts          # SshTransport：一套开关、一个子进程、run + probe、一份租约
+    ├── pool.ts               # MuxPool：按目标共享的连接，以及它们的台账
+    ├── secrets.ts            # 凭据库里的密码与口令记录
+    ├── askpass.ts            # 应答 ssh 提示的那个私有辅助程序
+    ├── tool.ts               # 面向 agent 的 `ssh_client` 工具及其政策闸门
+    ├── transfer.ts           # 单个文件走一条被计数的通道，一棵树走 scp -r，落点两侧都受保护
+    ├── spill.ts              # 一个 Host 进程会让 provider 代为保留多少 spill
+    ├── tmpgc.ts              # 哪些临时目录归我们回收，依据什么证据
+    ├── local-path.ts         # 本地传输路径必须遵守的工作区边界
+    ├── edit.ts               # `edit` 背后的纯匹配与替换规则
+    ├── jobs.ts               # 挂在 harness 作业台账上的一个后台化远程命令
+    ├── ops.ts                # 把全部能力收进一个与 transport 无关的对象；页面与工具共用它
+    ├── rpc.ts                # Request → Response，失败 code → HTTP status
+    ├── client.ts             # 浏览器那一半：页面、它的标签页与它的图标
+    └── client-globals.d.ts   # 环境声明 window/navigator；永不产出到 lib/
 ```
 
-## Build and install
+## 构建与安装
 
-`lib/` is git-ignored, so build before installing from the directory. DSH
-resolves the `@deepseek-ai/*` peers from its own installation; `zod` and
-`@deepseek-ai/dsh-storage-domain` ship as real dependencies because the Host
-half imports them at runtime.
+`lib/` 被 git 忽略，所以从本目录安装之前要先构建。DSH 从它自己的安装里解析 `@deepseek-ai/*` 那些 peer；`zod` 与 `@deepseek-ai/dsh-storage-domain` 作为真实依赖随包发布，因为 Host 那一半在运行时会 import 它们。
 
 ```sh
 cd ssh
-pnpm install        # dependencies + the type-only peers
+pnpm install        # 依赖 + 仅类型的 peer
 pnpm run check      # tsc --noEmit
-pnpm run build      # tsc, then finalize lib/client.js as a classic script
-pnpm test           # build, then node --test tests/*.test.mjs (the offline suites)
-# Lint with the harness checkout's oxlint when it is near; it is the cheapest
-# check for the dead code a type pass leaves behind:
+pnpm run build      # tsc，然后把 lib/client.js 收尾为传统脚本
+pnpm test           # 先构建，再 node --test tests/*.test.mjs（离线套件）
+# 当 harness checkout 就在附近时，用它自带的 oxlint 做 lint；这是成本最低的一遍，
+# 专抓类型检查漏下来的死代码：
 #   /data/deepseek-harness/node_modules/.bin/oxlint src tests scripts
 ```
 
-The finalize step is not decorative: the web module table runs `lib/client.js`
-as a script, so it must carry exactly one `window.__ModuleLoader__.load(` call
-and no top-level `import`/`export`. `pnpm run build` fails if either half of
-that is wrong.
+收尾（finalize）这一步不是装饰：web 模块表会把 `lib/client.js` 当脚本来跑，所以它必须恰好带一个 `window.__ModuleLoader__.load(` 调用，且没有顶层的 `import`/`export`。这两半任何一半不对，`pnpm run build` 就会失败。
 
-Then in a running Harness: `plugin_manager` → `install_bundle` with the absolute
-path of this directory. Acceptance per the repository rules: no manifest
-diagnostics, and the title, description, icon, and detail document render in both
-English and Chinese; the settings navigation shows one **Remote connections** /
-「远程连接」 row with its icon, and the page opens on the **SSH targets** tab with
-**Client settings** beside it. A freshly installed bundle's client artifact needs
-the page to (re)load it: the open page follows the Host module graph over HMR, so
-a rebuilt bundle for an installed row is usually swapped in without a manual
-refresh — but a replaced package (not a rebuilt one) needs a restart to load a
-fresh module generation.
+然后在运行中的 Harness 里：`plugin_manager` → `install_bundle`，填入本目录的绝对路径。按仓库规则的验收标准：无 manifest 诊断，标题、描述、图标与详情文档在英文和中文下都能正常渲染；设置导航里出现一条带图标的 **Remote connections** / 「远程连接」行，页面打开时落在 **SSH targets** 标签页，旁边就是 **Client settings**。一个新装 bundle 的 client 产物需要页面来（重）加载它：打开着的页面会沿 Host 模块图走 HMR，所以已安装那一行的 bundle 重新构建之后，通常无需手动刷新就会被换进来——但被**替换**的包（而不是被重新构建的）需要重启，才能加载全新的一代模块。
 
 ## API
 
-### Host (`src/index.ts`)
+### Host 侧（`src/index.ts`）
 
-| Export | Shape | Notes |
+| 导出项 | 形态 | 说明 |
 | --- | --- | --- |
-| `name` | `'ssh'` | Cordis plugin name for loader diagnostics. |
-| `inject` | `['connection', 'subprocess', 'storageDomain', 'credentials']` | Hard requirements: without them the row stays inactive rather than throwing. |
-| `apply(ctx, config)` | `(ctx: Context, config: SshConfig) => void` | Opens the domain, then registers `/api/ssh/rpc` inside `ctx.effect`; both disposers run on unload. |
+| `name` | `'ssh'` | 供 loader 诊断使用的 Cordis 插件名。 |
+| `inject` | `['connection', 'subprocess', 'storageDomain', 'credentials']` | 硬性要求：缺了它们，该行会保持 inactive，而不是抛异常。 |
+| `apply(ctx, config)` | `(ctx: Context, config: SshConfig) => void` | 先打开 domain，然后在 `ctx.effect` 之内注册 `/api/ssh/rpc`；卸载时两个 disposer 都会运行。 |
 
-The plugin declares a `Config` (`src/config.ts`) for its ceilings: a default and a
-cap per ceiling, every one `.volatile()`, so editing the row's `config:` changes
-what the next call resolves against without a restart and without touching the
-storage domain. What the page edits stays in the domain (target list, overrides,
-conversation choices), and the credentials stay in the credential store — so
-saving from the page still never rewrites the profile patch file or restarts the
-plugin.
+插件为它的各项上限声明了一个 `Config`（`src/config.ts`）：每个上限配一个默认值加一个天花板，且全部 `.volatile()`，因此编辑该行的 `config:` 就会改变下一次调用所对照求解的依据，既不必重启，也不碰存储 domain。页面所编辑的东西留在 domain 里（目标清单、覆盖项、会话选择），凭据留在凭据库里——所以从页面保存时，依然不会重写 profile 的 patch 文件，也不会重启插件。
 
-### Route (`POST` and `GET` on `/api/ssh/rpc`)
+### 路由（`/api/ssh/rpc` 上的 `POST` 与 `GET`）
 
-Body `{ method, params? }`, result `{ ok: true, result }` or
-`{ ok: false, error: { code, message, field?, hint? } }`. Codes are a closed set:
-`bad-input` 400, `not-found` 404, `busy` 409, `storage-error` 500,
-`secret-error` 500, `internal` 500.
+请求体 `{ method, params? }`，结果为 `{ ok: true, result }` 或 `{ ok: false, error: { code, message, field?, hint? } }`。code 是一个封闭集合：`bad-input` 400、`not-found` 404、`busy` 409、`storage-error` 500、`secret-error` 500、`internal` 500。
 
-| Method | Params | Returns |
+| 方法 | 参数 | 返回 |
 | --- | --- | --- |
 | `list` | – | `{ connections, settings, limits, askpass, askpassFailure?, probing }` |
-| `save` | `{ connection, secrets? }` (no `id` = create) | `{ connection, connections }` |
+| `save` | `{ connection, secrets? }`（不带 `id` 即新建） | `{ connection, connections }` |
 | `remove` | `{ id }` | `{ removed, orphanSecrets, connections }` |
-| `probe` | `{ id }` or `{ draft, secrets? }` | `{ connection?, probe?, connections }` |
+| `probe` | `{ id }` 或 `{ draft, secrets? }` | `{ connection?, probe?, connections }` |
 | `resolve` | `{ target?, sessionId? }` | `{ action: 'resolve', ok, target, resolved, stored, differs, text? }` |
 | `probeAll` | – | `{ connections, probed, skipped, failures }` |
 | `configUpdate` | `{ settings }` | `{ settings }` |
 
-The allowlist is the page's surface, not the operations surface: `runCommand`,
-`upload`, `download`, and the session-target setters live on the same `ops`
-object the agent tool drives directly, and since 0.0.32 the five entries no
-control ever invokes are refused at the gate like any unknown name (the
-`ops` methods themselves remain).
+这份白名单是页面的界面，不是操作的界面：`runCommand`、`upload`、`download` 以及会话目标的设置器，都住在同一个 `ops` 对象上，而 agent 工具直接驱动它；并且自 0.0.32 起，那五个永远不会被控制面调用的条目，会和任何未知名字一样在闸门处被拒（`ops` 上的方法本身仍然保留）。
 
-`GET` reaches only `list`; the route rides the shared `/api` channel, so only the
-owner peer of the served page is admitted and every other principal is refused.
+`GET` 只抵达 `list`；这条路由搭乘的是共享的 `/api` 通道，所以只有被服务页面的 owner peer 会被准入，其它任何 principal 一律被拒。
 
-A connection row is `{ id, label, host, user?, port?, identityFile?, proxyJump?,
-extraArgs?, note?, createdAt, updatedAt, lastProbe?, auth }` plus
-`secrets: { password, passphrase, root }`. `auth` is `key` or `password` on write;
-`key+password` is still read (it was offered in 0.4.0 only) and probes as it
-always did. `secrets` is presence only — no response ever carries a stored value,
-and a `secrets` patch writes a string, forgets a `null`, and leaves an absent key
-alone. `limits` carries the fixed bounds including the accepted ranges, so the
-settings tab states them without mirroring them in browser code. Failure codes now
-include `secret-error` (500).
+一条连接记录是 `{ id, label, host, user?, port?, identityFile?, proxyJump?, extraArgs?, note?, createdAt, updatedAt, lastProbe?, auth }`，再加上 `secrets: { password, passphrase, root }`。`auth` 在写入时取 `key` 或 `password`；`key+password` 仍然可读（它只在 0.4.0 提供过），并按其一贯的方式探测。`secrets` 只表达存在与否——没有任何响应会带出已存储的值——而一次 `secrets` 补丁会写入一个字符串、用 `null` 表示遗忘、对缺席的键则原样不动。`limits` 带上固定边界，包含被接受的取值范围，好让设置标签页直接陈述它们，而不必在浏览器代码里再复刻一份。失败 code 现在包含 `secret-error`（500）。
 
-### Storage
+### 存储
 
-One domain, `ssh_targets` (`version: 4`, reading `version: 1` through `3` records
-through `compatibleVersions`), on the backend the profile routes for
-it — the `json` backend writes one document per unit, at
-`$DSH_HOME/storages/ssh_targets.json`:
+只有一个 domain，`ssh_targets`（`version: 4`，借助 `compatibleVersions` 读取 `version: 1` 到 `3` 的记录），落在 profile 为它路由的后端上——`json` 后端每个 unit 写一个文档，位于 `$DSH_HOME/storages/ssh_targets.json`：
 
-- table `connections`: `{ id, label, host, user?, port?, identityFile?, proxyJump?, extraArgs?, note?, createdAt, updatedAt, lastProbe?, auth, agentAccess, allowedCommands, remoteTimeoutMs?, maxOutputBytes? }`, validated by zod on every read and write, so a hand-edited file cannot smuggle a bad record into the page (it surfaces as `storage-error` instead).
-- table `sessions`: `{ sessionId, targetId, setAt }` — the target one conversation
-  picked, so a remote call can omit `target`. `remove` clears the rows that point
-  at a deleted target.
-- global slot: `{ maxOutputBytes, remoteTimeoutMs, maxTransferBytes }`. A slot
-  written before 0.0.18 also carries `command` and `probeTimeoutMs`; the schema
-  accepts and ignores them, and the next save drops them.
+- 表 `connections`：`{ id, label, host, user?, port?, identityFile?, proxyJump?, extraArgs?, note?, createdAt, updatedAt, lastProbe?, auth, agentAccess, allowedCommands, remoteTimeoutMs?, maxOutputBytes? }`，每次读与写都经 zod 校验，因此手工编辑的文件没法把一条坏记录混进页面（它会改以 `storage-error` 现形）。
+- 表 `sessions`：`{ sessionId, targetId, setAt }`——某个会话挑中的那个目标，于是一次远程调用可以省略 `target`。`remove` 会清掉指向被删目标的行。
+- 全局槽位：`{ maxOutputBytes, remoteTimeoutMs, maxTransferBytes }`。在 0.0.18 之前写入的槽位还会带 `command` 和 `probeTimeoutMs`；模式接受并忽略它们，而下一次保存就把它们丢掉。
 
-Format history: 1 = targets only, 2 = added `auth`, 3 = added the agent fields and
-the `sessions` table, 4 = the global slot shrank to the three ceilings. Every
-added field is optional with a default that reproduces what the earlier version
-meant, every retired field is accepted and ignored, so an existing file keeps
-opening — and the `json` backend stamps the unit with the version it last wrote.
+格式沿革：1 = 只有 targets，2 = 加了 `auth`，3 = 加了 agent 相关字段与 `sessions` 表，4 = 全局槽位收缩为三个上限。每个新增字段都是可选的，其默认值正好复刻旧版本的含义；每个退役字段都被接受并被忽略，所以已有文件仍然能打开——而 `json` 后端会给该 unit 打上它最后一次写入的版本号。
 
-The file's shape, asserted by an integration run against the published json
-backend:
+该文件的形状，由一次针对已发布 json 后端的集成运行所断言：
 
 ```json
 { "unit": { "name": "ssh_targets", "version": 6 },
@@ -176,722 +120,177 @@ backend:
   "tables": { "connections": { "ssh-0123456789": { "id": "…", "label": "…", "host": "…", "auth": "password", "agentAccess": "on", "pool": "on", "allowedCommands": ["git"], "extraArgs": ["-4"], "createdAt": "…", "updatedAt": "…", "lastProbe": { "status": "auth-failed" } } }, "sessions": { "session-77": { "sessionId": "session-77", "targetId": "ssh-0123456789", "setAt": "…" } } }
 ```
 
-Bounds split in two since 0.0.24. The structural ones still live in
-`src/storage.ts`: 64 targets, 16 concurrent remote operations shared by probes and
-commands, 8 servers that may each hold one shared connection (`MAX_LIVE_MASTERS`)
-before the idle longest-quiet one is retired, a five-minute idle timeout on a
-master (`CONTROL_PERSIST_SECONDS`), 12 per `probeAll` round, text fed to a
-command's stdin capped at 1,000,000 characters, a remote command line at 8,192,
-and at most 32 allowlisted program names of 64 characters each. A backgrounded
-command has no deadline of its own since 0.0.26 — `BACKGROUND_DEADLINE_MS` is
-gone, and the job lives until it settles, is killed, loses its owner, or the Host
-exits, holding one of the 16 operation slots the while. Of those 16, at most
-`maxConcurrentTransfers` (default 2) may be held by file copies, so two large
-transfers can never starve every command; a copy refused by that ceiling is told
-which ceiling it hit, in the shape that call already answers in. An `upload` or
-`download` comes back as the ordinary failure a too-large copy produces —
-`status: "failed"`, the lane quoted in `message`, the way out in `hint`, and
-nothing moved — because a reader of those actions should meet one vocabulary
-whether the copy was too big, too late, or simply not welcome while two others
-were already moving. A caller that reaches the transport directly, and the
-settings surface, still get the thrown `busy` error (409 over rpc), and an
-explicitly backgrounded command that cannot get a job slot is refused in the same
-frame it was asked in. A transfer runs on its own clock —
-`transferTimeoutMs` (default 5 minutes, capped at `maxTransferTimeoutMs`,
-30 minutes) — never the command's 30 s, because a permitted copy over a slow
-link legitimately runs for minutes, and `scp` itself has no size limit of its
-own. The recursive upload's file-count and cumulative-size ceilings
-(`maxTransferFiles`, `maxTransferTotalBytes`) are pre-checks at walk time. The
-ceilings a reader or a call can move — command timeout, per-stream output,
-transfer size, transfer deadline — plus the probe and pre-check deadlines, the
-spill cap, the kill grace, the per-kind lane ceilings, and whether a timed-out
-command is promoted, now live in `src/config.ts` as a default-and-cap pair (or a
-plain bounded default) each, all `.volatile()`.
+自 0.0.24 起边界一分为二。结构性的那些仍然住在 `src/storage.ts`：64 个目标、由探测与命令共用的 16 个并发远程操作槽、8 台各可持有一条共享连接的服务器（`MAX_LIVE_MASTERS`），超出就把最久安静的那条 idle 退役；一个 master 的 5 分钟 idle 超时（`CONTROL_PERSIST_SECONDS`）、每轮 `probeAll` 最多 12 个、喂给命令 stdin 的文本封顶 1,000,000 字符、远程命令行 8,192，以及最多 32 个各 64 字符的白名单程序名。自 0.0.26 起，后台化的命令没有自己的截止时间——`BACKGROUND_DEADLINE_MS` 已被移除——作业活到它落定、被杀、失去 owner，或 Host 退出为止，其间一直占着那 16 个操作槽之一。这 16 个里最多 `maxConcurrentTransfers`（默认 2）可被文件拷贝占据，于是两次大传输永远不会把所有命令饿死；一个被该天花板拒绝的拷贝会被告知它撞到的是哪个天花板，而且以该调用本来的应答形态告知。一次 `upload` 或 `download` 会以"拷贝过大"那种普通失败回来——`status: "failed"`，所涉通道写在 `message` 里，出路写在 `hint` 里，什么都没移动——因为那些动作的读者应当面对同一套词汇，无论那次拷贝是太大、太迟，还是在另外两个已经在动的时候压根不受欢迎。直接抵达 transport 的调用方，以及设置界面，仍然会拿到抛出的 `busy` 错误（rpc 上是 409）；而一个显式后台化、却拿不到作业槽的命令，会在它被问起的那个 frame 里就被拒。传输走自己的时钟——`transferTimeoutMs`（默认 5 分钟，封顶于 `maxTransferTimeoutMs`，即 30 分钟）——绝不用命令的那 30 秒，因为一次被允许的拷贝在慢速链路上合法地要跑上好几分钟，而 `scp` 本身并没有自己的大小限制。递归上传的文件数与累计大小天花板（`maxTransferFiles`、`maxTransferTotalBytes`）是走查（walk）时刻的前置检查。读者或一次调用能够改动的那些上限——命令超时、每流输出、传输大小、传输截止时间——外加探测与前置检查的截止时间、spill 上限、kill 宽限期、每类通道的上限，以及一次超时的命令是否被升级（promote），如今都住在 `src/config.ts` 里，各自成一对"默认值 + 天花板"（或一个带界的纯默认值），并且全部 `.volatile()`。
 
-### Bounds resolution (`src/config.ts`, `src/bounds.ts`)
+### 边界求解（`src/config.ts`、`src/bounds.ts`）
 
-The plugin used to carry two-sided ranges (`1 s – 300 s`, `1 KiB – 4 MiB`,
-`1 KiB – 512 MiB`) and **reject** a value outside them. The harness has no such
-shape anywhere, and that was the argument for changing it:
+这个插件过去带的是双边区间（`1 s – 300 s`、`1 KiB – 4 MiB`、`1 KiB – 512 MiB`），并**拒绝**落在区间外的值。而 harness 在任何地方都没有这样的形状，那正是改变它的论据：
 
-- `bash-local` declares `timeoutMs` (default 120 s) and `maxTimeoutMs` (600 s) as
-  **volatile config**, and its `resolve()` *clamps* an override rather than
-  refusing it (`packages/shell/bash-local/src/index.ts:100-107,122-127`).
-- The one rule a shell request enforces is "positive and finite":
-  `clampTimeout(requested, def, max, name)` throws only on that, and otherwise
-  returns `min(requested ?? def, max)` (`packages/util/timeout/src/index.ts:45-55`).
-- The shell result **echoes the effective timeout** — `ShellRunResult.timeoutMs`,
-  "after defaulting/capping" (`packages/shell/shell/src/types.ts:159-160`).
-- `tool-jobs` caps a wait the same way, and refuses at **load time** when a cap is
-  configured below its default (`packages/jobs/tool-jobs/src/index.ts:241-253`).
+- `bash-local` 把 `timeoutMs`（默认 120 s）和 `maxTimeoutMs`（600 s）声明为 **volatile config**，而它的 `resolve()` 对覆盖值是*钳制*（clamp），不是拒绝（`packages/shell/bash-local/src/index.ts:100-107,122-127`）。
+- 一个 shell 请求所强制的唯一规则是"正数且有限"：`clampTimeout(requested, def, max, name)` 只在这一条上抛异常，其余情况返回 `min(requested ?? def, max)`（`packages/util/timeout/src/index.ts:45-55`）。
+- shell 的结果会**回显生效的超时**——`ShellRunResult.timeoutMs`，注释写着 "after defaulting/capping"（`packages/shell/shell/src/types.ts:159-160`）。
+- `tool-jobs` 以同样的方式钳制 wait，并且当某个上限被配置到低于它的默认值时，在**加载时**就拒绝（`packages/jobs/tool-jobs/src/index.ts:241-253`）。
 
-So `bounds.ts` is now the only place the layering is stated — **call → target →
-profile override → configured default**, capped by `max*` — and it returns the
-effective value plus a note per correction, which `stampCeilings` attaches to the
-result (`timeoutMs`, `outputBytes`, `notes`; transfers add `bytesLimit` and
-`limitMode` — `in-flight` when the ceiling was enforced against the bytes that
-moved, `pre-check` when it was enforced against what a walk or an enumeration
-said first — and echo their own transfer deadline rather than the command's; an
-edit adds `stale`, `restored`, `versionChecked`, `contentVerified`, `verdict`,
-and `sha256`, because which of those is true is the difference between a file
-whose bytes were measured, a file whose length only happens to match, an undo,
-and a refusal). A value
-past the cap is no longer an error; a value that cannot mean a deadline (zero,
-negative, non-finite) still is, and the hint says where the line now sits.
-`readBounds` re-reads the volatile values per call — never snapshotted — so a
-profile edit lands on the next call, and a cap configured below its default is
-raised with a note rather than silently strangling the default.
+于是 `bounds.ts` 现在是唯一陈述这套分层的地方——**调用 → 目标 → profile 覆盖 → 配置默认值**，并由 `max*` 封顶——它返回生效值，外加每条修正各带一条说明，由 `stampCeilings` 附加到结果上（`timeoutMs`、`outputBytes`、`notes`；传输还会加上 `bytesLimit` 与 `limitMode`——当上限是对正在移动的那些字节施用时为 `in-flight`，当它是对某次走查或枚举所言先行施用时为 `pre-check`——并且回显它们自己的传输截止时间，而不是命令的那个；一次 edit 再加上 `stale`、`restored`、`versionChecked`、`contentVerified`、`verdict` 与 `sha256`，因为其中究竟哪一条为真，正是"一个字节被测量过的文件"、"一个只是长度恰好吻合的文件"、"一次撤销"与"一次拒绝"之间的分别）。一个越过天花板的值不再是错误；而一个压根无法表示截止时间的值（零、负数、非有限）仍然是，且 hint 会说明这条线如今落在何处。`readBounds` 每次调用都重新读取那些 volatile 值——从不快照——所以一次 profile 编辑会体现在下一次调用上；而一个被配置到低于其默认值的天花板会被抬高并附一条说明，而不是悄无声息地把默认值掐死。
 
-One asymmetry the harness cannot absorb for us: this plugin declares a
-`ToolDefinition.timeoutMs` (it did not before), and `guard/timeout-policy` reads
-that declaration and **replaces whatever the tool returned** with
-`Error: tool call timed out after <N>ms` when its own timer wins
-(`packages/guard/timeout-policy/src/index.ts:57-79`). Declaring the same number as
-the internal cap — which is what 0.0.23 shipped, both at 300 s — meant that race
-was a coin toss. The declared budget is now derived
-(`max(maxTimeoutMs, statTimeoutMs + maxTransferTimeoutMs) + graceMs + DRAIN_MS
-+ 5 s` of slack — the longer of the two clocks a call can wait on) and a test
-pins the inequality, so the plugin's own classified answer always wins on an
-ordinary timeout. `bash` sidesteps the whole question by declaring no budget at all
-(`packages/shell/tool-bash/src/index.ts:368-534`); a remote call that hangs with
-nothing to time out on is the reason this plugin keeps one.
+有一处不对称是 harness 无法替我们吸收的：本插件声明了一个 `ToolDefinition.timeoutMs`（它此前没有），而 `guard/timeout-policy` 会读取那份声明，并在它自己的计时器胜出时**把工具返回的任何东西替换成** `Error: tool call timed out after <N>ms`（`packages/guard/timeout-policy/src/index.ts:57-79`）。把同一个数字既声明为预算、又设为内部上限——那正是 0.0.23 出厂的形态，两边都是 300 s——意味着这场竞速就是抛硬币。声明的预算现在是被推导出来的（`max(maxTimeoutMs, statTimeoutMs + maxTransferTimeoutMs) + graceMs + DRAIN_MS` 再加 5 s 余量——也就是一次调用可能要等待的两条时钟中较长的那条），并由一个测试把这个不等式钉住，于是在一次普通超时里，插件自己分类过的应答总是胜出。`bash` 通过根本不声明任何预算而回避了整个问题（`packages/shell/tool-bash/src/index.ts:368-534`）；而一次远程调用挂在那里、却无事可超时，正是本插件保留一个预算的理由。
 
-`ssh -G`, `ssh -O`, and the probe deadlines are deliberately outside the override
-layers: the resolve view dials nothing, and a probe's budget is a rule for the
-page rather than a number a call negotiates. Which program dials is not a bound at
-all either: `SSH_EXECUTABLE` and `SSH_FALLBACK_PATHS` (and the same pair for scp)
-are the auto-detection search.
+`ssh -G`、`ssh -O` 以及探测的截止时间，是有意置于覆盖分层之外的：resolve 视图不拨任何号，而探测的预算是给页面定的一条规则，不是供某次调用去协商的一个数字。哪个程序负责拨号同样不是一个边界：`SSH_EXECUTABLE` 与 `SSH_FALLBACK_PATHS`（scp 也有同一对）就是那个自动探测的搜索序列。
 
-Record format is `version: 6` with `compatibleVersions: [1, 2, 3, 4, 5]`.
+记录格式是 `version: 6`，配 `compatibleVersions: [1, 2, 3, 4, 5]`。
 
-The shared settings slot carries the three ceilings the page still edits.
-Since 0.0.18 the ssh/scp programs are found at run time — bare name on `PATH`
-first, then the usual install locations, first hit cached until unload, misses
-re-tried — and one probe waits a fixed 30 seconds, so neither is stored or
-edited any more. A `configUpdate` that still sends a retired field is refused
-as `bad-input` rather than quietly dropped.
+共享的设置槽位只带页面仍在编辑的那三个天花板。自 0.0.18 起，ssh/scp 程序在运行时被找到——先试 `PATH` 上的裸名字，再到常见的安装位置，首次命中后缓存到卸载为止，未命中则重试——而且一次探测固定等待 30 秒，所以这两样都不再被存储或被编辑。一个仍然发送已退役字段的 `configUpdate` 会被当作 `bad-input` 拒绝，而不是被悄悄丢掉。
 
-### Credentials
+### 凭据
 
-Passwords, key passphrases, and the root account's own password do not live in
-the storage domain. `secrets.ts` keeps them as `grant` records in the credential
-store — `credentialKey('ssh', '<target-id>-password')`, `…-passphrase`, and
-since 0.0.20 `…-root` (the secret `su` elevation answers with), so
-`$DSH_HOME/.credentials.yaml` under `records:` — written with `modifyRecord`,
-removed with `deleteRecord` (deleting a target forgets all three slots), and
-read back only when a probe or an elevated call needs a value. The seam's rules
-that matter here: each key segment must match `^[a-z][a-z0-9-]*$` (which is why
-target ids are `ssh-<10 hex>`), a mutate callback returns a promise, an empty
-value is absent rather than blank, and the store file must carry no permission
-bits outside its owner.
+密码、密钥口令（passphrase）以及 root 账户自身的密码，不住在存储 domain 里。`secrets.ts` 把它们作为 `grant` 记录保存在凭据库中——`credentialKey('ssh', '<target-id>-password')`、`…-passphrase`，以及自 0.0.20 起的 `…-root`（`su` 提权用来应答的那个机密）——于是它们位于 `$DSH_HOME/.credentials.yaml` 的 `records:` 之下；用 `modifyRecord` 写入，用 `deleteRecord` 移除（删除一个目标就会忘记它的三个槽位），并且只在一次探测或一次提权调用需要一个值时才读回。此处要紧的几条接缝规则：每个 key 段必须匹配 `^[a-z][a-z0-9-]*$`（这就是目标 id 之所以是 `ssh-<10 hex>` 的原因），一个 mutate 回调返回一个 promise，空值是缺席而不是空白，并且存储文件不得带有属主之外的权限位。
 
-`askpass.ts` materializes the helper that lets `ssh` ask for one of those secrets
-with no terminal: `mkdtemp($TMPDIR/dsh-ssh-askpass-)` at mode `0700`, one
-`askpass.sh` at mode `0700`, removed by the plugin's disposer. It reads the
-prompt text `ssh` passes as `$1` and answers from `DSH_SSH_ASKPASS_PASSPHRASE` or
-`DSH_SSH_ASKPASS_PASSWORD`, falling back to whichever slot is filled.
+`askpass.ts` 物化出那个让 `ssh` 在没有终端的情况下也能索要上述某个机密的辅助程序：`mkdtemp($TMPDIR/dsh-ssh-askpass-)`，模式 `0700`，其中一个是 `askpass.sh`，模式 `0700`，由插件的 disposer 移除。它读取 `ssh` 作为 `$1` 传入的提示文本，从 `DSH_SSH_ASKPASS_PASSPHRASE` 或 `DSH_SSH_ASKPASS_PASSWORD` 作答，并回落到那两个当中被填上的任一个。
 
-### Connection pool (`src/pool.ts`)
+### 连接池（`src/pool.ts`）
 
-`MuxPool` leases a shared OpenSSH connection per target, so several calls ride one
-authenticated session instead of each paying for its own handshake and login. What
-it decides, and why:
+`MuxPool` 按目标租用一条共享的 OpenSSH 连接，于是多次调用共乘一个已认证的会话，而不必各自付一次握手与登录的代价。它决定了什么，以及为什么：
 
-- **Naming.** `<muxdir>/<target id>-<10 hex>.sock`, where the digest covers the
-  authority, port, jump host, identity file, extra flags, auth mode, and a hash of
-  the secret the call actually holds. Two rules fall out of that one line: an
-  edited target cannot inherit the master its predecessor left open (the name
-  changes and the old master idles out on its own), and a draft probed with a
-  second password cannot ride along on a master that authenticated with the first
-  and report the wrong secret as good. The secret itself never appears in a name.
-- **The default runs the other way.** `sshOptions` hands a call
-  `ControlPath=none` unless its caller leased a socket first. The Host account's
-  own `~/.ssh/config` may name a `ControlPath`, and a child that inherited it would
-  be sharing a master nobody here is counting, on credentials nobody chose.
-  `ControlMaster=no` alone would not be enough: it still joins a master that is
-  already listening.
-- **No probe on the hot path.** The ledger holds a *belief*. Nothing runs
-  `ssh -O check` before a call, because `ControlMaster=auto` falls back to a fresh
-  direct connection when the master has died — asking first would spend a whole
-  process per call to learn something the child learns for free.
-- **Settling a lease.** A call that reached a session marks the master live. A call
-  that timed out, or printed one of `SESSION_SETUP_PATTERNS` (`session setup
-  failed`, `too many sessions`, `channel open failed`, `ControlSocket … already
-  exists`), drops it so the next call dials its own. A rejected credential or a
-  refused host key settles nothing either way: the release path already discards a
-  master that never proved itself.
-- **Two ceilings, for two different costs.** `MAX_CONCURRENT_OPS` (16) counts local
-  `ssh` children, which is what this machine pays for. `MAX_LIVE_MASTERS` (8)
-  counts servers holding a shared connection; when a ninth arrives, the idle entry
-  that has been quiet longest is retired with `ssh -O exit`, and when all eight are
-  busy the newcomer dials alone rather than opening an unplanned session on some
-  server. Teardown children take no operation slot: closing a socket is a local
-  conversation, and it must still be possible while every slot is full.
-- **The server has its own ceiling.** `sshd`'s `MaxSessions` (default 10) caps the
-  channels one master may carry, and a host configured lower is a real case. That
-  is what the per-target `pool: 'off'` switch is for: the page edits it under
-  **Advanced options**, the model sees it as a `pool off` chip, and the record
-  carries it as `pool`, which is why the domain went to version 5; version 6 made
-  the global slot's three ceilings optional overrides of configured defaults.
-- **`ssh -G` leases nothing.** The resolve view answers where an alias points;
-  naming a control socket in it would describe a connection the call never makes.
-- **A page probe warms the pool.** The settings test dials under the same lease an
-  agent call takes, so pressing `Test` leaves behind the very connection the next
-  command rides — which is also why the probe asks for `-N` on a leased call: it is
-  the fastest way to answer "can this credential log in", and the cheapest.
-- **Lifetime.** The socket directory is a `mkdtemp` 0700 tree under the system temp
-  directory, made at activation and removed at unload, exactly like the askpass
-  helper. A master is a process OpenSSH left in the background, not a child this
-  Host still watches, so a Host killed outright leaves each master on its server
-  until `CONTROL_PERSIST_SECONDS` (300) runs out.
+- **命名。** `<muxdir>/<target id>-<10 hex>.sock`，其中的摘要覆盖 authority、端口、跳转主机、identity 文件、额外开关、认证模式，以及本次调用实际持有的那个机密的哈希。两条规则就从这一行里落出来：一个被编辑过的目标，不能继承它的前任留下的那条仍开着的 master（名字变了，而旧 master 会自己 idle 掉）；一个用第二个密码探测的 draft，也不能挤上一条用第一个密码完成认证的 master，然后把错误的机密报成好的。机密本身从不出现在名字里。
+- **默认值是反着跑的。** 除非调用方先租到一个 socket，`sshOptions` 会给一次调用配上 `ControlPath=none`。Host 账户自己的 `~/.ssh/config` 可能声明了一个 `ControlPath`，而一个继承了它的子进程就会去共享一条这里没人计数的 master，用的还是没人挑选过的凭据。单靠 `ControlMaster=no` 还不够：它仍然会加入一条已在监听的 master。
+- **热路径上不探测。** 台账持有的是一个*信念*。没有任何调用之前会跑 `ssh -O check`，因为 `ControlMaster=auto` 在 master 已死时会回落成一条全新的直连——先问一句，等于每次调用都花掉一整个进程，去打探一件子进程免费就能学到的事。
+- **一次租约如何落定。** 抵达了会话的那次调用，会把 master 标记为存活。一次超时的调用，或打出 `SESSION_SETUP_PATTERNS` 之一（`session setup failed`、`too many sessions`、`channel open failed`、`ControlSocket … already exists`）的调用，会把它丢掉，好让下一次调用自己拨号。一次被拒的凭据，或一个被拒的 host key，两边都不落定：释放路径本来就会丢弃一条从未自证过的 master。
+- **两个天花板，对应两种不同的代价。** `MAX_CONCURRENT_OPS`（16）计的是本地 `ssh` 子进程，那才是这台机器实际付出的东西。`MAX_LIVE_MASTERS`（8）计的是持有一条共享连接的服务器；当第九个到来时，最久安静的那条 idle 条目会用 `ssh -O exit` 退役，而当八条全在忙，后来者就独自拨号，而不是在某台服务器上开一场计划外的会话。拆除（teardown）子进程不占操作槽：关闭一个 socket 是一场本地对话，而且它在每个槽都满的时候也必须仍然可能。
+- **服务器有自己的天花板。** `sshd` 的 `MaxSessions`（默认 10）为一条 master 可承载的通道数封顶，而一台配置得更低的主机是真实情形。这就是每目标 `pool: 'off'` 开关的用场：页面在 **Advanced options** 之下编辑它，模型把它看成一枚 `pool off` 徽标，而记录以 `pool` 承载它——这正是 domain 走到 version 5 的原因；version 6 则让全局槽位的那三个天花板变成"配置默认值的可选覆盖"。
+- **`ssh -G` 什么都不租。** resolve 视图回答的是一个 alias 指向何处；在里面点名一条 control socket，等于描述一次该调用从未建立的连接。
+- **一次页面探测会预热连接池。** 设置测试的拨号走的是 agent 调用所取的同一份租约，所以按下 `Test` 会留下下一条命令要乘的那一条连接——这也是探测会在一条租到的连接上要求 `-N` 的原因：它是回答"这份凭据能不能登录"最快、也最省的方式。
+- **生命周期。** socket 目录是系统临时目录之下一棵 `mkdtemp` 的 0700 树，在激活时建立、在卸载时移除，与 askpass 辅助程序完全一样。一个 master 是 OpenSSH 丢在后台的一个进程，而不是这个 Host 仍在看管的一个子进程，所以一个被直接杀掉的 Host，会把每个 master 留在它各自的服务器上，直到 `CONTROL_PERSIST_SECONDS`（300）耗尽。
 
-### Promotion: a deadline that belongs to the reply
+### 升级：一个属于应答本身的截止时间
 
-`ops.runPromoted` is the 0.0.26 shape of a foreground `exec`, and it copies the
-harness's own answer rather than inventing one: the command is started through the
-same untimed job-capable path a background call uses, and the plugin then **waits
-on it** for `settings.remoteTimeoutMs` (`packages/shell/tool-bash/src/index.ts:508`
-resolves with `onExpiry: 'none'` for exactly this reason, and `:297-353` waits the
-registry out).
+`ops.runPromoted` 是一次前台 `exec` 的 0.0.26 形态，而它照搬 harness 自己的答案，并不另造一套：命令经由后台调用所用的那条同路的、不计时且具备作业能力的路径启动，随后插件**等待**它 `settings.remoteTimeoutMs` 那么久（`packages/shell/tool-bash/src/index.ts:508` 正是出于这个理由以 `onExpiry: 'none'` resolve，而 `:297-353` 会把台账等到底）。
 
-- Settled inside the window → classified normally, the way it always was.
-- Still running at the deadline → `startRemoteJob` attaches the live child and the
-  call answers `status: 'promoted'` with the `jobId`, the partial output, and a hint
-  naming `job_output`. `ok` is true: the call succeeded at handing over, and a model
-  that read it as a failure would restart a build that is still going.
-- Refused by the registry (the per-owner job cap) → the child is killed and the
-  result says the hand-over was refused and why, rather than pretending the timeout
-  was the whole story.
+- 在窗口之内落定 → 照常分类，一如以往。
+- 到截止时间仍在运行 → `startRemoteJob` 接上那个活的子进程，调用以 `status: 'promoted'` 作答，带上 `jobId`、部分输出，以及一条点名 `job_output` 的 hint。`ok` 为真：这次调用在"移交"上是成功的，而把它读成一次失败的模型，会重启一个仍在进行中的构建。
+- 被台账拒绝（每 owner 的作业上限）→ 子进程被杀掉，结果会说明移交被拒以及原因，而不是假装超时就是全部的故事。
 
-Two details are load-bearing. The provider's offset readers are **non-consuming**,
-so the partial read that comes with the hand-over does not steal bytes from the job
-— verified live: the hand-over preview carried `first-line`, and `job_output`
-afterwards carried `first-line`, `second-line`, and `exit=0 · 3377 ms`. A promoted
-result therefore sets **no** `truncated` flag either: that word means a ceiling
-clipped a finished stream, and here the stream is still being written — 0.0.26
-claimed otherwise and the renderer went on to report a spill file that had never
-been needed. And `startRun` gained `stdin`, because an elevated command's password
-is injected at spawn: a promoted call has already answered its prompt, so handing it
-over is safe in a way that *starting* a call in the background never is
-(`background: true` with `as`/`su` stays refused).
+有两个细节是承重的。provider 的偏移读取器是**不消费**的，所以随移交而来的那次部分读取，不会从作业那里偷走字节——已实测验证：移交预览带上了 `first-line`，此后的 `job_output` 同样带上了 `first-line`、`second-line` 以及 `exit=0 · 3377 ms`。因此一个 promoted 结果也**不**设置 `truncated` 旗：那个词意味着某道天花板裁剪了一条已经结束的流，而在这里流仍在被写入——0.0.26 的说法相反，于是渲染器继续报告一个从来就不需要的 spill 文件。而 `startRun` 增加了 `stdin`，因为一个提权命令的密码是在 spawn 时注入的：一个 promoted 调用已经答完了它的提示，所以把它移交是安全的，而以后台方式*启动*一次调用则永远不安全（`background: true` 配 `as`/`su` 仍然被拒）。
 
-`promoteOnTimeout: false` in config, or a profile with no job registry, keeps the
-plain bounded wait — the behaviour this plugin shipped with, still one code path
-rather than a special case.
+config 中的 `promoteOnTimeout: false`，或者一个没有作业台账的 profile，会保留那个普通的有界等待——也就是本插件出厂时自带的行为，仍是一条代码路径，而不是一个特例。
 
-### Tool (`src/tool.ts`)
+### 工具（`src/tool.ts`）
 
-One tool, `ssh_client`, registered through `ctx.tools.register(defineTool(…))` inside
-`ctx.effect` — a third-party bundle needs no preset entry: the registry feeds its
-schemas into the system-prompt assembly on its own (the installed `dsh-github-flow`
-bundle is the live proof of that).
+只有一个工具，`ssh_client`，经 `ctx.tools.register(defineTool(…))` 在 `ctx.effect` 之内注册——一个第三方 bundle 不需要 preset 条目：台账会自己把它的 schema 喂进系统提示的拼装（已安装的 `dsh-github-flow` bundle 就是这件事的活证）。
 
-| Field | Shape |
+| 字段 | 形态 |
 | --- | --- |
-| `action` | `get_connection` \| `exec` \| `read` \| `write` \| `edit` \| `upload` \| `download` — `exec` also takes `background: true` — `read` answers a directory listing, a file's text, or a refusal, depending on what the path is — `edit` also takes `dryRun: true` to preview the change and its diff without writing or backing anything up |
-| `localPath`, `recursive` | the local side of a transfer; relative paths resolve inside the conversation workspace |
-| `target` | id, display name (any case), `host`, or `user@host`; omitted means this conversation's chosen target, then a lone saved target |
-| `command` / `path` / `content` | the remote command line, an absolute remote path, and the exact text to write |
-| `background` | for `exec`: leave the command running and return its job id; poll with `job_output`, stop with `job_kill` |
-| `tty` / `input` | for `exec`: run under `ssh -tt` (for a command that inspects its own output), and text fed to its stdin |
-| `as` / `su` | for `exec`: elevation — `as: "<account>"` prefixes sudo (forcing `tty` and injecting the stored login password as the answer; `sudo -n` when no password is stored), `su: true` runs the command inside `su root -c` answered with the stored root password; an explicit `input` overrides either injection, and both never appear in results or transcripts |
-| `localPath` / `recursive` | for `upload` and `download`: the workspace-side path, and whether a directory moves |
-| `oldText` / `newText` | for `edit`: the exact text to find (copied from a read) and its replacement; an empty `newText` deletes |
-| `all` / `replaceFirst` / `backup` | for `edit`: replace every occurrence / only the first / skip the `<path>.dsh-bak` copy |
-| `overwrite` / `append` / `mkdir` | write behaviour; `mkdir` defaults to true |
-| `timeoutMs` / `maxBytes` | per-call overrides of the shared ceilings |
-| `output` | `oneOf` per action, each `additionalProperties: false`; `execute` returns the canonical value and `output.render` writes the transcript text. The registry validates that value against the projected schema, so a branch that omits a field the producer emits rejects the whole call — the suites therefore validate every action's payload with `validateJsonSchemaValue`, not just its contents |
+| `action` | `get_connection` \| `exec` \| `read` \| `write` \| `edit` \| `upload` \| `download`——`exec` 还接受 `background: true`——`read` 会根据该路径究竟是什么，返回目录清单、一个文件的文本，或一次拒绝——`edit` 还接受 `dryRun: true`，用于预览这次改动及其 diff，既不写入也不做任何备份 |
+| `localPath`、`recursive` | 传输的本地一侧；相对路径在会话工作区之内解析 |
+| `target` | id、显示名（任意大小写）、`host`，或 `user@host`；不填即指本会话所选的目标，其次是一个已保存的唯一目标 |
+| `command` / `path` / `content` | 远程命令行、一个绝对远端路径，以及要写入的确切文本 |
+| `background` | 用于 `exec`：让命令继续运行并返回它的 job id；用 `job_output` 轮询，用 `job_kill` 停止 |
+| `tty` / `input` | 用于 `exec`：在 `ssh -tt` 之下运行（给一个会检查自己输出的程序），以及喂给它 stdin 的文本 |
+| `as` / `su` | 用于 `exec`：提权——`as: "<account>"` 会加上 sudo 前缀（强制 `tty`，并把存储的登录密码注入作为应答；若未存储密码则用 `sudo -n`），`su: true` 会把命令放进 `su root -c` 之内运行，并用存储的 root 密码应答；一个显式的 `input` 会覆盖其中任何一种注入，而这两者都从不出现在结果或记录文本里 |
+| `localPath` / `recursive` | 用于 `upload` 与 `download`：工作区一侧的路径，以及一个目录是否整体移动 |
+| `oldText` / `newText` | 用于 `edit`：要查找的确切文本（从一次读取里复制而来）及其替换；空的 `newText` 表示删除 |
+| `all` / `replaceFirst` / `backup` | 用于 `edit`：替换每一处匹配 / 只替换第一处 / 跳过 `<path>.dsh-bak` 那份副本 |
+| `overwrite` / `append` / `mkdir` | 写入行为；`mkdir` 默认为 true |
+| `timeoutMs` / `maxBytes` | 对共享天花板的逐次调用覆盖 |
+| `output` | 按 action 各一个 `oneOf`，且每个都 `additionalProperties: false`；`execute` 返回规范值，而 `output.render` 写出记录文本。台账会拿那个值对照投影出的 schema 校验，所以一个漏掉了生产方所发出字段的分支，会让整次调用被拒——因此这些测试套件会用 `validateJsonSchemaValue` 校验每个 action 的 payload，而不只是校验其内容 |
 
-Two notes on that field table, both pinned by `tests/tool.test.mjs`:
+关于那张字段表有两条说明，都由 `tests/tool.test.mjs` 钉住：
 
-- Naming a target with an explicit `target` argument records it as this
-  conversation's choice (`rememberSessionTarget` writes the `sessions` row only
-  for a call that succeeded and named a server on purpose), so the next call can
-  leave `target` out.
-- The `parameters` schema now declares all twenty-three fields the body reads; until
-  0.0.16 the seven the `edit` and prompt-answering calls use (`oldText`, `newText`,
-  `all`, `replaceFirst`, `backup`, `tty`, `input`) arrived undeclared and survived
-  only the defensive reader, 0.0.20 added `as`/`su` alongside them, 0.0.32
-  added `dryRun` for the `edit` preview, and 0.0.34 changed no parameter at all —
-  what moved was what two of them promise: `maxBytes` now says it is the transfer
-  ceiling as well as the output ceiling (and that one file is held to it while the
-  bytes move), and `timeoutMs` says a copy's value covers its pre-check and publish
-  steps too.
-- The tool declares `isConcurrencySafe` for the two reads only — `get_connection`
-  and `read` — so the harness may run several of those in one parallel batch.
-  Every action that changes something stays exclusive: the transport *could* run
-  mutations concurrently, but no remote filesystem here makes read-modify-write
-  transactional, and the declaration is about what is safe to interleave, not
-  about what the plumbing survives.
+- 用一个显式的 `target` 参数点名一个目标，会把它记录为本次会话的选择（`rememberSessionTarget` 只为一次成功、且有意点名了服务器的调用写 `sessions` 行），于是下一次调用可以把 `target` 省掉。
+- `parameters` schema 现在声明了 body 所读取的全部二十三个字段；直到 0.0.16，`edit` 与应答提示的那类调用所使用的那七个（`oldText`、`newText`、`all`、`replaceFirst`、`backup`、`tty`、`input`）都是未声明的，只靠一个防御性读取器才活下来；0.0.20 在旁边加了 `as`/`su`；0.0.32 为 `edit` 预览加了 `dryRun`；而 0.0.34 一个参数都没有改——移动的是其中两个字段所承诺的东西：`maxBytes` 现在说明它既是传输上限也是输出上限（并且单个文件是就着正在移动的那些字节而受限于它的），而 `timeoutMs` 说明一次拷贝的值还要覆盖它的前置检查与发布（publish）两步。
+- 工具只为两个读取动作声明 `isConcurrencySafe`——`get_connection` 与 `read`——于是 harness 可以在同一个并行批次里运行若干个这样的。每一个会改动事物的动作都保持独占：transport *能够*并发运行变更，但这里没有任何远程文件系统能让 read-modify-write 成为事务；那份声明讲的是什么是可安全交错的，而不是这套管道能承受什么。
 
-Policy is decided in `tools/pre-execute`, not inside the tool, which is what the
-tool-authoring docs prescribe for deployment policy:
+政策是在 `tools/pre-execute` 里决定的，不在工具内部，这正是工具编写文档针对部署政策所给出的处方：
 
-| Call | Verdict |
+| 调用 | 判定 |
 | --- | --- |
-| `get_connection`, `read` (a listing or a file's text), `download` | allow |
-| `exec` carrying `as` or `su` | **ask, always** — sudo is a master key, and an allowlist hit on the inner program never consented to another account; the prompt names the account and which stored secret it will spend |
-| `exec`, its one bare leading program is on a **non-empty** `allowedCommands` | allow — the same verdict applies to a backgrounded command |
-| `exec`, any other command: an unlisted program, an **empty allowlist** (what a fresh target has, so every command is asked), or a pipeline / redirection / substitution (no single leading program) | **ask** |
-| any `ask`, in a conversation whose approval policy is `never` (full-access mode) | **allow** — the core rejects unanswered asks by policy, so asking there is a self-inflicted refusal; this is consent the deployment stated on purpose |
-| any `ask` whose approval surface is unreachable — no `approval` service mounted, or no session to route through (`unavailable`) | **ask**, and the core answers with its fail-closed denial — it quotes the reason this gate hands it and appends nothing, so since 0.0.34 that reason says which piece is missing ("… refused because this conversation cannot be asked: this Host mounts no approval service, or the session has no route to one. Nothing was run…"). A live isolated Host showed the earlier shape reading exactly like a human's refusal, which is how that sentence earned its place. Since 0.0.30 `unavailable` is no longer merged with `never`: the absence of anyone who could consent is not itself consent, and a remote write in a profile with no approval surface is refused rather than silently run |
-| `write`, `edit`, `upload` | **ask** |
-| `download` | allow (it reads the server and writes inside the session workspace, which the file pipeline already governs) |
-| any action on a target with `agentAccess: off` | deny, naming the settings page |
-| storage unreadable at gate time | deny — running blind on a remote host is worse |
+| `get_connection`、`read`（一次目录清单或一个文件的文本）、`download` | allow |
+| 携带 `as` 或 `su` 的 `exec` | **ask，永远如此**——sudo 是一把万能钥匙，而对内层程序的白名单命中从未同意过换用另一个账户；提示会点名那个账户，以及它将花掉哪一份已存储的机密 |
+| `exec`，它那一个光杆的前导程序位于一个**非空**的 `allowedCommands` 之上 | allow——同一个判定也适用于一条后台化的命令 |
+| `exec`，其它任何命令：一个未被列出的程序、一份**空白**名单（一个全新目标的默认，于是每条命令都要问），或者一条流水线 / 重定向 / 替换（没有单一前导程序） | **ask** |
+| 任何 `ask`，发生在一个批准政策为 `never`（完全访问模式）的会话里 | **allow**——core 会按政策拒绝无人应答的 ask，所以在那里发问等于自我否决；这是部署有意陈述过的同意 |
+| 任何 `ask`，其批准界面无法抵达——没有挂载 `approval` 服务，或没有可供路由的会话（`unavailable`） | **ask**，并由 core 以其 fail-closed 的否决作答——它会引述这道闸门交给它的那个理由，并且不追加任何东西，所以自 0.0.34 起那个理由会说明缺的是哪一块（"… refused because this conversation cannot be asked: this Host mounts no approval service, or the session has no route to one. Nothing was run…"）。一次实机的独立 Host 显示，较早的那个形态读起来恰恰像是出自人手的一次否决，那句话就是这样挣到了它的位置。自 0.0.30 起 `unavailable` 不再与 `never` 合并：没有谁能够同意，这件事本身并不是同意；于是一个没有批准界面的 profile 里的远程写入会被拒绝，而不是被悄悄执行 |
+| `write`、`edit`、`upload` | **ask** |
+| `download` | allow（它读服务器，并写进会话工作区之内，而后者已由文件管道掌管） |
+| 一个 `agentAccess: off` 的目标上的任何动作 | deny，并点名设置页面 |
+| 在闸门时刻存储不可读 | deny——在一台远程主机上盲跑更糟 |
 
-This table states `decideAccess` as it runs today, and since 0.0.17 the
-model-facing strings state it too: `describeRemote` tells the model a command
-runs unasked only when its bare leading program is named by a non-empty
-allowlist, and the `get_connection` render line prints `allowlist=none(ask
-every command)` — both pinned by `tests/tool.test.mjs`, which asserts the
-description and the gate agree on the same call. (`0.10.0` intended this; the
-strings drifted at 3786005 and the gate never moved.)
+这张表陈述的是 `decideAccess` 今天如何运行，而自 0.0.17 起，面向模型的字符串也陈述同一件事：`describeRemote` 告诉模型，一条命令只有在它的光杆前导程序被一份非空白名单点名时才会免问运行，而 `get_connection` 的渲染行会打印 `allowlist=none(ask every command)`——两者都由 `tests/tool.test.mjs` 钉住，它会断言描述与闸门对同一次调用的说法是一致的。（`0.10.0` 的本意就是这样；字符串在 3786005 处漂移了，而闸门从未动过。）
 
-Both switches are edited in the target form since 0.0.31: an **agent access**
-checkbox (off shows an `agent access off` chip on the row) and a **no-approval
-programs** field. The field is a no-approval list, not a sandbox and not a
-limit: it only decides which single-program commands skip the asking, it does
-not restrict what arguments a listed program receives, and it cannot make a
-write safe. The page's own hint states the same.
+这两个开关自 0.0.31 起都在目标表单里编辑：一个 **agent access** 复选框（关闭时在行上显示一枚 `agent access off` 徽标），以及一个**免批准程序**字段。该字段是一份免批准清单，既不是沙箱也不是限制：它只决定哪些单程序命令可以跳过询问，它不限制一个被列出的程序可以收到什么参数，也无法让一次写入变得安全。页面自己的 hint 陈述的是同样的内容。
 
-An `ask` is resolved by the harness approval UI (`ctx.approval`, answered through
-the standard tool-approval surface) with `displayReason` supplied in English and
-Chinese, and a missing approval service turns an `ask` into a denial rather than a
-pass. The tool body re-checks only the hard stop (`agentAccess`), because it
-cannot know whether the gate already obtained consent.
+一次 `ask` 由 harness 的批准界面解决（`ctx.approval`，通过标准的工具批准界面作答），其中 `displayReason` 会同时以英文和中文给出，而一个缺失的 approval 服务会把一次 `ask` 变成一次否决，而不是一次崩溃。`never` 模式是部署有意陈述的同意，而"没有人能够同意"这种缺席本身并不是同意。工具主体只复查那道硬停止（`agentAccess`），因为它无从知道闸门是否已经取得了同意。
 
-The name `ssh_client` is a shared extension point: the registry is probed with
-`ctx.tools.get` first, and a taken name falls back to `ssh_remote` with a warning
-instead of failing the fiber; a race between probe and registration retries once.
-An unrelated registration fault still propagates.
+`ssh_client` 这个名字是一个共享的扩展点：先用 `ctx.tools.get` 试探台账，一个已被占用的名字会带着警告回落到 `ssh_remote`，而不是让 fiber 失败；试探与注册之间的竞态会重试一次。一个无关的注册故障仍然会向上传播。
 
-### Client (`src/client.ts`)
+### 客户端（`src/client.ts`）
 
-One component owns the page and its two tabs: `SshSection` holds the state, the
-`list` read, and every operation, while `SshTabs` switches which cards render —
-**SSH targets** (the list, the form, and the probe results) or **Client settings**
-(the three fields plus the read-only fixed bounds). `apply` registers the
-`settings.ssh` dictionaries (both baseline locales) and then two seats, each
-inside its own `ctx.effect`:
+只有一个组件拥有这个页面及其两个标签页：`SshSection` 持有状态、`list` 读取以及全部操作，而 `SshTabs` 切换哪些卡片渲染——**SSH targets**（清单、表单与探测结果），或者 **Client settings**（那三个字段，加上只读的固定边界）。`apply` 先注册 `settings.ssh` 词典（两份基线 locale），然后注册两个座位，各自位于它自己的 `ctx.effect` 之内：
 
-| Seat | Registration | Renders |
+| 座位 | 注册 | 渲染 |
 | --- | --- | --- |
-| `settings.section` | `{ id: 'ssh', order: 25, label: () => ctx.locale.bind(NS)('nav'), locale: NS }` | the page, including its tab strip |
-| `settings.section.icon` | `{ id: 'ssh' }` | caret + dashed link + server rack, matching `icon.svg` |
+| `settings.section` | `{ id: 'ssh', order: 25, label: () => ctx.locale.bind(NS)('nav'), locale: NS }` | 整个页面，含它的标签条 |
+| `settings.section.icon` | `{ id: 'ssh' }` | 光标 + 虚线链路 + 服务器机架，与 `icon.svg` 一致 |
 
-The settings shell has no grouping mechanism for plugin sections — one section is
-one navigation row — so two views under one row are the page's own tabs. The tab
-strip is the host `SegmentedControl` copied into this module rather than
-imported, which is what the plugin-UI rules require; see the vendoring note under
-**Verified contracts** for the markup, keyboard, and token contract it carries.
+设置外壳对插件 section 没有分组机制——一个 section 就是一条导航行——所以一行之下的两个视图，就是页面自己的标签页。那条标签条是把宿主的 `SegmentedControl` *复制*进本模块而非 import，这正是 plugin-UI 规则所要求的；见 **已验证的契约** 之下那条关于 vendoring 的说明，了解它所承载的标记、键盘与 token 契约。
 
-Controls and their stylesheet are local to the plugin (`dshssh-*` classes,
-`--dsw-alias-*` tokens only, no Harness client package required as a module), and
-the stylesheet is rendered as a `<style>` element inside the component so
-unmounting removes it.
+控件与它们的样式表都是插件本地的（`dshssh-*` class，只使用 `--dsw-alias-*` token，无需把任何 Harness client 包作为模块引入），而且样式表是作为组件内部的一个 `<style>` 元素渲染的，好让卸载时把它一并移除。
 
-## Verified contracts
+## 已验证的契约
 
-Facts checked against the running DSH (`0.2.2-rc.1`, `web` profile) while 0.2.0
-was written and re-checked through 0.5.1 (plugin numbers here are pre-rule; see
-`CHANGELOG.md`), and reproduced against a live server for the 0.5.1 fix, so the
-next round does not have to re-derive them:
+以下事实是对照运行中的 DSH（`0.2.2-rc.1`，`web` profile）核查过的——写于 0.2.0 的时代，并一路复查到 0.5.1（本文出现的插件编号是新规之前的，见 `CHANGELOG.md`）——并且为 0.5.1 那次修复对着活服务器复现过，好让下一轮不必重新推导它们：
 
-- `ssh -G <target>` is a **local** operation: it prints the resolved
-  configuration and exits without dialing, so the Resolve button cannot hang,
-  cannot leak a credential, and answers the alias question instantly. The plugin
-  passes only its own port/key/jump/extra-flag overrides, so what it prints is
-  what a probe would dial.
-- Connection sharing, reproduced against a live server (OpenSSH 10.0p2 client,
-  `jiegg@10.100.1.1`) while 0.0.22 was written, so none of the pool rests on a
-  reading of the manual: `-o ControlMaster=auto -o ControlPath=<literal path> -o
-  ControlPersist=300` leaves the master **running after the first client exits** —
-  the socket file is still there and `ssh -O check` answers `Master running
-  (pid=…)` — a second call rides it, and `ssh -O exit` answers `Exit request
-  sent.` *and removes the socket file*. A later `-O check` on that path fails with
-  `Control socket connect(…): No such file or directory` and exit 255, while a
-  fresh call on the same dead path authenticates again and exits 0. That last line
-  is the whole reason the pool never probes liveness on the hot path: OpenSSH
-  heals a dead master by dialing directly, for free, inside the call that needed
-  it. A control socket named by a literal path (no `%h`/`%C` tokens) works for
-  `-O` too, which is what makes an eviction targetable.
-- **The subprocess provider already owns output retention; the plugin only had to
-  ask.** A stream collect is `{ maxBytes, spill?: { maxBytes } }`, and "omitting
-  `spill` keeps only the in-memory tail" is documented behaviour
-  (`packages/subprocess/subprocess/src/types.ts:38-52`): with `spill` present, the
-  provider keeps the **tail** in memory because "errors and final results cluster
-  at the end", and writes the **complete** stream to a `0600` file under its own
-  `mkdtemp` 0700 per-process directory (`packages/subprocess/subprocess-local/src/
-  output.ts:126-128,160-213`), reporting the path as `spillPath` on the read. This
-  plugin passed `maxBytes` alone until 0.0.25, which is why "truncated" used to mean
-  "the rest is gone"; it now passes the spill budget too and carries the path into
-  the result and the transcript, in the same sentence shape the bash tool uses
-  (`packages/shell/tool-bash/src/render.ts:11-15`). A stream larger than the spill
-  cap has the file discarded — the plugin does not pretend otherwise: it names what
-  is absent rather than inventing a recovery.
-- **`ssh -N` ends by itself when a master is being left behind** — measured on the
-  same live server while 0.0.23 was written, which is what the probe is built on:
-  with `-o ControlMaster=auto -o ControlPath=… -o ControlPersist=300`, an `-N` call
-  authenticates and exits 0 in **0.2 s** for a first connection and **0.1 s** over
-  a warm master, leaving `Master running (pid=…)` behind. Without those options the
-  same `-N` call **hangs** (an idle session with nothing to do, killed only at its
-  deadline) — hence the probe asks for `-N` only on a leased connection and runs
-  `true` on its own. A rejected credential is still named honestly under `-N`
-  (`Permission denied (publickey,password).`), while the same wrong password run
-  with `true` printed `Connection closed by … port 22` and would have been
-  classified `unreachable`: the older shape could blame the network for a secret
-  problem. The `Authenticated to … using "password".` line exists in this client but
-  is only printed at `LogLevel=VERBOSE`, where it drowns in the key-exchange
-  transcript, so the probe reads the exit status instead of chasing it.
-- `fs/write-intent` is a single-slot **decision** waterfall: a listener may
-  answer `createIfAbsent` or `replaceIfVersion` and never consults your write, so
-  the plugin must act on the answer — a create-only guard against an existing file
-  is a refusal, and a version guard cannot be honoured by an external copy and is
-  reported as such. The session change recorder attaches the edit by **object
-  identity** of the actor it saw at `tools/pre-execute`, which is why the plugin
-  hands the live tool execution to the waterfall and not a look-alike.
-- File transfer, measured on a live server: **one file rides a counted `ssh`
-  channel, a tree rides `scp -r`**. `scp` is the sibling of the **detected** ssh
-  executable (`/usr/bin/ssh` → `/usr/bin/scp`, else its own `PATH`-then-locations
-  search); it takes the port as `-P` (not `-p`), accepts the same `-o BatchMode` /
-  `StrictHostKeyChecking=accept-new` / `-i` / `-J` / `PreferredAuthentications`
-  flags, and reads the far end as one `host:path` argument, so no local shell is
-  involved. A single file does not go through it: the payload is `cat` on the far
-  side of `ssh`, and the byte count is taken at this end, which is the only place
-  a ceiling can be enforced against the bytes that move rather than against a
-  number `stat` quoted before they did. The provider's `collect` mode cannot carry
-  that (a 400 MiB answer becomes a 400 MiB spill file), but its `stdout: 'pipe'`
-  and `stdin: 'pipe'` dispositions are caller-owned raw streams, and a copy asks
-  for no spill on either face. A `cat` whose reader went away dies of `EPIPE`/
-  `SIGPIPE` — measured — so stopping the local child stops the far half.
-  - **Landing, both directions.** A download writes a unique `.dsh-part-<pid>-<entropy>`
-    sibling and renames it into place only after a clean finish; an upload lands in
-    a sibling *on the server* and then takes its final name. Replacing an existing
-    file happens *through* it (`cat -- part > dest`, run as a background job so the
-    mover has a pid of its own to report): measured on a live server, `scp` did the
-    same — inode, `mode 640`, owner, and a second hardlink all surviving the
-    overwrite, the link's other name seeing the new bytes. A rename would have
-    quietly broken all three. A fresh name is renamed, then carries the source's
-    permission bits through the server's umask (`777` arrived as `755` under
-    `umask 0022`, `640` stayed `640`) — and the mode has to be computed with three
-    assignments, because `chmod "$(printf '%o' $(( … ) ))"` does not parse under
-    `sh` or `dash` and under `bash` hands `chmod` an empty argument and lands the
-    file on mode `000`. A stopped upload removes its temp; a publish that failed
-    leaves the complete bytes where they are and says so.
-  - **Recursion is a different promise, and says which one.** `scp -r`'s layout is
-    kept because it is the layout callers expect: an absent destination *becomes*
-    the tree, an existing one holds `dest/<basename>`, and symlinks are followed
-    (measured: a linked directory arrived as a real directory, a linked file with
-    its target's mode). Its ceilings are pre-checks — the cycle-guarded local walk
-    for an upload, one `find -L … -printf '%s\n' | awk` enumeration for a download,
-    behind a `-maxdepth 0 -printf` probe so a server without GNU `find` cannot read
-    as an empty directory. A tree is never *counted while it moves*: that would
-    need an archive, and an archive quietly changes what a symlink means.
-  - **`~/` needs the slash outside the quotes.** The schema has always allowed the
-    form, and a fully quoted `'~/f.txt'` is not the same word to a shell: a
-    tilde-prefix ends at the first *unquoted* slash, so the old shape reached the
-    server as a literal and `cat` answered `No such file or directory` — measured,
-    in `sh`, `dash`, and `bash`, for a read and for a redirection alike. `~/'f.txt'`
-    works, `~'/f.txt'` does not.
-  - `rsync` is absent on this machine and is therefore not used.
+- `ssh -G <target>` 是一个**本地**操作：它打印解析后的配置然后退出，并不拨号，所以 Resolve 按钮不会挂起、不会泄露机密，并且能即时回答关于 alias 的那个问题。插件只传入它自己的 port / key / jump / 额外开关覆盖，因此它打印出来的，正是一次探测将要拨号的内容。
+- 连接共享，是在写 0.0.22 时对着活服务器（OpenSSH 10.0p2 客户端，`jiegg@10.100.1.1`）复现过的，所以连接池里没有哪一部分是建立在读手册之上的：`-o ControlMaster=auto -o ControlPath=<literal path> -o ControlPersist=300` 会让 master **在第一个客户端退出之后仍在运行**——socket 文件还在，而 `ssh -O check` 答 `Master running (pid=…)`——第二次调用乘上它；而 `ssh -O exit` 会答 `Exit request sent.` *并把 socket 文件移除*。此后对那条路径的 `-O check` 会以 `Control socket connect(…): No such file or directory` 加 exit 255 失败，而同一条已死路径上的一次全新调用会重新认证成功并 exit 0。最后那一行，正是连接池从不在热路径上探活的全部理由：OpenSSH 会在需要它的那次调用之内，免费地改用直接拨号来自愈一条死掉的 master。一条由字面路径（不含 `%h`/`%C` token）命名的 control socket，对 `-O` 同样有效，这才是让驱逐变得可瞄准的东西。
+- **subprocess provider 本就掌管输出的保留；插件只是需要开口去要。** 一次流收集是 `{ maxBytes, spill?: { maxBytes } }`，而"省略 `spill` 就只保留内存里的尾部"是被文档化的行为（`packages/subprocess/subprocess/src/types.ts:38-52`）：当 `spill` 存在时，provider 把**尾部**留在内存里，理由是"错误与最终结果聚在末尾"，并把**完整**的流写入它自己那棵 per-process `mkdtemp` 0700 目录之下一个 `0600` 的文件（`packages/subprocess/subprocess-local/src/output.ts:126-128,160-213`），并在读取时把该路径报告成 `spillPath`。本插件直到 0.0.25 都只传 `maxBytes`，这就是"truncated"过去意味着"其余部分没了"的原因；它现在也会把 spill 预算一并传过去，并把那个路径带进结果与记录文本，用的是 bash 工具那种整句形态（`packages/shell/tool-bash/src/render.ts:11-15`）。一条大于 spill 上限的流，其文件会被丢弃——插件并不假装相反：它点名缺席之物，而不是凭空编造一次恢复。
+- **`ssh -N` 在会留下一条 master 的时候，自己就会结束**——写 0.0.23 时在同一台活服务器上测得的，而探测正是建立在这之上：有了 `-o ControlMaster=auto -o ControlPath=… -o ControlPersist=300`，一次 `-N` 调用会为一条首连在 **0.2 s** 内认证成功并退出，越过一条预热的 master 则只用 **0.1 s**，并留下 `Master running (pid=…)`。而没有那些开关时，同一个 `-N` 调用会**挂住**（一个无事可做的 idle 会话，只在它的截止时间被杀）——因此探测只在一条租来的连接上要求 `-N`，并独自运行 `true`。一次被拒的凭据在 `-N` 之下仍会被诚实地点名（`Permission denied (publickey,password).`），而同一个错误密码用 `true` 跑时打印的却是 `Connection closed by … port 22`，本会被分类成 `unreachable`：更早的那个形态会把一个机密问题怪罪到网络头上。`Authenticated to … using "password".` 这一行在这个客户端里是存在的，但它只在 `LogLevel=VERBOSE` 才打印，而在那里它会被密钥交换的记录淹没，所以探测读取的是退出状态，而不是去追那一行。
+- `fs/write-intent` 是一个单槽的**决策**瀑布：一个监听者可以回答 `createIfAbsent` 或 `replaceIfVersion`，却从不查看你的那次写入，因此插件必须按那个回答来行事——对一个已存在文件的 create-only 守卫就是一次拒绝，而一个版本守卫无法由一次外部拷贝兑现，并照此上报。会话变更记录器是通过它在 `tools/pre-execute` 所见那个 actor 的**对象同一性**来挂靠那次编辑的，这正是插件把活的工具执行体交进瀑布、而不是交一个赝品进去的原因。
+- 文件传输，在活服务器上测得：**单个文件乘一条被计数的 `ssh` 通道，一棵树乘 `scp -r`**。`scp` 是**被探测出来的**那个 ssh 可执行文件的同门兄弟（`/usr/bin/ssh` → `/usr/bin/scp`，否则走它自己的 `PATH`-再-位置 搜索）；它把端口取作 `-P`（不是 `-p`），接受同样的 `-o BatchMode` / `StrictHostKeyChecking=accept-new` / `-i` / `-J` / `PreferredAuthentications` 开关，并把远端读作一个 `host:path` 参数，所以不涉及任何本地 shell。单个文件不走它：载荷是 `ssh` 远端一侧的一个 `cat`，而字节计数是在这一端取的——这是唯一一个能够就着正在移动的那些字节（而不是 `stat` 在它们移动之前所引用的那个数字）来施用天花板的地方。provider 的 `collect` 模式承载不了那个（一个 400 MiB 的应答会变成 400 MiB 的 spill 文件），但它的 `stdout: 'pipe'` 与 `stdin: 'pipe'` 处置是调用方自有的裸流，而一次拷贝在任何一面都不要求 spill。一个读取者已经离开的 `cat` 会死于 `EPIPE`/`SIGPIPE`——已实测——所以停下本地子进程，也就停下了远端那一半。
+  - **落地，两个方向。** 一次下载会写一个唯一的 `.dsh-part-<pid>-<entropy>` 兄弟文件，只在干净完成之后才把它改名到位；一次上传会*在服务器上*落进一个兄弟文件，然后再取走它的最终名字。替换一个已存在的文件是*穿过*它发生的（`cat -- part > dest`，以后台作业的方式运行，好让这个搬运者有一个属于它自己的 pid 可以上报）：在活服务器上测得，`scp` 做的是同一件事——inode、`mode 640`、owner，以及第二个 hardlink 全都熬过了那次覆盖写，而该 link 的另一名字看到了新的字节。一次 rename 本来会把这三者全部悄悄破坏掉。一个新名字会被改名，然后穿过服务器的 umask 带上源文件的权限位（`777` 在 `umask 0022` 之下到达时为 `755`，`640` 仍是 `640`）——而且这个 mode 必须用三次赋值来算，因为 `chmod "$(printf '%o' $(( … ) ))"` 在 `sh` 或 `dash` 下解析不了，而在 `bash` 下会递给 `chmod` 一个空参数、把文件落在 mode `000`。一次被停住的上传会移除它的临时件；一次失败的 publish 会把完整的字节留在原处并说明情况。
+  - **递归是另一桩承诺，并且会说清是哪一个。** `scp -r` 的布局之所以被保留，是因为它正是调用方所期望的布局：一个缺席的目标*变成*那棵树，一个已存在的则持有 `dest/<basename>`，而 symlink 会被跟随（实测：一个被链接的目录到达为真实目录，一个被链接的文件则带着其目标的 mode）。它的天花板是前置检查——上传是那次防环的本地走查，下载是一次 `find -L … -printf '%s\n' | awk` 枚举，其后还藏着一个 `-maxdepth 0 -printf` 探测，好让一台没有 GNU `find` 的服务器不至于被读成一个空目录。一棵树从不*边移动边被计数*：那需要一个 archive，而一个 archive 会悄悄改变一个 symlink 的含义。
+  - **`~/` 需要那个斜杠落在引号之外。** schema 一直都允许这种写法，而一个被完全引起来的 `'~/f.txt'` 对 shell 来说并不是同一个词：一个 tilde 前缀在第一个*未被引起来*的斜杠处结束，所以旧的那种形态到达服务器时是一个字面量，而 `cat` 回答 `No such file or directory`——在 `sh`、`dash` 和 `bash` 里，无论用于读取还是用于重定向，都已实测。`~/'f.txt'` 可用，`~'/f.txt'` 不可。
+  - `rsync` 在这台机器上缺席，因此不被使用。
+- 批准是两个互相独立的开关：文件沙箱（`read-only` / `workspace-write` / `danger-full-access`）掌管写入，而 `ApprovalPolicy = 'ask' | 'never'` 掌管到底是否要征询一个人。`'never'` 是在 `ApprovalService.decide` **之内**、在 `approval/request` 瀑布被派发**之前**决定的（`packages/interaction/user-approval`），所以一个插件监听者无法在那里救回一次 ask；生效的政策是 `overrideOf(session) ?? config.policy ?? 'ask'`，两者都可在公共的服务界面上抵达，而 `ctx.get('approval')` 无需 inject 就能读到它。
+- 抢占一个 `tool.call.toolview` 的 key 会**彻底**替换掉那一通用行：owner 此后必须覆盖每一个阶段（`preparing` / `start` / `result`）与每一个动作，带上那个座位的 `useDisclosure`、`openFile`、`inspect`、`cwd` 与 `home`，并且参数在已密封时从 `argsRaw` 读、在流式进行期间从那个惰性的 partial-JSON 视图读（在渲染时读，从不按 block identity 键控着存进 state）。本插件试过那条路并放弃了它：拥有那层外壳，并没有买到渲染出的记录文本本身尚不曾说出的任何东西。
+- 一个被 spawn 出来的子进程**没有终端**：stdin 被忽略，而 Host 进程也没有挂在任何一个终端上。这使得交互式的 host-key 提问无从回答，而这正是 0.5.1 那次修复的全部内容——`accept-new` 是记录而不是询问（OpenSSH 7.6+，而本机跑的是 10.0p2）。一个变了的 key 仍然会失败，它的 `Offending … key in` / `Remote Host Identification Has Changed` 输出会被分类为 `unknown-host`。
+- 被收集的那些流，只有在 provider 终止了子进程并把它们排空之后才算完整，所以一次撞上截止时间的探测会先为 `waitForExit` 最多等 400 ms，然后再去读它们；少了那次排空，一个超时根本不带任何原因。
+- 一个被打断的子进程，一个原因。`#settleAndDrain` 用来自 `@deepseek-ai/dsh-timeout` 的 `deadline(external, timeoutMs, SSH_TIMEOUT)` 构造它的等待，该函数经 `AbortSignal.any` 把调用方的信号与插件的计时器融在一处——第一个 aborter 的原因就是幸存下来的那一个，而 `timeoutOf(signal, SSH_TIMEOUT)` 只在计时器胜出时才读到我们自己的。手写的那一版是在计时器回调内部去解析 `external?.aborted`，于是一个在与它的截止时间同一瞬被杀的子进程，会被报成代码碰巧先测的那一个分支。一个 `timeout` 如今意味着服务器太慢，而一个 `cancelled` 意味着是读取者停了它——两者之间再不是抛硬币。`timeoutMs: 0` 意味着不上计时器，这正是一个后台化的、或被升级的作业熬过启动它的那个应答的方式。自 0.0.30 起，每一个远程动作都把该工具调用自己的 `exec.signal` 沿这条链向下转发——`exec`、`read`、`write`、`edit`、`upload`、`download` 都会在会话取消该调用时、或在所声明的调用预算到期时，了结它们的本地子进程；而这套管道早在有任何东西递给它一个信号之前，就已经存在于 transport 之中了。诚实的边界在于：那杀掉的是**本地**的 ssh/scp 进程。服务器侧的命令是否随其通道一起死去，那是服务器的选择，本插件不作相反的主张。
+- 一次探测读的是那个账户的 `~/.ssh`，不是终端用户的。`list` 过去会报告 `runsAs`（`uid`、`user`、`home`），好让一张设置卡片能够点名那个账户；那张卡片在 0.0.21 被砍掉了——那个名字并不能敲定任何探测结果尚未敲定的事，而它的 `user` 取自 `process.env.USER`，是一个从启动该进程的人那里继承来的名字，而不是它的 uid 所能证明的那个。真正能敲定此事的事实，是那张卡片从未带上的那四个：解析出来的 `ssh` 路径、那个账户的 agent 是否持有任一 identity、被点名的 key 文件是否对它可读，以及那台主机是否已在该账户的 `known_hosts` 之中。
 
-- Approval is two independent switches: the file sandbox (`read-only` /
-  `workspace-write` / `danger-full-access`) governs writes, while
-  `ApprovalPolicy = 'ask' | 'never'` governs whether a person is consulted at all.
-  `'never'` is decided inside `ApprovalService.decide` **before** the
-  `approval/request` waterfall is dispatched (`packages/interaction/user-approval`),
-  so a plugin listener cannot rescue an ask there; the effective policy is
-  `overrideOf(session) ?? config.policy ?? 'ask'`, both reachable on the public
-  service surface, and `ctx.get('approval')` reads it without injecting.
-- Claiming a `tool.call.toolview` key replaces the generic row **completely**: the owner
-  must then cover every phase (`preparing` / `start` / `result`) and every action, with the
-  seat's `useDisclosure`, `openFile`, `inspect`, `cwd`, and `home`, and with arguments read
-  from `argsRaw` once sealed or from the lazy partial-JSON view while streaming (during
-  render, never parked in state keyed by block identity). This plugin tried that and gave it
-  up: owning the chrome bought nothing the rendered transcript text did not already say.
+## 剩余工作面
 
-- A spawned child has **no terminal**: stdin is ignored, and the Host process is
-  not attached to one. That makes the interactive host-key question unanswerable,
-  which is the whole 0.5.1 fix — `accept-new` records instead of asking (OpenSSH
-  7.6+, and this machine runs 10.0p2). A changed key still fails, and its
-  `Offending … key in` / `Remote Host Identification Has Changed` output is
-  classified as `unknown-host`.
-- The collected streams are only complete after the provider has terminated the
-  child and drained them, so a probe that hits its deadline waits up to 400 ms
-  for `waitForExit` before reading them; without that drain a timeout carries no
-  reason at all.
-- One interrupted child, one cause. `#settleAndDrain` builds its wait with
-  `deadline(external, timeoutMs, SSH_TIMEOUT)` from `@deepseek-ai/dsh-timeout`,
-  which fuses the caller's signal and the plugin's timer through
-  `AbortSignal.any` — the first aborter's reason is the one that survives, and
-  `timeoutOf(signal, SSH_TIMEOUT)` reads ours only when the timer won. The
-  hand-rolled version resolved `external?.aborted` inside the timer callback, so a
-  child killed in the same instant as its deadline was reported as whichever branch
-  the code happened to test first. A `timeout` now means the server was too slow,
-  and a `cancelled` means the reader stopped it — never a coin toss between them.
-  `timeoutMs: 0` means arm no timer, which is how a backgrounded or promoted job
-  outlives the reply that started it. Since 0.0.30 every remote action forwards
-  the tool call's own `exec.signal` down this chain — `exec`, `read`, `write`,
-  `edit`, `upload`, `download` all end their local child when the conversation
-  cancels the call or the declared call budget expires; the plumbing existed in
-  the transport long before anything handed it a signal. The honest boundary:
-  that kills the **local** ssh/scp process. Whether the server-side command dies
-  with its channel is the server's choice, and this plugin does not claim
-  otherwise.
-- A probe reads that account's `~/.ssh`, not the terminal user's. `list` used to
-  report `runsAs` (`uid`, `user`, `home`) so a settings card could name the
-  account; the card was cut in 0.0.21 — the name settled nothing the probe
-  result had not settled already, and its `user` was `process.env.USER`, a name
-  inherited from whoever launched the process rather than what its uid proves.
-  The facts that would actually settle it are the four the card never carried:
-  the resolved `ssh` path, whether that account's agent holds any identity,
-  whether the named key file is readable by it, and whether the host is already
-  in that account's `known_hosts`.
+旧的四项计划已经落地：agent 工具（0.6.0）、经由同一 transport 的文件传输（0.9.0），以及——穿过 0.15.0/0.16.0——一个伪终端、stdin 应答，还有 harness 作业台账上的后台作业；那些都是新规之前的编号，对应关系在 `CHANGELOG.md` 顶部的版本说明里。仍未闭合的是：
 
-## Remaining surface
+1. 一个可以实时敲入的终端：`tty` 加 `input` 能够回答一个提示，而 `background: true` 会把输出带外（out of band）流出，但并不存在一个交互式会话。
+2. 可选项：把 `~/.ssh/config` 里的 alias 读成一份建议清单（`ctx.fs`）。
+3. 试过并有意弃掉的：抢占 `tool.call.toolview` 座位，于是一次远程调用继续在 harness 的通用工具行里渲染——见 **已验证的契约** 之下那条说明。
+4. 有意不做的几项，每一项都在 0.0.34 里对照已出厂的行为重新核查过，而不是假定它们已经陈旧：
+   - **页面上没有每目标的 `remoteTimeoutMs` / `maxOutputBytes` 控件。** 求解层仍然会从存储的记录里兑现这两者（`bounds.ts` 先读 target，再 profile，最后才是默认值），因为存储的记录与页面自己的写入都可能携带它们，而丢掉那一层会在升级时改变一个原本可用的目标的天花板。*不在*那里的是一件控件：没有读者要求过按服务器逐个设置截止时间，而一张为单一共享表格显示 default / cap / in force 的卡片，就是 99% 那些问题的答案。一个每目标的值是由存储记录设定的，不是由 UI 设定的。
+   - **页面上没有 `dryRun` 控件。** 预览是为模型存在的，由它读一个 diff 并决定是否应用。页面没有一个 diff 渲染器，也没有第二个确认步骤，而如果为了暴露一个复选框就同时发明这两样，造出来的会是一个比工具已经给出的那个更差的预览。
+   - **`su` 保留。** 它是唯一的一种远程命令形态（`su root -c …`），由第三个机密槽位来应答；而替代方案——让一个 root 密码各不相同的用户去改用 `as`，并指望 `sudo` 存在——是拿一台受支持的服务器去换一个更小一点的文件。它不在待移除的清单上；它同样也不再生长。
+5. 那些仍然只是前置检查的天花板，说破它们，好让没有人需要重新去发现：一次**递归**拷贝是在它移动之前被测量的（`limitMode: 'pre-check'`），因为 `scp -r` 无法被边移动边计数，而一个 archive 会悄悄改变一个 symlink 的含义；而一次受保护的 **edit** 只是收窄了并发写入者的窗口，并不是把它关上。spill 文件仍然是 subprocess provider 的——在此计数，从不在此回收。
 
-The old four-item plan has landed: the agent tool (0.6.0), file transfer over the
-same transport (0.9.0), and — through 0.15.0/0.16.0 — a pseudo-terminal, stdin
-answers, and background jobs on the harness job registry; those are pre-rule
-numbers, mapped in the versioning note at the top of `CHANGELOG.md`. What is
-still open:
+## 0.0.34 的局限
 
-1. A terminal one can type into live: `tty` plus `input` answers a prompt, and
-   `background: true` streams output out of band, but there is no interactive
-   session.
-2. Optional: read `~/.ssh/config` aliases as a suggested inventory (`ctx.fs`).
-3. Tried and deliberately dropped: claiming the `tool.call.toolview` seat, so a
-   remote call keeps rendering in the harness's generic tool row — see the note
-   under **Verified contracts**.
-4. Deliberately not built, each re-checked against the shipped behaviour in 0.0.34
-   rather than assumed stale:
-   - **No per-target `remoteTimeoutMs` / `maxOutputBytes` controls on the page.**
-     The resolution layer still honours both from a stored record (`bounds.ts`
-     reads target before profile before default), because stored records and the
-     page's own writes may carry them and dropping that would change a working
-     target's ceilings on upgrade. What is *not* there is a widget: no reader has
-     asked to set a deadline per server, and a card that shows default / cap / in
-     force for one shared table is the answer 99% of the questions. A per-target
-     value is set by the storage record, not by the UI.
-   - **No `dryRun` control on the page.** The preview exists for the model, which
-     reads a diff and decides whether to apply it. The page has no diff renderer
-     and no second confirm step, and inventing both to expose one checkbox would
-     be a worse preview than the one the tool already gives.
-   - **`su` stays.** It is one remote command shape (`su root -c …`) answered from
-     a third credential slot, and the alternative — telling a user with a distinct
-     root password to reach for `as` and hope `sudo` exists — trades a supported
-     server for a smaller file. It is not on the to-remove list; it is also not
-     growing.
-5. The ceilings that are still only pre-checks, stated so nobody has to rediscover
-   them: a **recursive** copy is measured before it moves (`limitMode:
-   'pre-check'`) because `scp -r` cannot be counted in flight and an archive would
-   quietly change what a symlink means; and a guarded **edit** narrows the
-   concurrent-writer window rather than closing it. Spill files stay the subprocess
-   provider's — counted here, never collected here.
+- 设置页面只负责清单、探测、resolve 与天花板：跑命令、编辑文件与搬运字节，都是经由会话的 `ssh_client` 工具抵达服务器的——页面没有一个运行控制台、一个传输选择器，或一个作业列表。
+- 一次探测读的是 **Host 账户**的 ssh 世界——它的 `~/.ssh/config`、keys、agent 与 `known_hosts`——不是终端用户的那个，所以在某个 shell 里可用的一个 alias，在这里仍可能解析出不同的结果。首次探测会记录一个未知的 host key，而不是询问。
+- 关于这些修复，没有任何一处是生效的，直到运行中的 Host 载入新模块为止：一次就地的包替换会保留上一个，直到进程重启。
+- 一次页面探测仍然只做认证并运行 `true`；真正的命令来自 agent 的 `exec` 动作。
+- 一次前台调用会被等待到底。`tty: true` 会给命令一个伪终端（`ssh -tt`，代价是它的 stderr 会并入 stdout 以及 CRLF），而 `input` 会喂它的 stdin；`background: true` 会把命令交给 harness 的作业台账——调用以一个 job id 作答，输出经由 `job_output` 从 provider 自己的偏移处流出，`job_kill` 将它停止，而该作业直到落定都会占着那 16 个并发操作槽之一。显式后台化的作业被限制在那些槽中的 `maxRunningJobs`（默认 8）之内——那是现有 lane 计数器内部的一项预留，并不是第二个调度器——所以哪怕八个被弃置的长时命令，也无法把插件对前台工作 busy-lock 死。**这个天花板本身无法被抬到超出那份预留之上**（自 0.0.37 起）：配置 schema 的 maximum *就是* `16 − 8`，`bounds.ts` 会把任何仍带着更高数字的 settings 对象封顶，并在一条设置页面会显示的 note 里说明，而 transport 在它准入一个子进程的那一刻再以同样的方式钳一次——所以那八个被扣住的槽是代码的一项属性，而不是一条注释的产物，而一次拒绝所引用的数字，就是当时实际生效的那个数字。一次被该天花板拒绝的启动会点名它，并指向 `job_kill`；而自 0.0.34 起，这一拒绝是**就在提出请求的那个 frame 里**作答的——`status: 'refused'`，没有 id 可轮询——而不是先启动一个作业，再让那条 lane 过一个拍子把它变成一个失败的作业。一个作业不上自己的计时器：它在下列任一时刻结束——它落定、有人杀掉它、它的会话离去，或者 Host 退出——与 harness 自己的后台 shell 立的是同一桩约定。连接活在 Host 进程之中：停止该作业、结束该会话，或重启 Host，都会终结那条远程命令，而 `job_kill` 打断的是本地客户端——服务器侧的进程是否随会话一同死去，是服务器的选择。这里没有一个可以实时敲入的终端。提权（`as`/`su`）经由同一个 stdin 回答提示，所以它是一项仅前台的特性：一条带 `as`/`su` 的后台化命令会被带着 hint 拒绝；而如果服务器跑的是 NOPASSWD、并且命令自己写了 `sudo`，它依然可用。
+- `edit` 会拒绝一个大于读取上限的文件，而不是去替换它从未见过的文本；并且自 0.0.34 起它**守卫自己要覆盖写的东西**：读取会在同一次往返里索取该文件的 inode、大小、纳秒级 mtime **以及 SHA-256**，写入则在那个执行截断的同一个 shell 里重新测量这两道守卫，而其间被察觉的任何改动都会以 `stale: true` 回来，什么都没写。在任何截断之前都会取一份安全副本——`backup: false` 时也一样，只是用一个私有的名字，并在写入通过验证后将其移除——写入既会对照它必须留下的字节数来检查，**也会对照它所发出的那些字节的摘要**来检查，因为一个长度并不是一份内容：13 个字节，可能是这次 edit 编成的那 13 个字节，也可能是别人写下的 13 个字节。随后一个修复（repair）子进程会在动手碰这个文件之前先看它一眼，并以"哪些结果是**真的**、以及**依据什么证据**"作答——一个 verdict（`landed`、`intact`、`restored`、`unrecoverable`），要么由一个摘要承载，要么仅由一个字节数承载。自 0.0.35 起，一个字节数换不来任何 verdict：在一台没有 `sha256sum`、`shasum` 或 `openssl` 的服务器上，0.0.35 会落地写入，并以 `ok: false`、`verdict: 'unknown'` 结束；**而自 0.0.36 起，这道检查被移到了写入之前**——读取会在产出那段文本的那次往返中就陈明 SHA-256，而当这台服务器没有工具可以陈明一个时，edit 会在复制或截断**之前**就拒绝：远端文件原封不动地保持被发现时的样子，没有 `.dsh-bak`，没有东西需要读回来再反复揣测，而一次 `dryRun` 仍然给出预览，同时说明与之匹配的那次真实 edit 会被拒绝。一次你无法验证的 edit，如今是一次你从未开始的 edit。`restored: true` 只有在某个摘要说明"本次调用所读到的内容已经回来"时才会置位。**它仍然是一个预览并确认的流程，而不是一个事务**：版本比较与截断之间的那道窗口，宽度是两个 shell 内建，而不是一次网络往返，而一个落在其中的写入者仍然会被覆盖掉。那次修复不可被调用方的 abort 取消——一个停下了 edit 的读取者，停下的是 edit，并不是这个文件"保持完整"的那项主张——它改为在自己的 30 秒预算下运行。`write` 与 `upload` 落下它们自己的字节；两者都不做版本管理，而这里也没有任何东西能在本插件背后把一台服务器回滚。自 0.0.32 起 `edit` 接受 `dryRun: true`：匹配会被计数，一个行 diff 会回来，而没有任何东西被写入、被备份，也没有任何拨号超出预览反正都需要的那次读取；在一台无法陈明版本的服务器上，预览会如实这么说，因为写入本来要执行的那道守卫，正是此刻缺席的那一道。
+- 提权的提示与一个 `input` 正文共用那唯一的 stdin，而提示先读：带 input 的 `su` 会被事先拒绝，而只要存储了一份登录密码，带 input 的 `as` 同样会被事先拒绝。那唯一真实存在的共存——没有存储密码的 `as`，它运行 `sudo -n` 因而从不提示——继续可用：正文会在一台 NOPASSWD 主机上完好抵达，并在任何其它地方带着原因快速失败。
+- 一个被点名的 `identityFile` 会随 `-o IdentitiesOnly=yes` 一起送达：少了它，一个持有多个 key 的 ssh-agent 会先把它们逐个递出去，而一台会计数尝试次数的主机，会在读取者点名的那一个 key 被尝试之前就先把它锁在门外。不点名任何 key 就什么都不加——客户端自己的默认值成立，agent 也包括在内——而目标额外参数里的 `-o IdentitiesOnly=no` 仍然会胜出，因为那些落在插件自己的开关之后。`ssh -G` 的 resolve 视图带上同样这一对，所以卡片显示的就是那些子进程实际在运行的东西。
+- 一次传输的天花板对**单个文件**是硬性的，对**一棵树**是前置检查的，而每一个结果都带上 `limitMode` 来说明是哪一个在作答。一棵在枚举与改名之间长大了的树，会按实际落地的结果上报，并附一条说明；另一条路——把一个目录穿过 archive 带过去——会在途中改变一个 symlink 的含义，而 `scp -r` 的布局正是调用方已经在依赖的那个。一次递归下载还会在移动任何东西之前，拒绝落到一个非空的本地目录上：那次改名只可能失败，而在 0.0.34 之前，它是在拷贝完整棵树*之后*才失败、然后又将它删除的。
+- 当一次拷贝被停下时，**本地**子进程已经不存在了：provider 会在整个 TERM→KILL 宽限期之间被等到结束，然后才给出应答，而 live check 证明没有任何属于我们的 `ssh` 还占着一个槽。自 0.0.36 起，插件还会尝试清理远端一侧：在一个搬运者开始之前，它会在 **stderr** 上为自己打印一行——`dsh-mover <pid> <tag> <starttime>`——而 stderr 正是那次拷贝已经在完整读取的那个通道；于是一次下载随后 `exec` 进入那个搬运者，使它先前报出的那个数字与实际持有该文件的进程成为同一个，而一次上传的 publish 会把它的搬运者作为一个后台作业来运行，于是 `$!` 点名的是搬运者，而不是那个在等它的 shell。自 **0.0.38** 起，那一行还带上内核自己为该 pid 记录的内核启动时间（读自 `/proc/<pid>/stat`，从最后一个 `)` 之后开始计数，好让一个进程名无法把它带偏）：一个 pid 是一个会被在不同进程之间转手的数字，而那个时间说的是究竟是哪个进程穿过它。一次拷贝被停下之后，有一条简短、有界、尽力而为的命令会请服务器结束**那一个身份**：它会检查 `kill -0`，从 `/proc/<pid>/stat` 读取启动时间，并把 `/proc/<pid>/cmdline` 一个参数一个参数地读出来，把这一对与本次拷贝所上报的内容相比较，把它的 argv 与本次拷贝所被给予的 argv 相比较，只有匹配才会付诸行动；一次匹配随后会被 SIGSTOP 冻结住——一个被停住的进程无法退出，所以在这个决策正在做出的期间，它的数字无法被回收——冻结状态下重新核查，然后才被杀掉。至于它为什么只能做到尽力而为，这是诚实测量出来的：一个阻塞在写管道上的远端 `cat`，会在通道关闭时立刻死掉，但一个停在 `open()` 上等待一个没有写入者的 fifo 的，从不触碰那条通道，所以一个不带 pty 的 sshd 会让它一直坐在那里（曾观察到它比自己的调用多活了几个小时）——关闭通道无法打断一个它并不身处其中的 syscall，于是这里改为请服务器向它发信号。0.0.37 改变的是*那一个究竟是哪个*进程：直到 0.0.36 为止，那次清理用的是 `pkill -f '[c]at -- <path>'`，而 path 恰恰是同一个文件的两份拷贝唯一共享的东西，所以打断一次拷贝，也就同时停掉了另一次的搬运者——而一个远端路径是允许包含 `[`、`*`、`?`、`+` 与 `.` 的，所有这些对 `pkill -f` 而言都是正则表达式语法。一个 pid 则不是。清理所得到的 verdict 是被如实上报，而不是被抹平：`gone` 什么都不主张（搬运者随通道离开了，或者已经结束而只是在等待被收割——一个 `Z` 状态应当读作 gone，而不是读作一个陌生人），`killed` 会点名那个 pid 并说明命令行**与启动时间**都在冻结与重查之前确认了它，`unverifiable` 则说明服务器没有为那个 pid 陈明一个可读的 `/proc`（或者那个搬运者没有记录时间），并且什么都没有被发信号——0.0.37 的 `killed-unverified`，也就是对着一个光杆数字的 SIGKILL，已经被退役，因为一个被回收的数字属于别人的工作——`foreign` 说明那个数字正在运行别的东西，因而被原样放过，`refused` 说明服务器不允许这个用户向它发信号，而 `unanswered` 说明清理没有得到任何回复，因而什么都不主张。一个*正在清理期间*退出的搬运者，会以它最终落到何处来作答：那个不再应答 `kill -0` 的数字读作 `gone`，而只有一个仍然立在那里、却读不出来的数字才读作 `unverifiable`。一份从未获得 pid 的拷贝什么都不杀，并说明那个残留是无名的。live check 会在同一条路径的两个搬运者之上把这一切都断言下来：在其中一次拷贝的清理之后，另一次的搬运者仍然被停在那里、仍然可以被交付，并且它的通道带着完整的载荷关闭（在 `proxy` 上测得，pid 2747830/2747840，2026-11-19 10:46）。0.0.38 在那次 live check 上补了两项拒绝：同一个搬运者，若以一个并非它自身的启动时间去瞄准，会答 `foreign` 并继续服务；而一个完全没有记录启动时间的，会在 `proxy` 与 `nas` 上都答 `unverifiable`——从来不会是 `killed`——（2026-11-19 14:10 测得，搬运者 pid 2893057 先被拒两次，随后才按它真实的身份被杀掉）。
+- spill 文件——也就是当一条流越过其天花板时，由 subprocess provider 写下的完整输出恢复文件——仍然归**provider**所有。它拥有那个目录、负责关闭它们、把已完成的那些保留到进程之外的某个东西来清理它们，而这个 harness 里没有任何消费者会去 unlink 它们，所以本插件也不 unlink 其中任何一个。它所真正拥有的，是*询问*这一环：每个 Host 进程一份预算（总计 1 GiB、64 个文件），由 transport 持有，并被该进程所能抵达的每一个目标共享——不是每服务器一份，也不是每会话一份。授予从来不会被削减到剩余量（一个 provider 已经腾不出位置的 spill 文件会被*删除*，而那比根本没有文件更糟），所以这个数字是一个**停止条件，而不是一个硬性上限**：它约束的是询问何时停止，而不是那个目录最终长到多大。它对每个文件计入的，是 provider 就该文件所报告过的最大的整流偏移：一条后台流会随着文件的增长反复重读它自己的 spill，而自 0.0.36 起，每一次更大的报告都会按差额给台账补记——从不重复计入一个相等的，也从不退还一个更小的（磁盘上的一个文件不会缩小）——于是 `used` 会跟随实际写下的字节走，而不像直到 0.0.35 为止那样冻结在第一个数字上。能够越过它的是那个把预算掀过去的子进程，再加上当时正在途中的其它任何——一个子进程可以在它的两面都写，各自最多到 `maxSpillBytes`——所以在默认值之下，可达的天花板更接近 3 GiB 而非 1 GiB，而一个抬高 `maxSpillBytes` 的 profile 也会一并抬高它。当预算正是"没有文件"的原因时，应答会大声说出来。
+- 插件自己的那些临时目录——askpass 辅助程序的，以及 control socket 的——都以造出它们的那个进程来命名，而一次启动时的清扫会回收一个已死的 id 留下的东西。一个早于该 id 的名字，则按三天的闲置来判断，而闲置是从*辅助程序自己的*时间戳读出来的；至于一条 master 仍能应答一次 connect 的 socket，则从不被碰。一个终究还是被从某个运行中的 Host 底下取走的辅助程序，会在下一次使用时被重建，而使用它会让它的时间戳保持年轻——这两点都是从某条规则的第一版那里学到的，那一版回收了一个活 Host 的辅助程序，只因为它的目录已经十三个小时大了。
+- 一次传输的本地一侧是词汇层面的：`localPath` 按前缀对照会话的工作区目录匹配，且不解析 symlink——这是 `src/local-path.ts` 里公开写明的一项选择。因此一个种在工作区内部的 symlink，会把一次下载送到那个 link 所指向的任何地方；这道检查防住的是一个模型输入任意的绝对路径，它并不声称自己约束了 inode。
+- 一次下载会在 `scp` 运行之前派发 `fs/write-intent`，并以该工具的执行体作为 actor，而这正是那次外部写入仍然能够进入会话变更摘要的方式（记录器从那个瀑布读取 before-image，并在回合结束时比对磁盘；它从不旁观那次写入本身）。插件随后并不发出 `fs/observed`——没有任何东西为那份变更列表需要它，而版本 token 属于执行那次写入的那一方。
+- 插件主张工具名 `ssh_client`，在另一个 bundle 已经持有它时回落到 `ssh_remote`；而它压根不主张 `tool.call.toolview` 座位：一次调用会像其它任何工具一样，在 harness 的通用工具行里渲染。
+- 凭据库对其它 OS 用户是私密的，但对 agent 并不是：工具进程是以那个同样能读 `.credentials.yaml` 的用户身份运行的。
+- 删除 bundle 会把 `storages/ssh_targets.json`（目标、天花板，以及每会话的选择），以及插件在 `.credentials.yaml` 里的 `ssh/…` 记录，都原样留在那里，直到你亲手把它们移除。
+- 在一次就地的包替换之后，运行中的 Host 会保留它此前的模块，直到重启为止。页面能够察觉这一点（`list` 报告没有 `askpass`），并把认证控件连同一段解释一起藏起来，而不是去发送一个旧模块会拒绝的字段。
+- `private: true`：在状态为 `experimental` 期间不发布到 npm。
 
-## Limits of 0.0.34
+## 许可
 
-- The settings page is inventory, probes, resolve, and ceilings only: running
-  commands, editing files, and moving bytes reach the server through the
-  conversation's `ssh_client` tool — the page has no run console, no transfer
-  picker, and no job list.
-- A probe reads the **Host account's** ssh world — its `~/.ssh/config`, keys,
-  agent, and `known_hosts` — not the terminal user's, so a working alias in a
-  shell can still resolve differently here. The first probe records an unknown
-  host key rather than asking.
-- Nothing about these fixes is live until the running Host loads the new module:
-  an in-place package swap keeps the previous one until the process restarts.
-- A page probe still authenticates and runs only `true`; real commands come from
-  the agent's `exec` action.
-- A foreground call is waited for. `tty: true` gives the command a pseudo-terminal
-  (`ssh -tt`, with its stderr-merges-into-stdout and CRLF costs) and `input` feeds
-  its stdin; `background: true` hands the command to the harness job registry — the
-  call answers with a job id, output streams through `job_output` from the
-  provider's own offsets, `job_kill` stops it, and the job holds one of the 16
-  concurrent operation slots until it settles. Explicitly backgrounded jobs are
-  capped at `maxRunningJobs` (default 8) of those slots — a reservation inside
-  the existing lane counter, not a second scheduler — so even eight abandoned
-  long-running commands cannot busy-lock the plugin against foreground work. **The
-  ceiling itself cannot be raised past the reservation** (since 0.0.37): the
-  configuration schema's maximum *is* `16 − 8`, `bounds.ts` caps any settings object
-  that still carries a higher number and says so in a note the settings page shows,
-  and the transport clamps the same way again at the moment it admits a child — so
-  the eight held-back slots are a property of the code, not of a comment, and the
-  number a refusal quotes is the number that was in force. A
-  start refused by that ceiling names it and points at `job_kill`, and since 0.0.34
-  the refusal is answered **in the frame that asked** — `status: 'refused'`, no id
-  to poll — rather than starting a job and letting the lane turn it into a failed
-  one a beat later. A job arms no
-  timer of its own: it ends when it settles, when someone kills it, when its
-  conversation goes away, or when the Host exits — the same bargain the harness's
-  own background shell makes. The connection lives in the Host process:
-  stopping the job, ending the conversation, or restarting the Host ends the
-  remote command, and `job_kill` interrupts the local client — whether the
-  server-side process dies with the session is the server's choice. There is no
-  terminal to type into live. Elevation (`as`/`su`) answers prompts through that
-  same stdin, so it is a foreground-only feature: a backgrounded command with
-  `as`/`su` is refused with a hint, and still works if the server runs NOPASSWD
-  and the command says `sudo` itself.
-- `edit` refuses a file larger than the read ceiling rather than replacing text it
-  never saw, and since 0.0.34 it **guards what it overwrites**: the read asks for
-  the file's inode, size, nanosecond mtime **and SHA-256** in the same round trip,
-  the write re-measures both guards in the same shell that truncates, and a change
-  noticed in between comes back `stale: true` with nothing written. A safety copy is
-  taken before any truncation — for `backup: false` too, under a private name that is
-  removed once the write is verified — the write is checked against the byte count it
-  had to leave **and against the digest of the bytes it sent**, because a length is not
-  a content: 13 bytes may be the 13 bytes this edit composed, or 13 bytes somebody
-  else wrote. A repair child then looks at the file before touching it and answers
-  with which of the outcomes is true **and on what evidence** — a verdict (`landed`,
-  `intact`, `restored`, `unrecoverable`) carried either by a digest or by a byte count
-  alone. Since 0.0.35 a byte count buys no verdict: on a server with no `sha256sum`,
-  `shasum` or `openssl`, 0.0.35 landed the write and ended `ok: false` with
-  `verdict: 'unknown'`; **since 0.0.36 the check moves before the write** — the read
-  states the SHA-256 in the round trip that produced the text, and when this server has
-  no tool to state one the edit **refuses before copying or truncating**: the remote
-  file is left exactly as it was found, no `.dsh-bak`, nothing to read back and
-  second-guess, and a `dryRun` still previews while saying the matching real edit would
-  be refused. An edit you cannot verify is now one you never started.
-  `restored: true` is set only when a digest says
-  the content this call read is back. **It is still a preview-and-confirm flow, not a
-  transaction**: the window
-  between the version compare and the truncation is two shell builtins wide rather
-  than a network trip, and a writer that lands inside it is still overwritten. The
-  repair is not cancellable by the caller's abort — a reader who stopped the edit
-  stopped the edit, not the file's claim to be whole — and runs under its own
-  30-second budget instead. `write` and `upload` land their own bytes; neither is
-  versioned, and nothing here rolls a server back behind this plugin's back.
-  Since 0.0.32 `edit` takes `dryRun: true`: the match is counted and a line diff
-  comes back, and nothing is written, backed up, or dialed beyond the read the
-  preview needs anyway; on a server that cannot state a version the preview says so,
-  because the guard the write would have run is the one that is off.
-- The elevation prompt and an `input` body share the one stdin, and the prompt
-  reads first: `su` with input is refused up front, and so is `as` with input
-  whenever a login password is stored. The single coexistence that is real —
-  `as` with no stored password, which runs `sudo -n` and so never prompts —
-  keeps working: the body arrives intact on a NOPASSWD host and fails fast,
-  with a reason, anywhere else.
-- A named `identityFile` arrives with `-o IdentitiesOnly=yes`: without it, an
-  ssh-agent holding several keys offers them first, and a server that counts
-  attempts locks out the one key the reader named before it is ever tried. Name
-  no key and nothing is added — the client's own defaults, agent included, stand
-  — and `-o IdentitiesOnly=no` in the target's extra arguments still wins,
-  because those land after the plugin's flags. The `ssh -G` resolve view carries
-  the same pair, so the card shows what the children actually run.
-- A transfer's ceiling is hard for **one file** and pre-checked for **a tree**, and
-  every result carries `limitMode` saying which answered. A tree that grew between
-  the enumeration and the rename is reported as what landed, with a note; the
-  alternative — carrying a directory through an archive — would change what a
-  symlink means on the way, and `scp -r`'s layout is the one callers already rely
-  on. A recursive download also refuses, before moving anything, to land on a local
-  directory that is not empty: that rename can only fail, and until 0.0.34 it failed
-  *after* copying the tree and then deleted it.
-- When a copy is stopped, the **local** child is gone: the provider is waited out
-  across its TERM→KILL grace before the answer is given, and the live check proves
-  no `ssh` of ours is left holding a slot. Since 0.0.36 the plugin also tries to
-  clean up the far end: before a mover starts it prints one line about itself —
-  `dsh-mover <pid> <tag> <starttime>` — on **stderr**, the channel the copy already
-  reads whole; a download then `exec`s into the mover so the number it reported and
-  the process holding the file are one and the same, and an upload's publish runs its
-  mover as a background job so `$!` names the mover rather than the shell waiting on
-  it. Since **0.0.38** the line carries the kernel's own start time for that number
-  (`/proc/<pid>/stat`, counted after the last `)` so a process name cannot skew it):
-  a pid is a number that gets handed between processes, and the time says which
-  process wore it. After a copy is stopped, one short, bounded, best-effort command
-  asks the server to end **that identity**: it checks `kill -0`, reads
-  `/proc/<pid>/stat` for the start time and `/proc/<pid>/cmdline` one argument at a
-  time, compares the pair against what this copy reported and its argv against the
-  argv this copy was given, and only a match is acted on; a match is then frozen with
-  SIGSTOP — a stopped process cannot exit, so its number cannot be recycled while the
-  decision is being made — re-checked while frozen, and only then killed. Why it is
-  only best-effort, measured honestly: a
-  remote `cat` blocked writing to a pipe dies at once when the channel closes, but one
-  parked in `open()` on a fifo with no writer never touches the channel, so sshd
-  without a pty lets it sit (it was seen outliving its call by hours) — closing the
-  channel cannot interrupt a syscall it is not in, so this asks the server to signal
-  it instead. What changed in 0.0.37 is *which* process that is: through 0.0.36 the
-  cleanup was `pkill -f '[c]at -- <path>'`, and the path is the one thing two copies
-  of the same file share, so interrupting one copy stopped the other one's mover too —
-  and a remote path is allowed to contain `[`, `*`, `?`, `+` and `.`, all of which are
-  regular-expression syntax to `pkill -f`. A pid is not. The verdict the cleanup gets
-  back is reported rather than smoothed over: `gone` says nothing (the mover left with
-  the channel, or ended and only waits to be reaped — a `Z` state reads as gone, not
-  as a stranger), `killed` names the pid and says the command line **and the start
-  time** confirmed it before the freeze and the re-check, `unverifiable` says the
-  server states no readable `/proc` for that pid (or the mover recorded no time) and
-  that nothing was signalled — 0.0.37's `killed-unverified`, a SIGKILL on the bare
-  number, is retired, because a recycled number belongs to somebody else's work,
-  `foreign` says the number is running something else and was left alone, `refused`
-  says the server would not let this user signal it, and `unanswered` says the cleanup
-  got no reply and nothing is claimed. A mover that exits *during* the cleanup is
-  answered with where it ended up: the number no longer answering `kill -0` reads
-  `gone`, and only a number still standing there unreadable reads `unverifiable`.
-  A copy that never learned a pid kills nothing
-  and says the residual is unnamed. The live check asserts all of it on two movers of
-  one path: after one copy's cleanup the other's mover is still parked, still
-  deliverable, and its channel closes with the payload whole (measured on `proxy`,
-  pids 2747830/2747840, 2026-11-19 10:46). 0.0.38 adds the two refusals to that live
-  check: the same mover aimed with a start time that is not its own answers `foreign`
-  and keeps serving, and one recorded with no start time at all answers
-  `unverifiable` — never `killed` — on both `proxy` and `nas` (measured 2026-11-19
-  14:10, mover pid 2893057 refused twice, then killed on its real identity).
-- Spill files — the full-output recovery files the subprocess provider writes when
-  a stream passes its ceiling — stay the **provider's**. It owns the directory,
-  closes them, keeps completed ones until something outside the process cleans
-  them, and no consumer in this harness unlinks them, so this plugin unlinks none
-  of them either. What it does own is the asking: one budget per Host process (1 GiB total, 64 files), held by the
-  transport and shared by every target that process reaches — not per server, not
-  per conversation. Grants are never cut down to the remainder (a spill file the
-  provider runs out of room for is *deleted*, which is worse than no file at all),
-  so the number is a **stopping condition rather than a hard cap**: it bounds when
-  the asking stops, not how large the directory gets. What it charges per file is the
-  largest whole-stream offset the provider reported for it: a background stream
-  re-reads its own spill as the file grows, and since 0.0.36 each larger report tops
-  the ledger up by the difference — never double-counting an equal one, never
-  refunding a smaller one (a file on disk does not shrink) — so `used` follows the
-  bytes actually written instead of freezing at the first number, as it did through
-  0.0.35. What can pass it is the child
-  whose report tipped it plus whatever else was in flight — one child may write on
-  both of its faces, up to `maxSpillBytes` each — so at the defaults the reachable
-  ceiling is nearer 3 GiB than 1 GiB, and a profile that raises `maxSpillBytes`
-  raises that too. An answer says out loud when the budget is why there is no file.
-- The plugin's own temp directories — the askpass helper's and the control
-  sockets' — are named after the process that made them, and a sweep at startup
-  collects what a dead id left. A name from before the id is judged by three days
-  of idleness, read from the *helper's* own timestamps, and a socket whose master
-  still answers a connect is never touched. A helper that is nevertheless taken
-  from under a running Host is rebuilt on the next use, and using it keeps its
-  timestamps young — both halves of that were learned from a first cut of the rule
-  collecting a live Host's helper because its directory was thirteen hours old.
-- The local edge of a transfer is lexical: `localPath` is matched against the
-  conversation's workspace directory by prefix, without resolving symlinks — a
-  choice `src/local-path.ts` states out loud. A symlink planted inside the
-  workspace therefore sends a download wherever that link points; the check
-  keeps a model from typing arbitrary absolute paths, and it does not claim to
-  confine inodes.
-- A download dispatches `fs/write-intent` before `scp` runs, with the tool
-  execution as the actor, which is how the external write still lands in the
-  conversation's change summary (the recorder reads the before-image from that
-  waterfall and compares the disk at turn end; it never watches the write). The
-  plugin does not emit `fs/observed` afterwards — nothing needs it for the change
-  list, and the version token belongs to whoever performs the write.
-- The plugin claims the tool name `ssh_client`, falling back to `ssh_remote` when
-  another bundle holds it, and does not claim the `tool.call.toolview` seat at all:
-  a call renders in the harness's generic tool row like any other tool's.
-- The credential store is private to other OS users, not to the agent: tool
-  processes run as the same user that can read `.credentials.yaml`.
-- Deleting the bundle leaves both `storages/ssh_targets.json` (targets, ceilings,
-  and the per-conversation choices) and the plugin's `ssh/…` records in
-  `.credentials.yaml` in place until you remove them.
-- After an in-place package replacement the running Host keeps its previous module
-  until restart. The page detects that (`list` reports no `askpass`) and hides the
-  authentication controls with an explanation instead of sending a field the old
-  module would reject.
-- `private: true`: not published to npm while the status is `experimental`.
-
-## License
-
-Apache-2.0 — see [LICENSE](../LICENSE) at the repository root. The icon is
-original artwork by this repository's maintainer under the same license: a
-terminal caret linked by a dashed line to a server rack, not a third-party mark.
+Apache-2.0——见仓库根的 [LICENSE](../LICENSE)。图标是本仓库维护者在同一许可之下创作的原创图形：一个终端光标由一条虚线连向一台服务器机架，不是任何第三方的标志。
