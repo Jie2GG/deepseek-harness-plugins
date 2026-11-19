@@ -26,9 +26,11 @@ yarn-error.log*
 *.swp
 .DS_Store
 
-# 交付产物与审阅归档：版本报告、diff 导出、pack 安装包一律不进版本控制
+# 交付产物与审阅归档（见 CONTRIBUTING.md「交付产物与目录卫生」）
+# 通用防线：产物只要落进 <plugin>/artifacts/ 就被忽略，与文件名无关；npm pack 的 tarball 一律忽略
 artifacts/
-# 兜底：防止 agent 未遵守规范、把产物散放在插件目录或仓库根
+*.tgz
+# 额外兜底：仅覆盖 ssh 的历史命名（本次清理遗留），防止旧产物被重新散放回仓库
+# 注意：其他插件的产物若不进 artifacts/，不会被下面两条名字规则忽略——按位置归档才是通用做法
 SSH-PLUGIN-*.md
 SSH-PLUGIN-*.patch
-*.tgz

@@ -127,6 +127,9 @@
   大文件承载。
 - **例外**：`cordis.patch.yml` 是 bundle 入口源文件，名字含 `patch` 但不是产物，必须留在
   插件根并进版本控制（`.gitignore` 的 `*.patch` 只匹配 `.patch` 结尾，不会误伤 `.patch.yml`）。
+- 产物**文件名不限**——落进 `<plugin>/artifacts/` 即被 `.gitignore` 的 `artifacts/` 规则忽略。
+  仓库 `.gitignore` 里另有 `SSH-PLUGIN-*.md` / `SSH-PLUGIN-*.patch` 只是清理本次 ssh 遗留的**额外兜底**，
+  **新插件不要依赖它**：其它插件的产物若散放在插件根且不以 `SSH-PLUGIN-` 开头，不会被忽略。
 
 ## 插件状态取值
 
