@@ -293,7 +293,7 @@ config 中的 `promoteOnTimeout: false`，或者一个没有作业台账的 prof
 - 凭据库对其它 OS 用户是私密的，但对 agent 并不是：工具进程是以那个同样能读 `.credentials.yaml` 的用户身份运行的。
 - 删除 bundle 会把 `storages/ssh_targets.json`（目标、天花板，以及每会话的选择），以及插件在 `.credentials.yaml` 里的 `ssh/…` 记录，都原样留在那里，直到你亲手把它们移除。
 - 在一次就地的包替换之后，运行中的 Host 会保留它此前的模块，直到重启为止。页面能够察觉这一点（`list` 报告没有 `askpass`），并把认证控件连同一段解释一起藏起来，而不是去发送一个旧模块会拒绝的字段。
-- `private: true`：在状态为 `experimental` 期间不发布到 npm。
+- 打包发布已备好但未执行：`package.json` 去掉了 `private`，改带 `publishConfig.access: "public"`（CONTRIBUTING 对「计划发布到 npm」的要求）。实际打包清单已核对（`npm pack --dry-run`：50 个文件 / 285 kB，只有 `lib/`、`docs/`、`README.md`、`icon.svg`、`cordis.patch.yml`、`locale/*.json`，没有 `src/` 或 `tests/`），而 `npm publish` 回 `ENEEDAUTH`——这台机器上没有任何 npm 凭据。所以插件索引的状态仍是 `experimental`：`stable` 的定义是「已发布到 npm」，注册表里还不存在这个包时不能先写它。
 
 ## 许可
 

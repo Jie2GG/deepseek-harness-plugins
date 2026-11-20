@@ -100,6 +100,15 @@ module, wire field, or default moved.
   rhythm, wrapping in a narrow settings window, light/dark side by side — is not
   verified. The suite proves the structure and the reads; the look is still a human's
   to confirm.
+- **Changed — the package is now publishable.** `private: true` gave way to
+  `publishConfig.access: "public"`, which is what `CONTRIBUTING.md` asks of a bundle
+  headed for npm. The publish itself is still open: the packed file list was verified
+  (`npm pack --dry-run` → 50 files / 285 kB — `lib/`, `docs/`, `README.md`,
+  `icon.svg`, `cordis.patch.yml`, `locale/*.json`, and no `src/` or `tests/`),
+  `npm publish` then answered `ENEEDAUTH` because this machine holds no npm credential
+  at all, so the repository index keeps reading `experimental` — `stable` is defined
+  as *published to npm*, and claiming it before the package exists on the registry
+  would be the page describing a call nobody made.
 
 ## 0.0.39
 
