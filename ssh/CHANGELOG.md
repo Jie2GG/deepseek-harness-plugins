@@ -17,6 +17,83 @@ pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoptio
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
+## 0.0.40
+
+A settings-page round: the remote-connections page was re-laid out into three
+regions, the parameter card learned to say what it actually applied, and no Host
+module, wire field, or default moved.
+
+- **Changed — the two tabs are gone.** The shell gives a plugin section one
+  navigation row, so the page was already one component with one `list` read; the
+  tab strip only decided which cards were visible. The page is now one scroll,
+  ordered by what a reader came to do: **SSH targets**, then **Client
+  parameters**, then **Runtime status and details** behind a collapsed
+  `<details>`. Opening that third region asks the Host for the counts again
+  (`refreshRuntime` → the same `list`), so collapsing is a display decision and
+  never a stale one; the parameter boxes are re-seeded only by the mount read and
+  by a successful save, so a refresh cannot discard an override being typed.
+- **Changed — one container, four presentational components.** `SshSection` keeps
+  the state and every call; `TargetRowView`, `TargetFormView`,
+  `ClientParamsCardView` and `RuntimeCardView` receive what they render. The
+  single-file constraint is the classic-script artifact (`finalize-client.mjs`
+  proves exactly one module entry and no top-level `import`), so the split is by
+  component, not by file — no bundler was added for it.
+- **Changed — the parameters card states its own semantics.** Each box carries a
+  unit in its label, the configured default as its placeholder, an
+  **override / follows the default** chip, and a line reading *in force · default ·
+  cap*, so an override and a default are never the same-looking box again. A stored
+  value the cap pulled down now warns in place, naming what applied. A box holding
+  something that is not a positive whole number is an inline error and keeps **Save
+  parameters** down: the old handler left such a value out of the request, which is
+  how a card came to answer `Saved.` about a number that never reached the Host.
+  **Save** is disabled while a write runs and until something changed, and the
+  changed text is kept when a write fails.
+- **Changed — list rows are denser, and nothing left.** Rows are divided by
+  hairlines inside one card instead of each in its own box: name, address, auth and
+  secret chips, status badge and the three actions on the surface, with the probe
+  tail, the `ssh -G` view and **Copy diagnostics** behind the row's own **Details**
+  toggle (which opens itself when a test fails). A target's own note stays visible.
+  No stored field lost its control, and no secret value is ever displayed.
+- **Changed — the runtime region keeps every metric, renamed for the reader.**
+  Targets per profile, remote operations running, targets per shared connection,
+  file transfers running, background jobs with the slots held back for calls that
+  wait, output temp files, temp space on disk (one line before, two now), idle
+  timeout, per-round test limit, connection-test deadline, and the three resolved
+  ceilings as *in force / default / cap* — plus the configuration notes, the
+  pool-unavailable fact, the startup temp sweep, and the storage-and-credentials
+  explanation that used to sit under the page title. The copy follows the agreed
+  vocabulary (`运行限制`, `正在执行的远程操作`, `单连接目标上限`, `输出临时文件`,
+  `临时文件占用空间`).
+- **Added — the default target, named honestly.** The stored record has no default
+  flag and this round may not add one, so the page marks what the Host really treats
+  as the default: with one saved target, the row carries a **default** chip, because
+  that is the target an unnamed call lands on (`findTarget` in `tool.ts`, mirrored by
+  `ops.pickTarget`). With several saved, no global default exists to set; the rule —
+  named target, else the conversation's last choice, else a lone target — is written
+  out in the runtime region instead of being faked with a control.
+- **Changed — the page paints with the shell's own tokens.** Cards take
+  `--dsw-alias-settings-card-fill` / `-stroke`, fields take the `settings-form`
+  rhythm (13/500 label, 12px tertiary hint, 0.5px hairline, 34px input), rows wrap
+  rather than push sideways, every text child declares `min-width: 0`, and the root
+  caps at 660px with a 560px media query. Light and dark both come from tokens; no
+  colour is literal.
+- **Unchanged — everything behind the page.** No Host module changed, so the wire
+  contract, the storage domain and its version, the credential store, profile and
+  session binding, the approval and job machinery, the lane ceilings, and every
+  default in `config.ts` are the bytes 0.0.39 shipped.
+- **Added — `tests/client-page.test.mjs`.** Fifteen checks that do not need a
+  browser: the page's own `readCeiling` is lifted out of the artifact and *run*
+  against the real `ops` layer for the empty / number / nonsense / over-cap /
+  clear / re-read cases, and the layout claims (three regions in order, collapsed
+  third card, every runtime metric still stated, live counts read from the Host and
+  not from constants, no dead tab chrome, no secret value displayed, the narrow-window
+  CSS rules, token-only styles) are asserted from the source. `client-fallbacks`
+  gained the 0.0.40 copy keys and the proof that the tab labels really went away.
+- **Known limit.** No browser was driven in this round, so the visual result — pixel
+  rhythm, wrapping in a narrow settings window, light/dark side by side — is not
+  verified. The suite proves the structure and the reads; the look is still a human's
+  to confirm.
+
 ## 0.0.39
 
 A hygiene and documentation round: the deliverables that earlier rounds committed

@@ -7,7 +7,17 @@
  * and the single top-level `import type` is erased by the compiler. Controls
  * and their stylesheet are local to this plugin, styled exclusively from
  * `--dsw-alias-*` and other host theme tokens, because a plugin must not require
- * another Harness client package as a module.
+ * another Harness client package as a module. The card, row, field and stroke
+ * values mirror the settings shell's own (`settings-card-fill`,
+ * `settings-card-stroke`, the `settings-form` field rhythm) so a plugin page
+ * reads as part of the window it is rendered into.
+ *
+ * The page is one scroll, not two tabs, and the scroll is ordered by what a
+ * reader came here to do: SSH targets first, the three client parameters second,
+ * and the resolved limits behind a collapsed `<details>` that is expanded only
+ * by someone who wants them. One container owns the state and every call; the
+ * regions are presentational components that receive what they render, so no
+ * single component holds both the whole state and the whole page.
  *
  * The new-connection form is one address field, a segmented authentication
  * choice, the secret fields that choice needs, and a collapsed advanced section.
@@ -30,8 +40,6 @@ window.__ModuleLoader__.load({
     const NS = 'settings.ssh'
     /** The plugin's own route on the shared `/api` channel. */
     const ROUTE = '/api/ssh/rpc'
-    /** Base of the tab ids this page owns: `<id>-<value>` and `<id>-<value>-panel`. */
-    const TAB_BASE = 'dshssh-tabs'
     /** Base of the authentication-mode radio ids. */
     const AUTH_BASE = 'dshssh-auth'
     /** The three authentication modes, in display order. */
@@ -46,50 +54,26 @@ window.__ModuleLoader__.load({
      */
     const AUTH_LABEL: Record<string, string> = { key: 'authKey', 'key+password': 'authBoth', password: 'authPassword' }
 
-    /** Browser-facing copy. Both baseline locales are required by the locale service. */
+    /**
+     * Browser-facing copy. Both baseline locales are required by the locale
+     * service, and a test compares every key the page asks for against these two
+     * blocks, so a label added on one side only fails the suite rather than
+     * painting its own name into a card.
+     */
     const DICT: Record<string, Record<string, string>> = {
       en: {
         nav: 'Remote connections',
         title: 'Remote connections',
-        intro: 'Named SSH targets this machine can reach, kept in this plugin\'s own storage so the page can edit them without touching the profile patch file. The plugin never reads or writes ~/.ssh/config and never adds a host key.',
-        storedIn: 'Stored by the plugin in its own ssh_targets storage domain; passwords and passphrases live in the Harness credential store.',
-        tabsLabel: 'Sections of this page',
-        tabList: 'SSH targets',
-        tabSettings: 'Client settings',
-        settingsTitle: 'Client settings',
-        settingsMaxOutput: 'Output ceiling (bytes)',
-        settingsRemoteTimeout: 'Command timeout (ms)',
-        settingsMaxTransfer: 'Transfer ceiling (bytes)',
-        settingsSave: 'Save settings',
-        settingsSaved: 'Saved.',
-        settingsOverrideHint: 'Empty means “follow the configured default”. Any positive number is accepted: one above the cap is capped, and the value that applied is shown back.',
-        boundsEffectiveOf: 'in force {value}',
-        boundsDefaultOf: 'default {value}',
-        boundsCapOf: 'cap {value}',
-        boundsResolvedTitle: 'Resolved bounds',
-        boundsFromConfig: 'These numbers come from the plugin’s configuration on this Host — a default and a cap per ceiling. Editing the profile’s ssh row changes them, with no code release involved.',
-        boundsTitle: 'Fixed bounds',
-        boundsTargets: 'Targets per profile',
-        boundsOps: 'Remote operations at once',
-        boundsCopies: 'File copies at once',
-        boundsJobs: 'Background jobs at once',
-        boundsSpill: 'Full-output spill files',
-        spillLine: '{files} file(s), {used} of {max} bytes',
-        spillRefused: ', {refusals} answer(s) kept to the tail',
-        tempCollected: 'Startup collected {removed} abandoned temp dir{plural} of {scanned} in its own namespace; {kept} left standing.',
-        boundsRunning: 'ceiling {ceiling}, running {running}',
-        boundsJobsReserved: '{reserved} of {total} operation slots held back for calls that wait',
-        boundsMasters: 'Servers sharing a connection',
-        boundsPersist: 'A shared connection idles out after',
-        boundsPerRound: 'Targets per “Test all” round',
-        boundsTimeout: 'Probe timeout in force',
-        boundsOutput: 'Output ceiling accepts',
-        boundsRemoteTimeout: 'Command timeout accepts',
-        boundsTransfer: 'Transfer ceiling accepts',
-        poolOff: 'This Host could not prepare a private directory for control sockets, so every call dials its own connection: {reason}',
-        chipAgentOff: 'agent access off',
-        chipAllowlist: '{count} no-approval program(s)',
+        intro: 'Manage SSH targets and the parameters remote calls run under.',
+        storedIn: 'The target list and this profile’s overrides live in the plugin’s own ssh_targets storage domain; passwords and passphrases live in the Harness credential store.',
+        storageConfigNote: 'The plugin never reads or writes ~/.ssh/config and never records a host key for you. A ceiling you leave empty follows the plugin’s configuration on this Host.',
+        runtimeTitle: 'Runtime status and details',
+        runtimeHint: 'Expand for the lanes that are busy, the limits this Host resolved, and what the plugin has left on disk. Nothing here is editable: it is what the plugin fixes in code and configuration.',
+        runtimeStorageTitle: 'Storage and credentials',
+        runtimeUsageFormat: 'Numbers read “current use / limit”: the first is what occupies the lane now, the second is the most it may ever hold.',
+        runtimeBusy: '{count} running',
         listTitle: 'SSH targets',
+        listTotal: '{count} saved',
         listCount: '{count} of {limit} saved',
         listAdd: 'New connection',
         listAddFull: 'Target limit reached',
@@ -99,6 +83,53 @@ window.__ModuleLoader__.load({
         listEmpty: 'No SSH targets yet',
         listEmptyHint: 'Add a host name or an existing OpenSSH host alias, then test it here.',
         listLoadFailed: 'The settings page could not reach the plugin on this Host.',
+        defaultChip: 'default',
+        defaultHint: 'With one saved target, a call that names no server uses it. With several, it uses the server that conversation chose last.',
+        rowDetails: 'Details',
+        rowDetailsHide: 'Hide',
+        refresh: 'Refresh',
+        settingsTitle: 'Client parameters',
+        settingsMaxOutput: 'Output ceiling (bytes)',
+        settingsRemoteTimeout: 'Command timeout (milliseconds)',
+        settingsMaxTransfer: 'Transfer ceiling (bytes)',
+        settingsSave: 'Save parameters',
+        settingsSaved: 'Saved.',
+        settingsOverrideHint: 'Empty means “follow the configured default”. Any positive whole number is accepted: one above the cap is capped, and the value that applied is shown back.',
+        paramFollowDefault: 'follows the default',
+        paramOverride: 'override',
+        paramCapped: 'above the cap, so {value} is in force',
+        paramBadNumber: 'Enter a positive whole number of {unit}s.',
+        paramDirty: 'Unsaved changes.',
+        paramReset: 'clear override',
+        unitMs: 'millisecond',
+        unitBytes: 'byte',
+        boundsEffectiveOf: 'in force {value}',
+        boundsDefaultOf: 'default {value}',
+        boundsCapOf: 'cap {value}',
+        boundsResolvedTitle: 'Runtime limits',
+        boundsFromConfig: 'These numbers come from the plugin’s configuration on this Host — a default and a cap per ceiling. Editing the profile’s ssh row changes them, with no code release involved.',
+        boundsTitle: 'Fixed bounds',
+        boundsTargets: 'Targets per profile',
+        boundsOps: 'Remote operations running',
+        boundsCopies: 'File transfers running',
+        boundsJobs: 'Background jobs',
+        boundsSpill: 'Output temp files',
+        spillBytes: 'Temp space on disk',
+        spillFiles: '{files} file(s)',
+        spillRefused: ', {refusals} answer(s) kept to the tail',
+        tempCollected: 'Startup collected {removed} abandoned temp dir{plural} of {scanned} in its own namespace; {kept} left standing.',
+        boundsRunning: '{running} of {ceiling}',
+        boundsJobsReserved: '{reserved} of {total} operation slots held back for calls that wait',
+        boundsMasters: 'Targets per shared connection',
+        boundsPersist: 'A shared connection idles out after',
+        boundsPerRound: 'Targets per “Test all” round',
+        boundsTimeout: 'Connection-test deadline',
+        boundsOutput: 'Output ceiling accepts',
+        boundsRemoteTimeout: 'Command timeout accepts',
+        boundsTransfer: 'Transfer ceiling accepts',
+        poolOff: 'This Host could not prepare a private directory for control sockets, so every call dials its own connection: {reason}',
+        chipAgentOff: 'agent access off',
+        chipAllowlist: '{count} no-approval program(s)',
         newTitle: 'New connection',
         editTitle: 'Edit connection',
         addrLabel: 'Connection address',
@@ -192,45 +223,16 @@ window.__ModuleLoader__.load({
       zh: {
         nav: '远程连接',
         title: '远程连接',
-        intro: '保存「本机能够连上的命名 SSH 目标」。清单存在插件自己的存储里，页面改它不会动 profile 的 patch 文件；插件从不读写 ~/.ssh/config，也不会替你写入主机密钥。',
-        storedIn: '清单与参数存在插件自己的 ssh_targets 存储域；密码与口令存在 Harness 凭据库里。',
-        tabsLabel: '本页面内的分区',
-        tabList: 'SSH 目标清单',
-        tabSettings: '客户端参数',
-        settingsTitle: '客户端参数',
-        settingsMaxOutput: '输出上限（字节）',
-        settingsRemoteTimeout: '命令超时（毫秒）',
-        settingsMaxTransfer: '传输上限（字节）',
-        settingsSave: '保存参数',
-        settingsSaved: '已保存。',
-        settingsOverrideHint: '留空表示「跟配置里的默认走」。填任何正数都收：超过上限会被夹到上限，并且回显真正生效的值。',
-        boundsEffectiveOf: '生效 {value}',
-        boundsDefaultOf: '默认 {value}',
-        boundsCapOf: '上限 {value}',
-        boundsResolvedTitle: '解析后的边界',
-        boundsFromConfig: '这些数字来自这台 Host 上插件的配置——每个上限都有一个默认值和一个封顶值。改 profile 里 ssh 那一行就能调，不用改代码发版。',
-        boundsTitle: '固定边界',
-        boundsTargets: '每个 profile 可存的目标数',
-        boundsOps: '同时在跑的远程操作数',
-        boundsCopies: '同时在跑的文件传输数',
-        boundsJobs: '同时在跑的后台任务数',
-        boundsSpill: '完整输出落盘文件',
-        spillLine: '{files} 个文件，{used} / {max} 字节',
-        spillRefused: '，{refusals} 次回答只留尾部',
-        tempCollected: '启动时在本插件命名空间内回收了 {scanned} 个残留中的 {removed} 个临时目录，保留 {kept} 个。',
-        boundsRunning: '上限 {ceiling}，正在跑 {running}',
-        boundsJobsReserved: '{total} 个操作槽位中为等待结果的调用保留 {reserved} 个',
-        boundsMasters: '共用一条连接的目标数上限',
-        boundsPersist: '共享连接空闲多久后断开',
-        boundsPerRound: '「全部测试」单轮覆盖的目标数',
-        boundsTimeout: '当前生效的探测超时',
-        boundsOutput: '输出上限可填范围',
-        boundsRemoteTimeout: '命令超时可填范围',
-        boundsTransfer: '传输上限可填范围',
-        poolOff: '这台 Host 没能准备好放控制套接字的私有目录，所以每次调用都自己拨号：{reason}',
-        chipAgentOff: 'agent 访问已关',
-        chipAllowlist: '{count} 个免审批程序',
-        listTitle: 'SSH 目标清单',
+        intro: '管理 SSH 目标，以及远程调用所依据的参数。',
+        storedIn: '目标清单与本 profile 的覆盖值存在插件自己的 ssh_targets 存储域；密码与口令存在 Harness 凭据库里。',
+        storageConfigNote: '插件从不读写 ~/.ssh/config，也不会替你写入主机密钥。此处留空的上限，跟随这台 Host 上插件的配置。',
+        runtimeTitle: '运行状态与高级信息',
+        runtimeHint: '展开可查看正在占用的通道、这台 Host 解析出的限制，以及插件留在磁盘上的临时文件。这里没有可编辑项：它们由插件的代码与配置决定。',
+        runtimeStorageTitle: '存储与凭据',
+        runtimeUsageFormat: '数值写成「当前用量 / 上限」：前者是现在占用多少，后者是这条通道最多能占多少。',
+        runtimeBusy: '{count} 项在跑',
+        listTitle: 'SSH 目标',
+        listTotal: '共 {count} 台',
         listCount: '已保存 {count} / {limit}',
         listAdd: '新建连接',
         listAddFull: '已达清单上限',
@@ -240,6 +242,53 @@ window.__ModuleLoader__.load({
         listEmpty: '还没有 SSH 目标',
         listEmptyHint: '先添加一个主机名或已有的 OpenSSH 别名，再在这里测试。',
         listLoadFailed: '设置页无法连到本机上的这个插件。',
+        defaultChip: '默认',
+        defaultHint: '只保存一台服务器时，未点名服务器的调用都落在它上面；有多台时，未点名的调用沿用该对话上一次使用的服务器。',
+        rowDetails: '详情',
+        rowDetailsHide: '收起',
+        refresh: '刷新',
+        settingsTitle: '客户端参数',
+        settingsMaxOutput: '输出上限（字节）',
+        settingsRemoteTimeout: '命令超时（毫秒）',
+        settingsMaxTransfer: '传输上限（字节）',
+        settingsSave: '保存参数',
+        settingsSaved: '已保存。',
+        settingsOverrideHint: '留空表示「跟随配置里的默认」。任何正整数都收：超过上限会被夹到上限，并回显真正生效的数。',
+        paramFollowDefault: '跟随默认',
+        paramOverride: '覆盖值',
+        paramCapped: '超过上限，实际生效 {value}',
+        paramBadNumber: '请输入正整数（单位：{unit}）。',
+        paramDirty: '有未保存的修改。',
+        paramReset: '清除覆盖',
+        unitMs: '毫秒',
+        unitBytes: '字节',
+        boundsEffectiveOf: '生效 {value}',
+        boundsDefaultOf: '默认 {value}',
+        boundsCapOf: '上限 {value}',
+        boundsResolvedTitle: '运行限制',
+        boundsFromConfig: '这些数字来自这台 Host 上插件的配置——每个上限都有一个默认值和一个封顶值。改 profile 里 ssh 那一行就能调，不用改代码发版。',
+        boundsTitle: '固定边界',
+        boundsTargets: '每个 profile 可存的目标数',
+        boundsOps: '正在执行的远程操作',
+        boundsCopies: '正在进行的文件传输',
+        boundsJobs: '后台任务',
+        boundsSpill: '输出临时文件',
+        spillBytes: '临时文件占用空间',
+        spillFiles: '{files} 个文件',
+        spillRefused: '，{refusals} 次回答只留尾部',
+        tempCollected: '启动时在本插件命名空间内回收了 {scanned} 个残留中的 {removed} 个临时目录，保留 {kept} 个。',
+        boundsRunning: '{running} / {ceiling}',
+        boundsJobsReserved: '{total} 个操作槽位中为等待结果的调用保留 {reserved} 个',
+        boundsMasters: '单连接目标上限',
+        boundsPersist: '共享连接空闲多久后断开',
+        boundsPerRound: '「全部测试」单轮覆盖的目标数',
+        boundsTimeout: '连接测试的等待上限',
+        boundsOutput: '输出上限可填范围',
+        boundsRemoteTimeout: '命令超时可填范围',
+        boundsTransfer: '传输上限可填范围',
+        poolOff: '这台 Host 没能准备好放控制套接字的私有目录，所以每次调用都自己拨号：{reason}',
+        chipAgentOff: 'agent 访问已关',
+        chipAllowlist: '{count} 个免审批程序',
         newTitle: '新建连接',
         editTitle: '编辑连接',
         addrLabel: '连接地址',
@@ -377,75 +426,110 @@ window.__ModuleLoader__.load({
       internal: 'hintInternal',
     }
 
+    /**
+     * The page's own stylesheet. Every value is a host theme token, so light and
+     * dark both read as the settings window the page is injected into: the cards
+     * take the shell's own fill and stroke, rows are divided by hairlines rather
+     * than boxed one at a time, and nothing declares a width the shell cannot
+     * give it — the columns are `minmax(0, …)` and every control is
+     * `box-sizing: border-box`, so a narrow window wraps instead of scrolling
+     * sideways.
+     */
     const CSS = `
-.dshssh-root{display:flex;flex-direction:column;gap:16px;color:var(--dsw-alias-label-primary)}
-.dshssh-title{font-size:15px;font-weight:600}
-.dshssh-intro{font-size:13px;line-height:1.55;color:var(--dsw-alias-label-secondary)}
-.dshssh-card{display:flex;flex-direction:column;gap:12px;padding:14px;border:1px solid var(--dsw-alias-border-l1);border-radius:10px;background:var(--dsw-alias-bg-layer-1)}
-.dshssh-card-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.dshssh-root{display:flex;flex-direction:column;gap:12px;min-width:0;max-width:660px;font-size:13px;line-height:1.55;color:var(--dsw-alias-label-primary)}
+.dshssh-title{margin:0;font-size:18px;font-weight:600;line-height:1.4}
+.dshssh-intro{margin:0;color:var(--dsw-alias-label-tertiary)}
+.dshssh-card{display:flex;flex-direction:column;gap:10px;min-width:0;padding:12px 16px;box-sizing:border-box;border:.5px solid var(--dsw-alias-settings-card-stroke);border-radius:var(--dsw-radius-xl);background:var(--dsw-alias-settings-card-fill)}
+.dshssh-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .dshssh-card-title{font-size:13px;font-weight:600}
-.dshssh-muted{font-size:12px;color:var(--dsw-alias-label-secondary)}
-.dshssh-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px 12px}
-.dshssh-field{display:flex;flex-direction:column;gap:4px}
-.dshssh-label{font-size:12px;color:var(--dsw-alias-label-secondary)}
-.dshssh-input,.dshssh-textarea{box-sizing:border-box;width:100%;padding:6px 8px;font:inherit;font-size:13px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:6px}
-.dshssh-textarea{min-height:64px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.dshssh-input:focus-visible,.dshssh-textarea:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
-.dshssh-input-inline{display:flex;align-items:stretch;gap:6px}
-.dshssh-input-inline .dshssh-input{flex:1 1 auto}
-.dshssh-eye{flex:0 0 auto;padding:0 10px;font:inherit;font-size:12px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;cursor:pointer}
+.dshssh-card-headline{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;min-width:0}
+.dshssh-tertiary{font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.dshssh-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:10px 14px;min-width:0}
+.dshssh-fields{display:flex;flex-direction:column;min-width:0}
+.dshssh-field{display:flex;flex-direction:column;gap:6px;min-width:0;padding:10px 0}
+.dshssh-fields>.dshssh-field:first-child{padding-top:0}
+.dshssh-fields>.dshssh-field+.dshssh-field{border-top:.5px solid var(--dsw-alias-border-l2)}
+.dshssh-label{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px;font-weight:500;line-height:1.5;color:var(--dsw-alias-label-primary)}
+.dshssh-input,.dshssh-textarea{box-sizing:border-box;width:100%;min-width:0;height:34px;padding:0 12px;font:inherit;font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-3);border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md)}
+.dshssh-textarea{height:auto;min-height:64px;padding:8px 12px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.dshssh-input:focus-visible,.dshssh-textarea:focus-visible{outline:none;border-color:var(--dsw-alias-state-business-primary)}
+.dshssh-input:disabled,.dshssh-textarea:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}
+.dshssh-input[aria-invalid="true"],.dshssh-textarea[aria-invalid="true"]{border-color:var(--dsw-alias-state-error-primary)}
+.dshssh-input-inline{display:flex;align-items:stretch;gap:6px;min-width:0}
+.dshssh-input-inline .dshssh-input{flex:1 1 auto;min-width:0}
+.dshssh-eye{flex:0 0 auto;height:34px;padding:0 10px;font:inherit;font-size:12px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-3);border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);cursor:pointer}
 .dshssh-eye:hover{color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-brand-primary)}
-.dshssh-eye:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
-.dshssh-check{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary)}
-.dshssh-list{display:flex;flex-direction:column;gap:8px}
-.dshssh-row{display:flex;align-items:flex-start;gap:10px;padding:10px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-2)}
-.dshssh-row-main{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1 1 auto}
+.dshssh-eye:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:1px}
+.dshssh-check{display:flex;align-items:flex-start;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary)}
+.dshssh-check input{flex:0 0 auto;margin-top:3px}
+.dshssh-list{display:flex;flex-direction:column;min-width:0}
+.dshssh-row{display:flex;flex-direction:column;gap:6px;min-width:0;padding:10px 0;border-top:.5px solid var(--dsw-alias-border-l2)}
+.dshssh-row:first-child{padding-top:2px;border-top:0}
+.dshssh-row-head{display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap;min-width:0}
+.dshssh-row-main{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1 1 220px}
+.dshssh-row-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
 .dshssh-row-title{font-size:13px;font-weight:600;overflow-wrap:anywhere}
-.dshssh-row-meta{font-size:12px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
-.dshssh-chips{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.dshssh-chip{display:inline-flex;align-items:center;padding:1px 7px;font-size:11.5px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base)}
+.dshssh-row-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;color:var(--dsw-alias-label-tertiary);overflow-wrap:anywhere}
+.dshssh-row-body{display:flex;flex-direction:column;gap:8px;padding-top:2px}
+.dshssh-chips{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+.dshssh-chip{display:inline-flex;align-items:center;padding:1px 7px;font-size:11.5px;border:.5px solid var(--dsw-alias-border-l4);border-radius:999px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-3)}
+.dshssh-chip[data-tone="default"]{color:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary)}
 .dshssh-chip[data-tone="secret"]{color:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary)}
 .dshssh-actions{display:flex;align-items:center;gap:6px;flex:0 0 auto;flex-wrap:wrap}
-.dshssh-btn{padding:5px 10px;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;cursor:pointer}
+.dshssh-btn{height:28px;padding:0 10px;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-3);border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);cursor:pointer}
 .dshssh-btn:hover:not(:disabled){border-color:var(--dsw-alias-brand-primary)}
-.dshssh-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.dshssh-btn:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:1px}
 .dshssh-btn:disabled{opacity:.5;cursor:default}
 .dshssh-btn-primary{color:var(--dsw-alias-bg-base);background:var(--dsw-alias-brand-primary);border-color:transparent}
 .dshssh-btn-danger:hover:not(:disabled){color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary)}
-.dshssh-badge{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;font-size:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-state-idle-primary)}
+.dshssh-btn-link{height:auto;padding:0;border:0;background:none;font:inherit;font-size:12px;color:var(--dsw-alias-label-tertiary);cursor:pointer}
+.dshssh-btn-link:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
+.dshssh-btn-link:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:2px}
+.dshssh-btn-link:disabled{cursor:default;opacity:.5}
+.dshssh-badge{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;font-size:12px;border:.5px solid var(--dsw-alias-border-l4);border-radius:999px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-state-idle-primary)}
 .dshssh-badge::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
 .dshssh-badge[data-tone="ok"]{color:var(--dsw-alias-state-success-primary)}
 .dshssh-badge[data-tone="warn"]{color:var(--dsw-alias-state-warn-primary)}
 .dshssh-badge[data-tone="err"]{color:var(--dsw-alias-state-error-primary)}
-.dshssh-notice{display:flex;flex-direction:column;gap:6px;padding:8px 10px;font-size:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}
+.dshssh-notice{display:flex;flex-direction:column;gap:6px;padding:8px 12px;font-size:12px;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary)}
 .dshssh-notice[data-tone="err"]{border-color:var(--dsw-alias-state-error-primary)}
 .dshssh-notice[data-tone="warn"]{border-color:var(--dsw-alias-state-warn-primary)}
 .dshssh-notice[data-tone="ok"]{border-color:var(--dsw-alias-state-success-primary)}
-.dshssh-detail{margin:0;padding:8px;max-height:180px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l1);border-radius:6px}
-.dshssh-form{display:flex;flex-direction:column;gap:12px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-base)}
+.dshssh-detail{margin:0;padding:8px;max-width:100%;max-height:180px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm)}
+.dshssh-form{display:flex;flex-direction:column;gap:12px;min-width:0;padding:12px 14px;box-sizing:border-box;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-lg)}
 .dshssh-foot{display:flex;align-items:center;gap:8px;justify-content:flex-end;flex-wrap:wrap}
 .dshssh-error{font-size:12px;color:var(--dsw-alias-state-error-primary)}
-.dshssh-disclose{border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;padding:10px;display:flex;flex-direction:column;gap:10px}
-.dshssh-disclose>summary{font-size:12px;font-weight:600;cursor:pointer;color:var(--dsw-alias-label-secondary);list-style:none}
+.dshssh-disclose{border:.5px dashed var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);padding:10px 12px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.dshssh-disclose>summary{font-size:12px;font-weight:600;cursor:pointer;list-style:none;color:var(--dsw-alias-label-secondary)}
 .dshssh-disclose>summary::-webkit-details-marker{display:none}
-.dshssh-disclose>summary::before{content:"▸ ";color:var(--dsw-alias-label-secondary)}
+.dshssh-disclose>summary::before{content:"▸ ";color:var(--dsw-alias-label-tertiary)}
 .dshssh-disclose[open]>summary::before{content:"▾ "}
 .dshssh-disclose[open]>summary{color:var(--dsw-alias-label-primary)}
-.dshssh-seg{position:relative;display:inline-grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:2px;padding:4px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-interactive-bg-hover);justify-self:start}
+.dshssh-seg{position:relative;display:inline-grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:2px;padding:4px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-interactive-bg-hover);justify-self:start;max-width:100%}
 .dshssh-seg-indicator{position:absolute;top:4px;left:4px;width:calc((100% - 8px - 2px * (var(--dshssh-segment-count) - 1)) / var(--dshssh-segment-count));height:calc(100% - 8px);border:0;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1);box-shadow:var(--dsw-elevation-soft);transform:translateX(calc(var(--dshssh-segment-index) * (100% + 2px)));transition:transform 160ms ease;pointer-events:none}
 .dshssh-seg-item{box-sizing:border-box;position:relative;z-index:1;height:28px;padding:0 16px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;font:inherit;font-size:13px;line-height:20px;font-weight:500;white-space:nowrap;cursor:pointer;color:var(--dsw-alias-label-secondary);transition:color 120ms ease}
 .dshssh-seg-item[aria-selected="true"],.dshssh-seg-item[aria-checked="true"]{color:var(--dsw-alias-label-primary)}
 .dshssh-seg-item:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
 .dshssh-seg-item:disabled{cursor:default;opacity:.4}
 .dshssh-seg-item:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:-2px}
-.dshssh-resolve{display:flex;flex-direction:column;gap:8px;padding:8px;border:1px dashed var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-base)}
+.dshssh-resolve{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:.5px dashed var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-base);min-width:0}
 .dshssh-hidden{display:none}
-.dshssh-panel{display:flex;flex-direction:column;gap:16px}
-.dshssh-panel:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:2px}
-.dshssh-bounds{display:flex;flex-direction:column;gap:7px;margin:0}
-.dshssh-bound{display:flex;align-items:baseline;justify-content:space-between;gap:12px;border-bottom:1px solid var(--dsw-alias-border-l1);padding-bottom:6px}
-.dshssh-bound dt{font-size:12px;color:var(--dsw-alias-label-secondary)}
-.dshssh-bound dd{margin:0;font-size:12px;overflow-wrap:anywhere;color:var(--dsw-alias-label-primary)}
+.dshssh-runtime{min-width:0;max-width:none;box-sizing:border-box;border:.5px solid var(--dsw-alias-settings-card-stroke);border-radius:var(--dsw-radius-xl);background:var(--dsw-alias-settings-card-fill);padding:0 16px}
+.dshssh-runtime>summary{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:12px 0;font-size:13px;font-weight:600;cursor:pointer;list-style:none;color:var(--dsw-alias-label-primary)}
+.dshssh-runtime>summary::-webkit-details-marker{display:none}
+.dshssh-runtime>summary::before{content:"▸";flex:0 0 auto;color:var(--dsw-alias-label-tertiary)}
+.dshssh-runtime[open]>summary::before{content:"▾"}
+.dshssh-runtime[open]>summary{border-bottom:.5px solid var(--dsw-alias-border-l2)}
+.dshssh-runtime>summary:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:2px}
+.dshssh-runtime-body{display:flex;flex-direction:column;gap:10px;padding:12px 0 14px;min-width:0}
+.dshssh-bounds{display:flex;flex-direction:column;gap:0;margin:0}
+.dshssh-bound{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;min-width:0;border-bottom:.5px solid var(--dsw-alias-border-l2);padding:7px 0}
+.dshssh-bound:last-child{border-bottom:0}
+.dshssh-bound dt{font-size:12px;color:var(--dsw-alias-label-secondary);min-width:0}
+.dshssh-bound dd{margin:0;font-size:12px;overflow-wrap:anywhere;text-align:right;flex:1 1 auto;min-width:0;color:var(--dsw-alias-label-primary)}
+.dshssh-bound dd[data-live="busy"]{color:var(--dsw-alias-state-warn-primary)}
+.dshssh-subhead{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary)}
+@media (max-width:560px){.dshssh-card{padding:10px 12px}.dshssh-runtime{padding:0 12px}.dshssh-bound dd{text-align:left}}
 @media (prefers-reduced-motion: reduce){.dshssh-seg-indicator,.dshssh-seg-item{transition:none}}
 `
 
@@ -561,6 +645,27 @@ window.__ModuleLoader__.load({
       const host = record.host.includes(':') && !record.host.startsWith('[') ? `[${record.host}]` : record.host
       const base = record.user === undefined || record.user === '' ? host : `${record.user}@${host}`
       return record.port === undefined ? base : `${base}:${String(record.port)}`
+    }
+
+    /**
+     * Read one box of the parameters card. An empty box is a choice, not a no-op:
+     * it asks the Host to drop this profile's override so the configured default
+     * applies again. A box that cannot mean a byte count or a deadline is reported
+     * rather than dropped, which is what the silent `undefined` this replaced used
+     * to do — the save answered `Saved.` while the number in the box never left
+     * the browser.
+     * @param text - what the reader typed.
+     * @returns `{ at: 'clear' }`, `{ at: 'set', value }`, or `{ at: 'bad' }`.
+     */
+    function readCeiling(text: string): { at: 'clear' } | { at: 'set'; value: number } | { at: 'bad' } {
+      const trimmed = (text ?? '').trim()
+      if (trimmed === '') return { at: 'clear' }
+      const parsed = Number(trimmed)
+      // The same line the Host draws: a positive whole number means something to
+      // clamp, and anything else has no meaning at all. `Number('')` is 0 and
+      // `Number(' ')` is 0 too, so the empty check above comes first on purpose.
+      if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) return { at: 'bad' }
+      return { at: 'set', value: parsed }
     }
 
     /**
@@ -747,9 +852,28 @@ window.__ModuleLoader__.load({
       return `${String(seconds)} s`
     }
 
+    /**
+     * Decide whether a stored target is the one an unnamed call lands on, and say
+     * so only when the inventory actually makes one. This is the Host's own rule
+     * (`findTarget` in `tool.ts`, mirrored by `ops.pickTarget`): an explicit
+     * reference wins, then the conversation's chosen target, then a lone target.
+     * The page has no conversation to name, so the only default it can report
+     * without inventing a stored field is the one every conversation shares.
+     * @param connections - the stored list, already ordered by label.
+     * @returns the id carrying the marker, or `undefined`.
+     */
+    function defaultTargetId(connections: readonly ConnectionView[]): string | undefined {
+      return connections.length === 1 ? connections[0]?.id : undefined
+    }
+
     /** One state dot and its label. */
     function Badge(props: { tone: string; text: string }): any {
       return h('span', { class: 'dshssh-badge', 'data-tone': props.tone }, props.text)
+    }
+
+    /** One small pill of fact beside a name: what is stored, what is switched. */
+    function Chip(props: { text: string; tone?: string }): any {
+      return h('span', { class: 'dshssh-chip', ...(props.tone === undefined ? {} : { 'data-tone': props.tone }) }, props.text)
     }
 
     /** A labelled single-line input, optionally with a reveal button for secrets. */
@@ -787,13 +911,13 @@ window.__ModuleLoader__.load({
             onClick: props.reveal.onToggle,
           }, props.reveal.shown ? props.reveal.hideLabel : props.reveal.showLabel),
         ),
-        props.hint === undefined ? null : h('span', { class: 'dshssh-muted' }, props.hint),
+        props.hint === undefined ? null : h('span', { class: 'dshssh-tertiary' }, props.hint),
         props.errorText === undefined ? null : h('span', { class: 'dshssh-error' }, props.errorText),
       )
     }
 
     /** A labelled multi-line input. */
-    function TextAreaField(props: { label: string; value: string; onChange: (value: string) => void; hint?: string; disabled?: boolean }): any {
+    function TextAreaField(props: { label: string; value: string; onChange: (value: string) => void; hint?: string; disabled?: boolean; errorText?: string }): any {
       return h('label', { class: 'dshssh-field' },
         h('span', { class: 'dshssh-label' }, props.label),
         h('textarea', {
@@ -802,9 +926,11 @@ window.__ModuleLoader__.load({
           rows: 3,
           spellcheck: 'false',
           disabled: props.disabled === true,
+          'aria-invalid': props.errorText === undefined ? 'false' : 'true',
           onChange: (event: any) => { props.onChange(String(event.target.value ?? '')) },
         }),
-        props.hint === undefined ? null : h('span', { class: 'dshssh-muted' }, props.hint),
+        props.hint === undefined ? null : h('span', { class: 'dshssh-tertiary' }, props.hint),
+        props.errorText === undefined ? null : h('span', { class: 'dshssh-error' }, props.errorText),
       )
     }
 
@@ -812,7 +938,7 @@ window.__ModuleLoader__.load({
     function Notice(props: { tone: string; text: string; hint?: string }): any {
       return h('div', { class: 'dshssh-notice', 'data-tone': props.tone, role: 'status', 'aria-live': 'polite' },
         h('span', {}, props.text),
-        props.hint === undefined ? null : h('span', { class: 'dshssh-muted' }, props.hint),
+        props.hint === undefined ? null : h('span', { class: 'dshssh-tertiary' }, props.hint),
       )
     }
 
@@ -927,25 +1053,696 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Render one probe result: when it ran, how long it took, the fix-up hint
+     * for its status, and the captured output tail.
+     * @param t - the reader's translator.
+     * @param outcome - the stored or freshly probed result.
+     * @param withTail - whether to include the captured output, which is what the
+     *   expanded row shows and the collapsed one does not.
+     * @returns the result region, or `null` when nothing was probed yet.
+     */
+    function probeRegion(t: (key: string, params?: Record<string, string | number>) => string, outcome: ProbeOutcome | null | undefined, withTail: boolean): any {
+      if (outcome === null || outcome === undefined) return null
+      const hintKey = STATUS_HINT_KEY[outcome.status]
+      return h('div', { class: 'dshssh-field' },
+        h('span', { class: 'dshssh-row-meta' },
+          format(t('asOf'), { at: when(outcome.at) }),
+          outcome.durationMs === undefined
+            ? null
+            : h('span', {}, ` · ${format(t('took'), { ms: String(outcome.durationMs) })}`),
+        ),
+        // A failure's advice is the actionable half of the answer, so it stays on
+        // the surface; the timing line and the captured bytes are for a reader who
+        // asked for details.
+        hintKey === undefined || !withTail ? null : h('span', { class: 'dshssh-tertiary' }, t(hintKey)),
+        outcome.detail === undefined || !withTail ? null : h('pre', { class: 'dshssh-detail' }, outcome.detail),
+      )
+    }
+
+    /**
+     * Label-and-value rows for one resolved configuration, skipping what the
+     * client did not report.
+     * @param t - the reader's translator.
+     * @param config - the parsed keys.
+     * @param record - the saved row, for the fallback address line.
+     * @returns the definition-list children.
+     */
+    function resolveRows(t: (key: string, params?: Record<string, string | number>) => string, config: any, record: ConnectionView): any[] {
+      const rows: any[] = []
+      const push = (key: string, labelKey: string, value: unknown): void => {
+        if (value === undefined || value === null || value === '') return
+        rows.push(h('div', { class: 'dshssh-bound', key },
+          h('dt', {}, t(labelKey)),
+          h('dd', {}, Array.isArray(value) ? value.join(', ') : String(value)),
+        ))
+      }
+      const port = config.port === undefined || config.port === 22 ? '' : `:${String(config.port)}`
+      push('host', 'resolveHostname', `${config.user ?? record.user ?? ''}${config.user || record.user ? '@' : ''}${config.hostname ?? record.host}${port}`)
+      push('user', 'resolveUser', config.user)
+      push('port', 'resolvePort', config.port)
+      push('identity', 'resolveIdentity', config.identityFiles)
+      push('jump', 'resolveJump', config.proxyJump)
+      push('proxy', 'resolveProxy', config.proxyCommand)
+      return rows
+    }
+
+    /**
+     * One stored target: name, address, how it authenticates, whether it answers,
+     * and the three actions that matter. Everything a reader only consults when
+     * something is wrong — the probe tail, the `ssh -G` view, the diagnostics to
+     * paste at whoever runs the server — sits behind the row's own Details toggle,
+     * which is what keeps a six-server list inside one screen.
+     * @param props - the row's record, the page's busy/confirm state, and the
+     *   callbacks that act on it.
+     * @returns the row.
+     */
+    function TargetRowView(props: any): any {
+      const t: (key: string, params?: Record<string, string | number>) => string = props.t
+      const record: ConnectionView = props.record
+      const testing = props.busy === `probe:${record.id}`
+      const removing = props.busy === `remove:${record.id}`
+      const editing = props.editing === true
+      const confirming = props.confirming === true
+      const expanded = props.expanded === true
+      const answer = props.answer
+      const chips: any[] = record.auth === undefined ? [] : [Chip({ text: t(AUTH_LABEL[record.auth] ?? 'authKey') })]
+      if (record.secrets?.passphrase === true) chips.push(Chip({ text: t('passphraseSet'), tone: 'secret' }))
+      if (record.secrets?.password === true) chips.push(Chip({ text: t('secretSet'), tone: 'secret' }))
+      if (record.secrets?.root === true) chips.push(Chip({ text: t('rootSet'), tone: 'secret' }))
+      if (record.proxyJump !== undefined) chips.push(Chip({ text: `via ${record.proxyJump}` }))
+      if (record.agentAccess === 'off') chips.push(Chip({ text: t('chipAgentOff'), tone: 'secret' }))
+      if (record.allowedCommands !== undefined && record.allowedCommands.length > 0) chips.push(Chip({ text: format(t('chipAllowlist'), { count: String(record.allowedCommands.length) }) }))
+      const status = testing
+        ? Badge({ tone: 'idle', text: t('stRunning') })
+        : Badge({
+          tone: record.lastProbe === undefined ? 'idle' : (STATUS_TONE[record.lastProbe.status] ?? 'idle'),
+          text: record.lastProbe === undefined ? t('stIdle') : t(STATUS_KEY[record.lastProbe.status] ?? 'stFailed'),
+        })
+      return h('div', { class: 'dshssh-row', key: record.id },
+        h('div', { class: 'dshssh-row-head' },
+          h('div', { class: 'dshssh-row-main' },
+            h('div', { class: 'dshssh-row-line' },
+              h('span', { class: 'dshssh-row-title' }, record.label),
+              props.isDefault === true ? Chip({ text: t('defaultChip'), tone: 'default' }) : null,
+              status,
+            ),
+            h('div', { class: 'dshssh-row-meta' }, h('span', {}, addressOf(record)), ...chips),
+          ),
+          h('div', { class: 'dshssh-actions' },
+            h('button', {
+              class: 'dshssh-btn',
+              type: 'button',
+              disabled: props.busy !== null,
+              onClick: props.onTest,
+            }, t('test')),
+            h('button', {
+              class: 'dshssh-btn',
+              type: 'button',
+              disabled: props.busy !== null || editing,
+              onClick: props.onEdit,
+            }, t('edit')),
+            confirming
+              ? h('span', { class: 'dshssh-actions' },
+                h('button', {
+                  class: 'dshssh-btn dshssh-btn-danger',
+                  type: 'button',
+                  disabled: removing,
+                  onClick: props.onRemove,
+                }, removing ? t('saving') : t('confirmRemove')),
+                h('button', {
+                  class: 'dshssh-btn',
+                  type: 'button',
+                  disabled: removing,
+                  onClick: props.onStopConfirm,
+                }, t('cancel')),
+              )
+              : h('button', {
+                class: 'dshssh-btn dshssh-btn-danger',
+                type: 'button',
+                disabled: props.busy !== null,
+                onClick: props.onStartConfirm,
+              }, t('remove')),
+            h('button', {
+              class: 'dshssh-btn-link',
+              type: 'button',
+              'aria-expanded': expanded,
+              onClick: props.onToggleDetails,
+            }, expanded ? t('rowDetailsHide') : t('rowDetails')),
+          ),
+        ),
+        // The one thing a reader of a failure needs without asking for it.
+        !testing && record.lastProbe !== undefined && STATUS_HINT_KEY[record.lastProbe.status] !== undefined
+          ? h('span', { class: 'dshssh-tertiary' }, t(STATUS_HINT_KEY[record.lastProbe.status] ?? ''))
+          : null,
+        // The reader's own note stays on the surface: it is the one line of this row
+        // that was written to be read without asking for it.
+        record.note === undefined ? null : h('span', { class: 'dshssh-tertiary' }, record.note),
+        expanded
+          ? h('div', { class: 'dshssh-row-body' },
+            probeRegion(t, record.lastProbe, true),
+            h('div', { class: 'dshssh-actions' },
+              h('button', {
+                class: 'dshssh-btn',
+                type: 'button',
+                disabled: props.busy !== null,
+                onClick: props.onResolve,
+              }, t('resolve')),
+              record.lastProbe === undefined ? null : h('button', {
+                class: 'dshssh-btn',
+                type: 'button',
+                disabled: props.busy !== null,
+                onClick: props.onCopy,
+              }, t('copyDetail')),
+            ),
+            answer === undefined
+              ? null
+              : h('div', { class: 'dshssh-resolve' },
+                h('span', { class: 'dshssh-row-title' }, t('resolveTitle')),
+                h('div', { class: 'dshssh-chips' },
+                  Chip({ text: answer.differs === true ? t('resolveDiffers') : t('resolveSame'), ...(answer.differs === true ? { tone: 'default' } : {}) }),
+                ),
+                answer.ok === false
+                  ? h('p', { class: 'dshssh-error' }, answer.message ?? t('resolveFailed'))
+                  : h('dl', { class: 'dshssh-bounds' }, ...resolveRows(t, answer.resolved ?? {}, record)),
+                h('p', { class: 'dshssh-tertiary' }, t('resolveHint')),
+                typeof answer.text === 'string' ? h('details', { class: 'dshssh-disclose' },
+                  h('summary', {}, t('resolveRaw')),
+                  h('pre', { class: 'dshssh-detail' }, String(answer.text)),
+                ) : null,
+              ),
+          )
+          : null,
+      )
+    }
+
+    /**
+     * The new/edit form: one address, one mode choice, the secrets it needs, and a
+     * collapsed advanced section holding every other field the record carries.
+     * @param props - the draft, what the loaded Host understands, and the callbacks.
+     * @returns the form, or `null` when no target is being edited.
+     */
+    function TargetFormView(props: any): any {
+      const t: (key: string, params?: Record<string, string | number>) => string = props.t
+      const draft = props.draft
+      if (draft === null || draft === undefined) return null
+      const mode: AuthMode = draft.auth ?? 'key'
+      const locked = props.busy !== null
+      const atLimit = props.atLimit === true
+      const disabled = locked || atLimit
+      const modern = props.modern === true
+      const showKey = modern && mode === 'key'
+      const showPassword = modern && mode === 'password'
+      const parsed = parseAddress(draft.address ?? '')
+      const summary = parsed.host === '' ? '' : `${parsed.user === '' ? '' : `${parsed.user}@`}${parsed.host}${parsed.port === '' ? '' : `:${parsed.port}`}`
+      const patch = (key: string) => (value: string): void => { props.onPatch(key, value) }
+
+      /**
+       * One secret field with its stored-state affordances: the placeholder says
+       * what is already kept, the checkbox forgets it, and the typed value is what
+       * a probe or a save will write.
+       */
+      const secretField = (field: {
+        label: string
+        value: string
+        had: boolean
+        cleared: boolean
+        shown: boolean
+        errorText?: string
+        onChange: (value: string) => void
+        onToggleClear: (checked: boolean) => void
+        onToggleShow: () => void
+      }): any => h('div', { class: 'dshssh-field' },
+        h(TextField, {
+          label: field.label,
+          value: field.value,
+          disabled,
+          errorText: field.errorText,
+          placeholder: field.had && !field.cleared ? t('secretStored') : '',
+          reveal: {
+            shown: field.shown,
+            onToggle: field.onToggleShow,
+            showLabel: t('showSecret'),
+            hideLabel: t('hideSecret'),
+          },
+          onChange: field.onChange,
+        }),
+        field.had ? h('label', { class: 'dshssh-check' },
+          h('input', {
+            type: 'checkbox',
+            checked: field.cleared,
+            disabled,
+            onChange: (event: any) => { field.onToggleClear(event.target.checked === true) },
+          }),
+          h('span', {}, t('secretClear')),
+        ) : null,
+      )
+
+      return h('div', { class: 'dshssh-form' },
+        h('div', { class: 'dshssh-card-title' }, draft.id === undefined ? t('newTitle') : t('editTitle')),
+        h(TextField, {
+          label: t('addrLabel'),
+          value: draft.address ?? '',
+          placeholder: t('addrPlaceholder'),
+          hint: summary === '' ? t('addrHint') : `${t('addrHint')} → ${summary}`,
+          disabled,
+          errorText: props.fieldError === 'address' || props.fieldError === 'host' ? t('addrBad') : undefined,
+          onChange: (value: string) => { props.onPatch('address', value) },
+        }),
+        modern ? null : h('p', { class: 'dshssh-tertiary' }, t('legacyHost')),
+        h('div', { class: modern ? 'dshssh-field' : 'dshssh-hidden' },
+          h(SshSegment, {
+            id: AUTH_BASE,
+            role: 'radio',
+            value: mode,
+            groupLabel: t('authTitle'),
+            options: AUTH_OPTIONS.map(option => ({ value: option.value, label: t(option.labelKey), hint: t(option.hintKey), disabled })),
+            onChange: (next: string) => { props.onPatch('auth', next) },
+          }),
+          h('span', { class: 'dshssh-tertiary' }, t(AUTH_OPTIONS.find(option => option.value === mode)?.hintKey ?? 'authKeyHint')),
+        ),
+        showKey ? h('div', { class: 'dshssh-grid' },
+          h(TextField, {
+            label: `${t('keyFileLabel')} (${t('fOptional')})`,
+            value: draft.identityFile ?? '',
+            disabled,
+            errorText: props.fieldError === 'identityFile' ? t('hintBadInput') : undefined,
+            onChange: patch('identityFile'),
+          }),
+        ) : null,
+        showKey ? secretField({
+          label: `${t('passphraseLabel')} (${t('fOptional')})`,
+          value: draft.passphrase ?? '',
+          had: draft.hadPassphrase === true,
+          cleared: draft.clearPassphrase === true,
+          shown: draft.showPassphrase === true,
+          ...(props.fieldError === 'passphrase' ? { errorText: t('hintBadInput') } : {}),
+          onChange: patch('passphrase'),
+          onToggleClear: (checked: boolean) => { props.onPatch('clearPassphrase', checked) },
+          onToggleShow: () => { props.onToggleSecret('showPassphrase') },
+        }) : null,
+        showPassword ? secretField({
+          label: t('passwordLabel'),
+          value: draft.password ?? '',
+          had: draft.hadPassword === true,
+          cleared: draft.clearPassword === true,
+          shown: draft.showPassword === true,
+          ...(props.fieldError === 'password' ? { errorText: t('hintBadInput') } : {}),
+          onChange: patch('password'),
+          onToggleClear: (checked: boolean) => { props.onPatch('clearPassword', checked) },
+          onToggleShow: () => { props.onToggleSecret('showPassword') },
+        }) : null,
+        modern ? secretField({
+          label: `${t('rootLabel')} (${t('fOptional')})`,
+          value: draft.root ?? '',
+          had: draft.hadRoot === true,
+          cleared: draft.clearRoot === true,
+          shown: draft.showRoot === true,
+          ...(props.fieldError === 'root' ? { errorText: t('hintBadInput') } : {}),
+          onChange: patch('root'),
+          onToggleClear: (checked: boolean) => { props.onPatch('clearRoot', checked) },
+          onToggleShow: () => { props.onToggleSecret('showRoot') },
+        }) : null,
+        h(TextField, {
+          label: `${t('labelField')} (${t('fOptional')})`,
+          value: draft.label ?? '',
+          placeholder: summary,
+          hint: t('labelHint'),
+          disabled,
+          errorText: props.fieldError === 'label' ? t('hintBadInput') : undefined,
+          onChange: patch('label'),
+        }),
+        h('details', { class: 'dshssh-disclose' },
+          h('summary', {}, t('advanced')),
+          h('p', { class: 'dshssh-tertiary' }, t('advancedHint')),
+          h('div', { class: 'dshssh-grid' },
+            h(TextField, {
+              label: `${t('fProxy')} (${t('fOptional')})`,
+              value: draft.proxyJump ?? '',
+              disabled,
+              errorText: props.fieldError === 'proxyJump' ? t('hintBadInput') : undefined,
+              onChange: patch('proxyJump'),
+            }),
+          ),
+          h(TextAreaField, {
+            label: `${t('fArgs')} (${t('fOptional')})`,
+            value: draft.extraArgsText ?? '',
+            hint: t('fArgsHint'),
+            disabled,
+            onChange: patch('extraArgsText'),
+          }),
+          h(TextField, {
+            label: `${t('fNote')} (${t('fOptional')})`,
+            value: draft.note ?? '',
+            disabled,
+            onChange: patch('note'),
+          }),
+          // Only a Host that was assembled with a pool may be handed the field:
+          // an older one validates its input strictly and would reject the save.
+          props.pooling ? h('div', { class: 'dshssh-field' },
+            h('label', { class: 'dshssh-check' },
+              h('input', {
+                type: 'checkbox',
+                checked: draft.pool !== 'off',
+                disabled,
+                onChange: (event: any) => { props.onPatch('pool', event.target.checked === true ? 'on' : 'off') },
+              }),
+              h('span', {}, t('fPool')),
+            ),
+            h('p', { class: 'dshssh-tertiary' }, t('fPoolHint')),
+          ) : null,
+          // The two switches the tool's own gate reads. No capability gate: the
+          // stored schema has carried both since before this page existed.
+          h('div', { class: 'dshssh-field' },
+            h('label', { class: 'dshssh-check' },
+              h('input', {
+                type: 'checkbox',
+                checked: draft.agentAccess !== 'off',
+                disabled,
+                onChange: (event: any) => { props.onPatch('agentAccess', event.target.checked === true ? 'on' : 'off') },
+              }),
+              h('span', {}, t('fAgent')),
+            ),
+            h('p', { class: 'dshssh-tertiary' }, t('fAgentHint')),
+          ),
+          h(TextField, {
+            label: `${t('fAllowlist')} (${t('fOptional')})`,
+            value: draft.allowedCommandsText ?? '',
+            hint: t('fAllowlistHint'),
+            disabled,
+            errorText: props.fieldError === 'allowedCommands' ? t('hintBadInput') : undefined,
+            onChange: patch('allowedCommandsText'),
+          }),
+        ),
+        atLimit ? h('span', { class: 'dshssh-error' }, format(t('listCount'), { count: String(props.count), limit: String(props.limit) })) : null,
+        props.draftProbe === null || props.draftProbe === undefined
+          ? null
+          : h('div', { class: 'dshssh-field' },
+            Badge({
+              tone: STATUS_TONE[props.draftProbe.status] ?? 'idle',
+              text: t(STATUS_KEY[props.draftProbe.status] ?? 'stFailed'),
+            }),
+            probeRegion(t, props.draftProbe, true),
+          ),
+        h('div', { class: 'dshssh-foot' },
+          h('button', {
+            class: 'dshssh-btn',
+            type: 'button',
+            disabled,
+            onClick: props.onTestDraft,
+          }, t('testDraft')),
+          h('button', {
+            class: 'dshssh-btn',
+            type: 'button',
+            disabled: locked,
+            onClick: props.onCancel,
+          }, t('cancel')),
+          h('button', {
+            class: 'dshssh-btn dshssh-btn-primary',
+            type: 'button',
+            disabled: disabled || atLimit,
+            onClick: props.onSave,
+          }, busyLabel(props.busy, draft, t('save'), t('saving'))),
+        ),
+      )
+    }
+
+    /**
+     * Name the form's save button: its ordinary word, or the in-progress word
+     * while this draft's own write is running.
+     * @param busy - what the page is doing, if anything.
+     * @param draft - the edited target.
+     * @param idle - the save copy.
+     * @param running - the saving copy.
+     * @returns the button label.
+     */
+    function busyLabel(busy: string | null, draft: any, idle: string, running: string): string {
+      return busy === 'new' || busy === draft?.id ? running : idle
+    }
+
+    /**
+     * The client parameters, one row each, with the default they follow, the cap
+     * they are held to, and the value that is actually in force. Nothing here is
+     * a system limit dressed up as an editable number: the ceilings the profile
+     * cannot move sit in the runtime card instead.
+     * @param props - the boxes' text, what the Host resolved, and the callbacks.
+     * @returns the card.
+     */
+    function ClientParamsCardView(props: any): any {
+      const t: (key: string, params?: Record<string, string | number>) => string = props.t
+      const bounds = props.bounds
+      const draft = props.draft
+      const stored = props.stored
+      const settings = props.settings
+      const unavailable = settings === null
+      const locked = props.busy !== null || unavailable || props.storageFailure === true
+      const fields: readonly { key: string; labelKey: string; unitKey: string; unit: 'bytes' | 'ms'; defaultKey: string; capKey: string; effectiveKey: string }[] = [
+        { key: 'remoteTimeoutMs', labelKey: 'settingsRemoteTimeout', unitKey: 'unitMs', unit: 'ms', defaultKey: 'timeoutMs', capKey: 'maxTimeoutMs', effectiveKey: 'remoteTimeoutMs' },
+        { key: 'maxOutputBytes', labelKey: 'settingsMaxOutput', unitKey: 'unitBytes', unit: 'bytes', defaultKey: 'outputBytes', capKey: 'maxOutputBytes', effectiveKey: 'maxOutputBytes' },
+        { key: 'maxTransferBytes', labelKey: 'settingsMaxTransfer', unitKey: 'unitBytes', unit: 'bytes', defaultKey: 'transferBytes', capKey: 'maxTransferBytes', effectiveKey: 'maxTransferBytes' },
+      ]
+      const rows = fields.map(field => {
+        const text = String(draft[field.key] ?? '')
+        const read = readCeiling(text)
+        const storedValue = stored?.[field.key]
+        const overridden = storedValue !== undefined && storedValue !== null
+        const effective = bounds?.effective?.[field.effectiveKey]
+        const defValue = bounds?.[field.defaultKey]
+        const capValue = bounds?.[field.capKey]
+        // The stored number and the number that ran are different facts, and only
+        // the Host can say what the second one is: a cap that moved a saved value
+        // has to be shown moving it, or the card is describing a call nobody made.
+        const capped = overridden && effective !== undefined && Number(effective) !== Number(storedValue)
+        return h('div', { class: 'dshssh-field', key: field.key },
+          h('label', { class: 'dshssh-label' },
+            h('span', {}, t(field.labelKey)),
+            read.at === 'bad' ? null : Chip({ text: overridden ? t('paramOverride') : t('paramFollowDefault') }),
+          ),
+          h('div', { class: 'dshssh-input-inline' },
+            h('input', {
+              class: 'dshssh-input',
+              type: 'number',
+              inputMode: 'numeric',
+              min: '1',
+              step: '1',
+              // The box keeps whatever was typed, so a refusal or a failed write
+              // never costs a reader the number they were working from.
+              value: text,
+              disabled: locked,
+              placeholder: defValue === undefined ? '' : String(defValue),
+              'aria-invalid': read.at === 'bad' ? 'true' : 'false',
+              onChange: (event: any) => { props.onPatch(field.key, String(event.target.value ?? '')) },
+            }),
+            overridden && !locked
+              ? h('button', {
+                class: 'dshssh-eye',
+                type: 'button',
+                onClick: () => { props.onPatch(field.key, '') },
+              }, t('paramReset'))
+              : null,
+          ),
+          h('span', { class: 'dshssh-tertiary' }, [
+            format(t('boundsDefaultOf'), { value: measure(defValue, field.unit) }),
+            format(t('boundsCapOf'), { value: measure(capValue, field.unit) }),
+            effective === undefined ? null : format(t('boundsEffectiveOf'), { value: measure(Number(effective), field.unit) }),
+          ].filter(Boolean).join(' · ')),
+          read.at === 'bad' ? h('span', { class: 'dshssh-error' }, format(t('paramBadNumber'), { unit: t(field.unitKey) })) : null,
+          capped ? h('span', { class: 'dshssh-error' }, format(t('paramCapped'), { value: measure(Number(effective), field.unit) })) : null,
+        )
+      })
+      return h('section', { class: 'dshssh-card' },
+        h('div', { class: 'dshssh-card-head' },
+          h('div', { class: 'dshssh-card-headline' },
+            h('h3', { class: 'dshssh-card-title' }, t('settingsTitle')),
+            props.dirty === true ? h('span', { class: 'dshssh-tertiary' }, t('paramDirty')) : null,
+          ),
+          h('button', {
+            class: 'dshssh-btn dshssh-btn-primary',
+            type: 'button',
+            disabled: locked || props.dirty !== true || props.invalid === true,
+            onClick: props.onSave,
+          }, props.busy === 'settings' ? t('saving') : t('settingsSave')),
+        ),
+        h('p', { class: 'dshssh-tertiary' }, t('settingsOverrideHint')),
+        h('div', { class: 'dshssh-fields' }, ...rows),
+        unavailable ? h('span', { class: 'dshssh-tertiary' }, props.loading === true ? t('listProbing') : t('listLoadFailed')) : null,
+      )
+    }
+
+    /**
+     * Every number this plugin fixes in code or configuration, in one collapsed
+     * card a reader opens once. The rows are the Host's own answers: what a lane
+     * holds and what is standing in it, what each ceiling resolved to, and what
+     * this Host had to correct on the way there.
+     * @param props - the live counts, the resolved bounds, and `onRefresh`.
+     * @returns the card.
+     */
+    function RuntimeCardView(props: any): any {
+      const t: (key: string, params?: Record<string, string | number>) => string = props.t
+      const bounds = props.bounds
+      const limits = props.limits
+      const pool = props.pool
+      const spill = props.spill
+      const temp = props.temp
+      const probing = props.probing
+      const pooling = props.pooling
+
+      /**
+       * One metric row: the ordinary name, and the number(s) the Host reported. A
+       * lane with work standing in it is drawn in the warn tone, since the row a
+       * reader hunts for when a call was turned away is the row that says so.
+       * @param key - the row's React key.
+       * @param labelKey - the dictionary key naming the metric.
+       * @param value - what to print, already stated in the reader's units.
+       * @param running - how much of the lane is occupied now, when the row is a lane.
+       * @returns the row.
+       */
+      const bound = (key: string, labelKey: string, value: any, running?: number): any => h('div', { class: 'dshssh-bound', key },
+        h('dt', {}, t(labelKey)),
+        h('dd', { ...(Number(running ?? 0) > 0 ? { 'data-live': 'busy' } : {}) }, value),
+      )
+
+      /** A lane stated as use over limit, with the limit named in the label. */
+      const lane = (ceiling: any, running: number | undefined): string =>
+        format(t('boundsRunning'), { ceiling: String(ceiling ?? '—'), running: String(running ?? 0) })
+
+      // Every operation lane the Host counts in one number: `probing` is
+      // `runner.inFlight`, which already holds the probes, the commands, the copies
+      // and the jobs alike. A collapsed card says so only when there is a now to
+      // report — a zero here is not a fact about this plugin, it is the absence of
+      // one, and it is the reason the row is not shown at all.
+      const active = Number(probing ?? 0)
+      return h('details', { class: 'dshssh-runtime', onToggle: props.onToggle },
+        h('summary', {},
+          h('span', {}, t('runtimeTitle')),
+          active > 0 ? Chip({ text: format(t('runtimeBusy'), { count: String(active) }) }) : null,
+        ),
+        h('div', { class: 'dshssh-runtime-body' },
+          // Stated before any number: every figure below is one the plugin fixes in
+          // code or in the profile's configuration, and a reader who takes one for a
+          // knob on this card goes looking for a control that was never there.
+          h('p', { class: 'dshssh-tertiary' }, t('runtimeHint')),
+          h('div', { class: 'dshssh-subhead' },
+            h('span', { class: 'dshssh-card-title' }, bounds === null ? t('boundsTitle') : t('boundsResolvedTitle')),
+            h('button', {
+              class: 'dshssh-btn',
+              type: 'button',
+              disabled: props.busy !== null || props.refreshing === true,
+              onClick: props.onRefresh,
+            }, t('refresh')),
+          ),
+          h('p', { class: 'dshssh-tertiary' }, t('runtimeUsageFormat')),
+          h('dl', { class: 'dshssh-bounds' },
+            bound('targets', 'boundsTargets', String(limits.maxConnections)),
+            // A ceiling a reader cannot see being used is a ceiling they only meet
+            // as a refusal, so each lane row quotes what is standing in it now.
+            // A Host that predates the pool sends no counts and no sharing rows:
+            // printing this release's numbers for that process would put a surprise
+            // on the very card whose job is to prevent one.
+            bound('lanes', 'boundsOps', pooling ? lane(limits.concurrentOps, probing) : String(limits.concurrentOps), probing),
+            ...(pooling ? [
+              bound('masters', 'boundsMasters', lane(limits.maxLiveMasters, pool?.liveMasters), pool?.liveMasters),
+              bound('copies', 'boundsCopies', lane(bounds?.effective?.maxConcurrentTransfers ?? '—', pool?.transfers ?? 0), pool?.transfers),
+              // The job lane is the ceiling a reader can run into while nothing appears
+              // to be happening — a backgrounded command holds its slot until it ends —
+              // and it is the one number the profile cannot raise on its own, because
+              // these slots are the ones held back for calls that wait. Both halves are
+              // stated, because a row that only shows the ceiling invites someone to go
+              // looking for a knob that was never there.
+              bound('jobs', 'boundsJobs', `${lane(bounds?.maxRunningJobs ?? limits.maxRunningJobs, pool?.jobs ?? 0)} · ${format(t('boundsJobsReserved'), { reserved: String(bounds?.foregroundReservedOps ?? limits.foregroundReservedOps), total: String(bounds?.concurrentOps ?? limits.concurrentOps) })}`, pool?.jobs),
+              // Spill is the one ceiling whose cost is a file on disk rather than a
+              // line in the answer, so the card says what is sitting there now and
+              // how many answers the budget already refused to write out.
+              ...(spill === null || spill.max === 0 ? [] : [
+                bound('spill', 'boundsSpill', `${format(t('spillFiles'), { files: String(spill.files) })}${spill.refusals > 0 ? format(t('spillRefused'), { refusals: String(spill.refusals) }) : ''}`),
+                bound('spillbytes', 'spillBytes', `${measure(spill.used, 'bytes')} / ${measure(spill.max, 'bytes')}`),
+              ]),
+              bound('persist', 'boundsPersist', idleFor(limits.controlPersistSeconds)),
+            ] : []),
+            bound('round', 'boundsPerRound', String(limits.probeAllLimit)),
+            bound('timeout', 'boundsTimeout', measure(bounds?.probeTimeoutMs ?? limits.probeTimeoutMs, 'ms')),
+            // A Host that resolves its bounds from configuration states each ceiling as
+            // default / cap / in force, which is what makes a capped call legible. An
+            // older one only ever published a two-sided range, so its row keeps that
+            // shape rather than inventing a "default" it never had.
+            ...(bounds === null ? [
+              h('div', { class: 'dshssh-bound', key: 'remote' }, h('dt', {}, t('boundsRemoteTimeout')), h('dd', {}, `${measure(limits.remoteTimeoutMinMs, 'ms')} – ${measure(limits.remoteTimeoutMaxMs, 'ms')}`)),
+              h('div', { class: 'dshssh-bound', key: 'output' }, h('dt', {}, t('boundsOutput')), h('dd', {}, `${measure(limits.outputMinBytes, 'bytes')} – ${measure(limits.outputMaxBytes, 'bytes')}`)),
+              h('div', { class: 'dshssh-bound', key: 'transfer' }, h('dt', {}, t('boundsTransfer')), h('dd', {}, `${measure(limits.transferMinBytes, 'bytes')} – ${measure(limits.transferMaxBytes, 'bytes')}`)),
+            ] : [
+              h('div', { class: 'dshssh-bound', key: 'remote' }, h('dt', {}, t('settingsRemoteTimeout')), h('dd', {}, ceilingText(t, bounds.timeoutMs, bounds.maxTimeoutMs, bounds.effective?.remoteTimeoutMs, 'ms'))),
+              h('div', { class: 'dshssh-bound', key: 'output' }, h('dt', {}, t('settingsMaxOutput')), h('dd', {}, ceilingText(t, bounds.outputBytes, bounds.maxOutputBytes, bounds.effective?.maxOutputBytes, 'bytes'))),
+              h('div', { class: 'dshssh-bound', key: 'transfer' }, h('dt', {}, t('settingsMaxTransfer')), h('dd', {}, ceilingText(t, bounds.transferBytes, bounds.maxTransferBytes, bounds.effective?.maxTransferBytes, 'bytes'))),
+            ]),
+          ),
+          // Where a number came from, and what this Host had to correct on the way to
+          // it: a configuration whose cap sat below its default is a mistake worth
+          // naming out loud rather than one the reader discovers through a surprise.
+          bounds === null ? null : h('p', { class: 'dshssh-tertiary' }, t('boundsFromConfig')),
+          bounds?.notes?.length > 0
+            ? h('p', { class: 'dshssh-tertiary' }, String((bounds.notes as unknown[]).join(' · ')))
+            : null,
+          // A fact about this machine, not a bound: the pool only exists if the Host
+          // could make a private directory for its sockets, and when it could not,
+          // every number above still holds while sharing simply does not happen.
+          pool !== null && pool !== undefined && pool.ready === false
+            ? h('p', { class: 'dshssh-tertiary' }, format(t('poolOff'), { reason: pool.failure ?? '—' }))
+            : null,
+          // A line that only exists when there is something to report: the sweep ran
+          // at startup, and the only time its arithmetic matters to a reader is the
+          // time it took something.
+          temp !== null && temp !== undefined && temp.removed.length > 0
+            ? h('p', { class: 'dshssh-tertiary' }, format(t('tempCollected'), { removed: String(temp.removed.length), scanned: String(temp.scanned), kept: String(temp.kept.length), plural: temp.removed.length === 1 ? '' : 's' }))
+            : null,
+          h('div', { class: 'dshssh-subhead' }, h('span', { class: 'dshssh-card-title' }, t('runtimeStorageTitle'))),
+          h('p', { class: 'dshssh-tertiary' }, t('storedIn')),
+          h('p', { class: 'dshssh-tertiary' }, t('storageConfigNote')),
+          h('p', { class: 'dshssh-tertiary' }, t('defaultHint')),
+          props.legacy === true ? h('p', { class: 'dshssh-tertiary' }, t('legacyHost')) : null,
+        ),
+      )
+    }
+
+    /**
+     * One ceiling stated the way a reader of the limits card needs it: what is in
+     * force right now, and the default and cap it was resolved from. The order is
+     * deliberate — the number that actually applies goes first, because that is the
+     * one a call is being measured against.
+     * @param t - the reader's translator.
+     * @param def - the configured default.
+     * @param cap - the configured cap.
+     * @param inForce - what a call with no override would run with.
+     * @param unit - how to state the three.
+     * @returns the one-line description.
+     */
+    function ceilingText(t: (key: string, params?: Record<string, string | number>) => string, def: number | undefined, cap: number | undefined, inForce: number | undefined, unit: 'ms' | 'bytes'): string {
+      return [
+        format(t('boundsEffectiveOf'), { value: measure(inForce, unit) }),
+        format(t('boundsDefaultOf'), { value: measure(def, unit) }),
+        format(t('boundsCapOf'), { value: measure(cap, unit) }),
+      ].join(' · ')
+    }
+
+    /**
      * The page this plugin contributes.
      *
-     * Two tabs share one page — the target list and the client settings — over
-     * one state object and one `list` read, because the settings shell gives a
-     * plugin exactly one navigation row per section.
+     * One container holds the state and every call the page can make, and hands
+     * each region what it needs to render: the target list and its form, the three
+     * client parameters, and the runtime card. The settings shell gives a plugin
+     * exactly one navigation row per section, so the three regions share one
+     * scroll in the order a reader uses them rather than one tab apiece.
      * @param props - seat props: the localized reader and the panel `close`.
      * @returns the rendered page.
      */
     function SshSection(props: any): any {
       const t = translator(props)
-      const [tab, setTab] = React.useState('list')
       const [connections, setConnections] = React.useState([] as ConnectionView[])
       const [settings, setSettings] = React.useState(null as { maxOutputBytes: number; remoteTimeoutMs: number; maxTransferBytes: number } | null)
       // The numbers a Host that predates the `bounds` payload still has to be shown
       // something for. They are this release's own defaults, and a test in
-      // `tool.test.mjs` compares each one against the config it is meant to mirror —
-      // 0.0.36 carried a 10 s probe timeout here while the Host it described had been
-      // dialing with 30 s since 0.0.23, which is how a settings page comes to disagree
-      // with the call it is reporting on.
+      // `client-fallbacks.test.mjs` compares each one against the config it is meant
+      // to mirror — 0.0.36 carried a 10 s probe timeout here while the Host it
+      // described had been dialing with 30 s since 0.0.23, which is how a settings
+      // page comes to disagree with the call it is reporting on.
       const [limits, setLimits] = React.useState({ maxConnections: 64, concurrentOps: 16, maxLiveMasters: 8, controlPersistSeconds: 300, probeAllLimit: 12, probeTimeoutMs: 30_000, maxRunningJobs: 8, foregroundReservedOps: 8, remoteTimeoutMinMs: 1000, remoteTimeoutMaxMs: 300000, outputMinBytes: 1024, outputMaxBytes: 4194304, transferMinBytes: 1024, transferMaxBytes: 536870912 })
       const [askpass, setAskpass] = React.useState('ready')
       // Whether the loaded Host knows about connection sharing at all. A package
@@ -963,6 +1760,7 @@ window.__ModuleLoader__.load({
       const [modern, setModern] = React.useState(false)
       const [probing, setProbing] = React.useState(0)
       const [loading, setLoading] = React.useState(true)
+      const [refreshing, setRefreshing] = React.useState(false)
       const [busy, setBusy] = React.useState(null as string | null)
       const [failure, setFailure] = React.useState(null as SshFailure | null)
       const [notice, setNotice] = React.useState(null as { tone: string; text: string } | null)
@@ -970,6 +1768,8 @@ window.__ModuleLoader__.load({
       const [draftProbe, setDraftProbe] = React.useState(null as ProbeOutcome | null)
       const [fieldError, setFieldError] = React.useState(null as string | null)
       const [confirmId, setConfirmId] = React.useState(null as string | null)
+      // Which rows are showing their probe tail and their `ssh -G` view.
+      const [openRows, setOpenRows] = React.useState({} as Record<string, boolean>)
       // Resolved client configuration per target, kept by id so one row's answer
       // survives a re-render of the list.
       const [resolved, setResolved] = React.useState({} as Record<string, any>)
@@ -985,32 +1785,46 @@ window.__ModuleLoader__.load({
       }, [])
 
       /**
-       * Re-read the whole page state from the Host.
-       * @returns resolution once the state landed or the failure was recorded.
+       * Fold one `list` answer into the page's state.
+       * @param result - what the Host answered.
+       * @param withDraft - whether to re-seed the parameter boxes, which only a
+       *   first load or an explicit reload should do: the runtime refresh must not
+       *   discard an override the reader is still typing.
        */
-      async function load(): Promise<void> {
-        try {
-          const result = await rpc('list')
-          if (!alive.current) return
-          setConnections(result.connections ?? [])
-          setSettings(result.settings ?? null)
+      function applyList(result: any, withDraft: boolean): void {
+        setConnections(result.connections ?? [])
+        setSettings(result.settings ?? null)
+        if (withDraft) {
           setSettingsDraft({
             maxOutputBytes: String(result.settings?.maxOutputBytes ?? ''),
             remoteTimeoutMs: String(result.settings?.remoteTimeoutMs ?? ''),
             maxTransferBytes: String(result.settings?.maxTransferBytes ?? ''),
           })
-          // Merge, not replace: a Host that predates the pool sends the old
-          // `limits` shape, and the bounds rows would print blanks over it.
-          if (result.limits !== undefined) setLimits((current: typeof limits) => ({ ...current, ...result.limits }))
-          setAskpass(result.askpass ?? 'ready')
-          if (result.bounds !== undefined) setBounds(result.bounds)
-          setPooling(result.pool !== undefined)
-          if (result.pool !== undefined) setPool(result.pool)
-          setSpill(result.spill ?? null)
-          setTemp(result.temp ?? null)
-          setModern(result.askpass !== undefined)
-          setProbing(result.probing ?? 0)
-          setFailure(null)
+        }
+        // Merge, not replace: a Host that predates the pool sends the old
+        // `limits` shape, and the limits rows would print blanks over it.
+        if (result.limits !== undefined) setLimits((current: typeof limits) => ({ ...current, ...result.limits }))
+        setAskpass(result.askpass ?? 'ready')
+        if (result.bounds !== undefined) setBounds(result.bounds)
+        setPooling(result.pool !== undefined)
+        if (result.pool !== undefined) setPool(result.pool)
+        setSpill(result.spill ?? null)
+        setTemp(result.temp ?? null)
+        setModern(result.askpass !== undefined)
+        setProbing(result.probing ?? 0)
+        setFailure(null)
+      }
+
+      /**
+       * Re-read the whole page state from the Host.
+       * @param withDraft - whether the parameter boxes follow the read too.
+       * @returns resolution once the state landed or the failure was recorded.
+       */
+      async function load(withDraft: boolean = true): Promise<void> {
+        try {
+          const result = await rpc('list')
+          if (!alive.current) return
+          applyList(result, withDraft)
         } catch (error: unknown) {
           if (!alive.current) return
           setFailure(toFailure(error))
@@ -1049,6 +1863,22 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * Re-read the live counts without touching what the reader is typing.
+       * @returns resolution once the numbers landed.
+       */
+      async function refreshRuntime(): Promise<void> {
+        setRefreshing(true)
+        try {
+          const result = await rpc('list')
+          if (alive.current) applyList(result, false)
+        } catch (error: unknown) {
+          if (alive.current) setFailure(toFailure(error))
+        } finally {
+          if (alive.current) setRefreshing(false)
+        }
+      }
+
+      /**
        * The parsed address of the edited draft, with a local complaint when it
        * cannot be read at all.
        * @returns the parsed parts, or `undefined` when the host is empty.
@@ -1060,6 +1890,25 @@ window.__ModuleLoader__.load({
           return undefined
         }
         return parsed
+      }
+
+      /**
+       * Edit one field of the draft, clearing a field error the reader is fixing.
+       * @param key - the draft's field.
+       * @param value - its new value; a checkbox writes a boolean.
+       */
+      function patchDraft(key: string, value: string | boolean): void {
+        setDraft((current: any) => ({ ...current, [key]: value }))
+        if (fieldError === key) setFieldError(null)
+      }
+
+      /**
+       * Flip one secret field's reveal, read off the draft so the click cannot
+       * race a keystroke.
+       * @param key - the draft's `show…` field.
+       */
+      function toggleSecret(key: string): void {
+        setDraft((current: any) => ({ ...current, [key]: !(current?.[key] === true) }))
       }
 
       /**
@@ -1122,7 +1971,8 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Probe one stored target and fold the fresh result into the list.
+       * Probe one stored target and fold the fresh result into the list. The row
+       * opens itself on a failure so the answer's own words arrive with the badge.
        * @param record - the stored target.
        * @returns resolution once the row updated.
        */
@@ -1130,7 +1980,12 @@ window.__ModuleLoader__.load({
         await act(`probe:${record.id}`, async () => {
           const result = await rpc('probe', { id: record.id })
           if (!alive.current) return
-          setConnections(result.connections ?? [])
+          const fresh: ConnectionView[] = result.connections ?? []
+          setConnections(fresh)
+          const landed = fresh.find(row => row.id === record.id)
+          if (landed?.lastProbe !== undefined && STATUS_TONE[landed.lastProbe.status] !== 'ok') {
+            setOpenRows((current: Record<string, boolean>) => ({ ...current, [record.id]: true }))
+          }
         })
       }
 
@@ -1168,31 +2023,39 @@ window.__ModuleLoader__.load({
         })
       }
 
+      /** The three parameter boxes as the page last read them, for the dirty test. */
+      const storedCeilings = {
+        remoteTimeoutMs: String(settings?.remoteTimeoutMs ?? ''),
+        maxOutputBytes: String(settings?.maxOutputBytes ?? ''),
+        maxTransferBytes: String(settings?.maxTransferBytes ?? ''),
+      }
+      const dirty = settings !== null && (
+        settingsDraft.remoteTimeoutMs !== storedCeilings.remoteTimeoutMs
+        || settingsDraft.maxOutputBytes !== storedCeilings.maxOutputBytes
+        || settingsDraft.maxTransferBytes !== storedCeilings.maxTransferBytes
+      )
+      // A box that cannot mean a ceiling is reported where it was typed, and keeps
+      // the save button down until it is fixed or emptied. Sending it anyway is what
+      // used to answer `Saved.` about a number the Host never saw.
+      const badCeilings = ['remoteTimeoutMs', 'maxOutputBytes', 'maxTransferBytes']
+        .filter(key => readCeiling(String((settingsDraft as any)[key] ?? '')).at === 'bad')
+
       /**
        * Persist the shared client settings.
        * @returns resolution once the new values landed.
        */
       async function saveSettings(): Promise<void> {
+        if (badCeilings.length > 0) return
         // An empty box is a choice, not a no-op: it clears this profile's override so
-        // the configured default applies again. Only a box that holds a bad number is
-        // left out of the request.
-        const whole = (value: string): number | null | undefined => {
-          const trimmed = (value ?? '').trim()
-          if (trimmed === '') return null
-          const parsed = Number(trimmed)
-          return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+        // the configured default applies again.
+        const body: Record<string, number | null> = {}
+        for (const key of Object.keys(storedCeilings)) {
+          const read = readCeiling(String((settingsDraft as any)[key] ?? ''))
+          if (read.at === 'clear') body[key] = null
+          else if (read.at === 'set') body[key] = read.value
         }
         await act('settings', async () => {
-          const output = whole(settingsDraft.maxOutputBytes)
-          const remote = whole(settingsDraft.remoteTimeoutMs)
-          const transfer = whole(settingsDraft.maxTransferBytes)
-          const result = await rpc('configUpdate', {
-            settings: {
-              ...(output === undefined ? {} : { maxOutputBytes: output }),
-              ...(remote === undefined ? {} : { remoteTimeoutMs: remote }),
-              ...(transfer === undefined ? {} : { maxTransferBytes: transfer }),
-            },
-          })
+          const result = await rpc('configUpdate', { settings: body })
           if (!alive.current) return
           setSettings(result.settings ?? null)
           if (result.settings !== undefined) {
@@ -1203,7 +2066,9 @@ window.__ModuleLoader__.load({
             })
           }
           // The resolved numbers move with the save: a value the cap pulled down has
-          // to show up in the card, not just in what was typed.
+          // to show up in the card, not just in what was typed. A Host that answers
+          // with the pre-`bounds` shape only sends the effective set, so that half is
+          // folded in rather than replacing the card.
           if (result.bounds !== undefined) setBounds(result.bounds)
           else if (result.effective !== undefined) {
             setBounds((current: any) => (current === null ? current : { ...current, effective: result.effective }))
@@ -1242,53 +2107,6 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Render one probe result: when it ran, how long it took, the fix-up hint
-       * for its status, and the captured output tail.
-       * @param outcome - the stored or freshly probed result.
-       * @returns the result region, or `null` when nothing was probed yet.
-       */
-      function probeRegion(outcome: ProbeOutcome | null | undefined): any {
-        if (outcome === null || outcome === undefined) return null
-        const hintKey = STATUS_HINT_KEY[outcome.status]
-        return h('div', { class: 'dshssh-field' },
-          h('span', { class: 'dshssh-row-meta' },
-            format(t('asOf'), { at: when(outcome.at) }),
-            outcome.durationMs === undefined
-              ? null
-              : h('span', { class: 'dshssh-muted' }, ` · ${format(t('took'), { ms: String(outcome.durationMs) })}`),
-          ),
-          hintKey === undefined ? null : h('span', { class: 'dshssh-muted' }, t(hintKey)),
-          outcome.detail === undefined ? null : h('pre', { class: 'dshssh-detail' }, outcome.detail),
-        )
-      }
-
-      /**
-       * Label-and-value rows for one resolved configuration, skipping what the
-       * client did not report.
-       * @param config - the parsed keys.
-       * @param record - the saved row, for the fallback address line.
-       * @returns the definition-list children.
-       */
-      function resolveRows(config: any, record: ConnectionView): any[] {
-        const rows: any[] = []
-        const push = (key: string, labelKey: string, value: unknown): void => {
-          if (value === undefined || value === null || value === '') return
-          rows.push(h('div', { class: 'dshssh-bound', key },
-            h('dt', {}, t(labelKey)),
-            h('dd', {}, Array.isArray(value) ? value.join(', ') : String(value)),
-          ))
-        }
-        const port = config.port === undefined || config.port === 22 ? '' : `:${String(config.port)}`
-        push('host', 'resolveHostname', `${config.user ?? record.user ?? ''}${config.user || record.user ? '@' : ''}${config.hostname ?? record.host}${port}`)
-        push('user', 'resolveUser', config.user)
-        push('port', 'resolvePort', config.port)
-        push('identity', 'resolveIdentity', config.identityFiles)
-        push('jump', 'resolveJump', config.proxyJump)
-        push('proxy', 'resolveProxy', config.proxyCommand)
-        return rows
-      }
-
-      /**
        * Ask the Host what the OpenSSH client resolves this target to.
        * @param record - the stored target.
        * @returns resolution once the answer landed or the failure is stored.
@@ -1311,351 +2129,12 @@ window.__ModuleLoader__.load({
         }
       }
 
-      /** One row of the stored list. */
-      function rowOf(record: ConnectionView): any {
-        const testing = busy === `probe:${record.id}`
-        const removing = busy === `remove:${record.id}`
-        const editing = draft?.id === record.id
-        const chips: any[] = record.auth === undefined ? [] : [h('span', { class: 'dshssh-chip', key: 'auth' }, t(AUTH_LABEL[record.auth] ?? 'authKey'))]
-        if (record.secrets?.passphrase === true) chips.push(h('span', { class: 'dshssh-chip', 'data-tone': 'secret', key: 'passphrase' }, t('passphraseSet')))
-        if (record.secrets?.password === true) chips.push(h('span', { class: 'dshssh-chip', 'data-tone': 'secret', key: 'password' }, t('secretSet')))
-        if (record.secrets?.root === true) chips.push(h('span', { class: 'dshssh-chip', 'data-tone': 'secret', key: 'root' }, t('rootSet')))
-        if (record.proxyJump !== undefined) chips.push(h('span', { class: 'dshssh-chip', key: 'jump' }, `via ${record.proxyJump}`))
-        if (record.agentAccess === 'off') chips.push(h('span', { class: 'dshssh-chip', 'data-tone': 'secret', key: 'agent' }, t('chipAgentOff')))
-        if (record.allowedCommands !== undefined && record.allowedCommands.length > 0) chips.push(h('span', { class: 'dshssh-chip', key: 'allow' }, format(t('chipAllowlist'), { count: String(record.allowedCommands.length) })))
-        return h('div', { class: 'dshssh-row', key: record.id },
-          h('div', { class: 'dshssh-row-main' },
-            h('div', { class: 'dshssh-row-title' }, record.label),
-            h('div', { class: 'dshssh-row-meta' }, addressOf(record)),
-            h('div', { class: 'dshssh-chips' }, ...chips),
-            record.note === undefined ? null : h('div', { class: 'dshssh-muted' }, record.note),
-            resolved[record.id] === undefined ? null : h('div', { class: 'dshssh-resolve' },
-              h('span', { class: 'dshssh-row-title' }, t('resolveTitle')),
-              h('div', { class: 'dshssh-chips' },
-                h('span', {
-                  class: 'dshssh-chip',
-                  'data-tone': resolved[record.id].differs === true ? 'secret' : '',
-                }, resolved[record.id].differs === true ? t('resolveDiffers') : t('resolveSame')),
-              ),
-              resolved[record.id].ok === false
-                ? h('p', { class: 'dshssh-error' }, resolved[record.id].message ?? t('resolveFailed'))
-                : h('dl', { class: 'dshssh-bounds' }, ...resolveRows(resolved[record.id].resolved ?? {}, record)),
-              h('p', { class: 'dshssh-muted' }, t('resolveHint')),
-              typeof resolved[record.id].text === 'string' ? h('details', {},
-                h('summary', { class: 'dshssh-muted' }, t('resolveRaw')),
-                h('pre', { class: 'dshssh-detail' }, String(resolved[record.id].text)),
-              ) : null,
-            ),
-            testing
-              ? h(Badge, { tone: 'idle', text: t('stRunning') })
-              : h('div', { class: 'dshssh-field' },
-                h(Badge, {
-                  tone: record.lastProbe === undefined ? 'idle' : (STATUS_TONE[record.lastProbe.status] ?? 'idle'),
-                  text: record.lastProbe === undefined ? t('stIdle') : t(STATUS_KEY[record.lastProbe.status] ?? 'stFailed'),
-                }),
-                probeRegion(record.lastProbe),
-              ),
-          ),
-          h('div', { class: 'dshssh-actions' },
-            h('button', {
-              class: 'dshssh-btn',
-              type: 'button',
-              disabled: busy !== null,
-              onClick: () => { void testOne(record) },
-            }, t('test')),
-            h('button', {
-              class: 'dshssh-btn',
-              type: 'button',
-              disabled: busy !== null || editing,
-              onClick: () => {
-                setDraft(draftOf(record))
-                setDraftProbe(record.lastProbe ?? null)
-                setFieldError(null)
-                setFailure(null)
-              },
-            }, t('edit')),
-            confirmId === record.id
-              ? h('span', { class: 'dshssh-actions' },
-                h('button', {
-                  class: 'dshssh-btn dshssh-btn-danger',
-                  type: 'button',
-                  disabled: removing,
-                  onClick: () => { void remove(record) },
-                }, removing ? t('saving') : t('confirmRemove')),
-                h('button', {
-                  class: 'dshssh-btn',
-                  type: 'button',
-                  disabled: removing,
-                  onClick: () => { setConfirmId(null) },
-                }, t('cancel')),
-              )
-              : h('button', {
-                class: 'dshssh-btn dshssh-btn-danger',
-                type: 'button',
-                disabled: busy !== null,
-                onClick: () => { setConfirmId(record.id) },
-              }, t('remove')),
-            h('button', {
-              class: 'dshssh-btn',
-              type: 'button',
-              disabled: busy !== null,
-              onClick: () => { void resolveTarget(record) },
-            }, t('resolve')),
-            record.lastProbe === undefined ? null : h('button', {
-              class: 'dshssh-btn',
-              type: 'button',
-              disabled: busy !== null,
-              onClick: () => { void copyDiagnostics(record) },
-            }, t('copyDetail')),
-          ),
-        )
-      }
-
-      /**
-       * One secret field with its stored-state affordances: the placeholder says
-       * what is already kept, the checkbox forgets it, and the typed value is
-       * what a probe or a save will write.
-       */
-      function secretField(props: {
-        label: string
-        value: string
-        had: boolean
-        cleared: boolean
-        shown: boolean
-        disabled: boolean
-        errorText?: string
-        onChange: (value: string) => void
-        onToggleClear: (checked: boolean) => void
-        onToggleShow: () => void
-      }): any {
-        return h('div', { class: 'dshssh-field' },
-          h(TextField, {
-            label: props.label,
-            value: props.value,
-            disabled: props.disabled,
-            errorText: props.errorText,
-            placeholder: props.had && !props.cleared ? t('secretStored') : '',
-            reveal: {
-              shown: props.shown,
-              onToggle: props.onToggleShow,
-              showLabel: t('showSecret'),
-              hideLabel: t('hideSecret'),
-            },
-            onChange: props.onChange,
-          }),
-          props.had ? h('label', { class: 'dshssh-check' },
-            h('input', {
-              type: 'checkbox',
-              checked: props.cleared,
-              disabled: props.disabled,
-              onChange: (event: any) => { props.onToggleClear(event.target.checked === true) },
-            }),
-            h('span', {}, t('secretClear')),
-          ) : null,
-        )
-      }
-
-      /** The new/edit form: one address, one mode choice, the secrets it needs. */
-      function formRegion(): any {
-        if (draft === null) return null
-        const mode: AuthMode = draft.auth ?? 'key'
-        const locked = busy !== null
-        const atLimit = draft.id === undefined && connections.length >= limits.maxConnections
-        const disabled = locked || atLimit
-        const patch = (key: string) => (value: string): void => {
-          setDraft((current: any) => ({ ...current, [key]: value }))
-          if (fieldError === key) setFieldError(null)
-        }
-        const showAuth = modern
-        const showKey = showAuth && mode === 'key'
-        const showKeyPassphrase = showAuth && mode === 'key'
-        const showPassword = showAuth && mode === 'password'
-        const parsed = parseAddress(draft.address ?? '')
-        const summary = parsed.host === '' ? '' : `${parsed.user === '' ? '' : `${parsed.user}@`}${parsed.host}${parsed.port === '' ? '' : `:${parsed.port}`}`
-        return h('div', { class: 'dshssh-form' },
-          h('div', { class: 'dshssh-card-title' }, draft.id === undefined ? t('newTitle') : t('editTitle')),
-          h(TextField, {
-            label: t('addrLabel'),
-            value: draft.address ?? '',
-            placeholder: t('addrPlaceholder'),
-            hint: summary === '' ? t('addrHint') : `${t('addrHint')} → ${summary}`,
-            disabled,
-            errorText: fieldError === 'address' || fieldError === 'host' ? t('addrBad') : undefined,
-            onChange: (value: string) => {
-              setDraft((current: any) => ({ ...current, address: value }))
-              if (fieldError === 'address' || fieldError === 'host') setFieldError(null)
-            },
-          }),
-          showAuth ? null : h('p', { class: 'dshssh-muted' }, t('legacyHost')),
-          h('div', { class: showAuth ? 'dshssh-field' : 'dshssh-hidden' },
-            h(SshSegment, {
-              id: AUTH_BASE,
-              role: 'radio',
-              value: mode,
-              groupLabel: t('authTitle'),
-              disabled,
-              options: AUTH_OPTIONS.map(option => ({ value: option.value, label: t(option.labelKey), hint: t(option.hintKey), disabled })),
-              onChange: (next: string) => { setDraft((current: any) => ({ ...current, auth: next })) },
-            }),
-            h('span', { class: 'dshssh-muted' }, t(AUTH_OPTIONS.find(option => option.value === mode)?.hintKey ?? 'authKeyHint')),
-          ),
-          showKey ? h('div', { class: 'dshssh-grid' },
-            h(TextField, {
-              label: `${t('keyFileLabel')} (${t('fOptional')})`,
-              value: draft.identityFile ?? '',
-              disabled,
-              errorText: fieldError === 'identityFile' ? t('hintBadInput') : undefined,
-              onChange: patch('identityFile'),
-            }),
-          ) : null,
-          showKeyPassphrase ? h(secretField, {
-            label: `${t('passphraseLabel')} (${t('fOptional')})`,
-            value: draft.passphrase ?? '',
-            had: draft.hadPassphrase === true,
-            cleared: draft.clearPassphrase === true,
-            shown: draft.showPassphrase === true,
-            disabled,
-            errorText: fieldError === 'passphrase' ? t('hintBadInput') : undefined,
-            onChange: patch('passphrase'),
-            onToggleClear: (checked: boolean) => { setDraft((current: any) => ({ ...current, clearPassphrase: checked })) },
-            onToggleShow: () => { setDraft((current: any) => ({ ...current, showPassphrase: !(current.showPassphrase === true) })) },
-          }) : null,
-          showPassword ? h(secretField, {
-            label: t('passwordLabel'),
-            value: draft.password ?? '',
-            had: draft.hadPassword === true,
-            cleared: draft.clearPassword === true,
-            shown: draft.showPassword === true,
-            disabled,
-            errorText: fieldError === 'password' ? t('hintBadInput') : undefined,
-            onChange: patch('password'),
-            onToggleClear: (checked: boolean) => { setDraft((current: any) => ({ ...current, clearPassword: checked })) },
-            onToggleShow: () => { setDraft((current: any) => ({ ...current, showPassword: !(current.showPassword === true) })) },
-          }) : null,
-          showAuth ? h(secretField, {
-            label: `${t('rootLabel')} (${t('fOptional')})`,
-            value: draft.root ?? '',
-            had: draft.hadRoot === true,
-            cleared: draft.clearRoot === true,
-            shown: draft.showRoot === true,
-            disabled,
-            errorText: fieldError === 'root' ? t('hintBadInput') : undefined,
-            onChange: patch('root'),
-            onToggleClear: (checked: boolean) => { setDraft((current: any) => ({ ...current, clearRoot: checked })) },
-            onToggleShow: () => { setDraft((current: any) => ({ ...current, showRoot: !(current.showRoot === true) })) },
-          }) : null,
-          h(TextField, {
-            label: `${t('labelField')} (${t('fOptional')})`,
-            value: draft.label ?? '',
-            placeholder: summary,
-            hint: t('labelHint'),
-            disabled,
-            errorText: fieldError === 'label' ? t('hintBadInput') : undefined,
-            onChange: patch('label'),
-          }),
-          h('details', { class: 'dshssh-disclose' },
-            h('summary', {}, t('advanced')),
-            h('p', { class: 'dshssh-muted' }, t('advancedHint')),
-            h('div', { class: 'dshssh-grid' },
-              h(TextField, {
-                label: `${t('fProxy')} (${t('fOptional')})`,
-                value: draft.proxyJump ?? '',
-                disabled,
-                errorText: fieldError === 'proxyJump' ? t('hintBadInput') : undefined,
-                onChange: patch('proxyJump'),
-              }),
-            ),
-            h(TextAreaField, {
-              label: `${t('fArgs')} (${t('fOptional')})`,
-              value: draft.extraArgsText ?? '',
-              hint: t('fArgsHint'),
-              disabled,
-              onChange: patch('extraArgsText'),
-            }),
-            h(TextField, {
-              label: `${t('fNote')} (${t('fOptional')})`,
-              value: draft.note ?? '',
-              disabled,
-              onChange: patch('note'),
-            }),
-            // Only a Host that was assembled with a pool may be handed the field:
-            // an older one validates its input strictly and would reject the save.
-            pooling ? h('div', { class: 'dshssh-field' },
-              h('label', { class: 'dshssh-check' },
-                h('input', {
-                  type: 'checkbox',
-                  checked: draft.pool !== 'off',
-                  disabled,
-                  onChange: (event: any) => { setDraft((current: any) => ({ ...current, pool: event.target.checked === true ? 'on' : 'off' })) },
-                }),
-                h('span', {}, t('fPool')),
-              ),
-              h('p', { class: 'dshssh-muted' }, t('fPoolHint')),
-            ) : null,
-            // The two switches the tool's own gate reads. No capability gate: the
-            // stored schema has carried both since before this page existed.
-            h('div', { class: 'dshssh-field' },
-              h('label', { class: 'dshssh-check' },
-                h('input', {
-                  type: 'checkbox',
-                  checked: draft.agentAccess !== 'off',
-                  disabled,
-                  onChange: (event: any) => { setDraft((current: any) => ({ ...current, agentAccess: event.target.checked === true ? 'on' : 'off' })) },
-                }),
-                h('span', {}, t('fAgent')),
-              ),
-              h('p', { class: 'dshssh-muted' }, t('fAgentHint')),
-            ),
-            h(TextField, {
-              label: `${t('fAllowlist')} (${t('fOptional')})`,
-              value: draft.allowedCommandsText ?? '',
-              hint: t('fAllowlistHint'),
-              disabled,
-              errorText: fieldError === 'allowedCommands' ? t('hintBadInput') : undefined,
-              onChange: patch('allowedCommandsText'),
-            }),
-          ),
-          atLimit ? h('span', { class: 'dshssh-error' }, format(t('listCount'), { count: String(connections.length), limit: String(limits.maxConnections) })) : null,
-          draftProbe === null ? null : h('div', { class: 'dshssh-field' },
-            h(Badge, {
-              tone: STATUS_TONE[draftProbe.status] ?? 'idle',
-              text: t(STATUS_KEY[draftProbe.status] ?? 'stFailed'),
-            }),
-            probeRegion(draftProbe),
-          ),
-          h('div', { class: 'dshssh-foot' },
-            h('button', {
-              class: 'dshssh-btn',
-              type: 'button',
-              disabled,
-              onClick: () => { void testDraft() },
-            }, t('testDraft')),
-            h('button', {
-              class: 'dshssh-btn',
-              type: 'button',
-              disabled,
-              onClick: () => {
-                setDraft(null)
-                setDraftProbe(null)
-                setFieldError(null)
-              },
-            }, t('cancel')),
-            h('button', {
-              class: 'dshssh-btn dshssh-btn-primary',
-              type: 'button',
-              disabled: disabled || atLimit,
-              onClick: () => { void saveDraft() },
-            }, busy === 'new' || busy === draft.id ? t('saving') : t('save')),
-          ),
-        )
-      }
-
       const storageFailure = failure !== null && failure.code === 'storage-error'
+      const defaultId = defaultTargetId(connections)
 
       const header = h('div', { class: 'dshssh-field' },
         h('h2', { class: 'dshssh-title' }, t('title')),
         h('p', { class: 'dshssh-intro' }, t('intro')),
-        h('p', { class: 'dshssh-muted' }, t('storedIn')),
       )
 
       const noticeRegion = failure === null
@@ -1671,126 +2150,26 @@ window.__ModuleLoader__.load({
         ? h(Notice, { tone: 'warn', text: t('askpassUnavailable') })
         : null
 
-      const settingsCard = h('section', { class: 'dshssh-card' },
-        h('div', { class: 'dshssh-card-head' },
-          h('h3', { class: 'dshssh-card-title' }, t('settingsTitle')),
-          h('button', {
-            class: 'dshssh-btn',
-            type: 'button',
-            disabled: busy !== null || settings === null || storageFailure,
-            onClick: () => { void saveSettings() },
-          }, busy === 'settings' ? t('saving') : t('settingsSave')),
-        ),
-        h('p', { class: 'dshssh-muted' }, t('settingsOverrideHint')),
-        h('div', { class: 'dshssh-grid' },
-          h(TextField, { label: t('settingsRemoteTimeout'), value: settingsDraft.remoteTimeoutMs, type: 'number', placeholder: bounds === null || bounds.timeoutMs === undefined ? undefined : String(bounds.timeoutMs), disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, remoteTimeoutMs: value })) } }),
-          h(TextField, { label: t('settingsMaxOutput'), value: settingsDraft.maxOutputBytes, type: 'number', placeholder: bounds === null || bounds.outputBytes === undefined ? undefined : String(bounds.outputBytes), disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, maxOutputBytes: value })) } }),
-          h(TextField, { label: t('settingsMaxTransfer'), value: settingsDraft.maxTransferBytes, type: 'number', placeholder: bounds === null || bounds.transferBytes === undefined ? undefined : String(bounds.transferBytes), disabled: busy !== null || settings === null, onChange: (value: string) => { setSettingsDraft((c: any) => ({ ...c, maxTransferBytes: value })) } }),
-        ),
-        settings === null ? h('span', { class: 'dshssh-muted' }, loading ? t('listProbing') : t('listLoadFailed')) : null,
-      )
-
-      /** What the plugin fixes in code, so a value is never a surprise. */
       /**
-       * One ceiling stated the way a reader of this card needs it: what is in force
-       * right now, and the default and cap it was resolved from. The order is
-       * deliberate — the number that actually applies goes first, because that is the
-       * one a call is being measured against.
-       * @param def - the configured default.
-       * @param cap - the configured cap.
-       * @param inForce - what a call with no override would run with.
-       * @param unit - how to state the three.
-       * @returns the one-line description.
+       * Open the form for one target, or for a new one, with the state that goes
+       * with a fresh edit: no stale probe under the draft and no stale field error.
+       * @param record - the stored target, or `null` to add one.
        */
-      function ceilingText(def: number | undefined, cap: number | undefined, inForce: number | undefined, unit: 'ms' | 'bytes'): string {
-        return [
-          format(t('boundsEffectiveOf'), { value: measure(inForce, unit) }),
-          format(t('boundsDefaultOf'), { value: measure(def, unit) }),
-          format(t('boundsCapOf'), { value: measure(cap, unit) }),
-        ].join(' · ')
+      function startEdit(record: ConnectionView | null): void {
+        setDraft(draftOf(record))
+        setDraftProbe(record === null ? null : (record.lastProbe ?? null))
+        setFieldError(null)
+        setFailure(null)
       }
 
-      const boundsCard = h('section', { class: 'dshssh-card' },
-        h('h3', { class: 'dshssh-card-title' }, bounds === null ? t('boundsTitle') : t('boundsResolvedTitle')),
-        h('dl', { class: 'dshssh-bounds' },
-          h('div', { class: 'dshssh-bound', key: 'targets' }, h('dt', {}, t('boundsTargets')), h('dd', {}, String(limits.maxConnections))),
-          // A Host that predates the pool sends no operation count and no sharing
-          // rows: printing this release's numbers for that process would put a
-          // surprise on the very card whose job is to prevent one.
-          // A ceiling a reader cannot see being used is a ceiling they only meet
-          // as a refusal, so each row quotes what is standing in it right now: the
-          // operations, the shared connections, and the two copy slots that are the
-          // ones a file transfer can run out of while everything else is idle.
-          h('div', { class: 'dshssh-bound', key: 'lanes' }, h('dt', {}, t('boundsOps')), h('dd', {}, pooling ? format(t('boundsRunning'), { ceiling: String(limits.concurrentOps), running: String(probing) }) : String(limits.concurrentOps))),
-          ...(pooling ? [
-            h('div', { class: 'dshssh-bound', key: 'masters' }, h('dt', {}, t('boundsMasters')), h('dd', {}, format(t('boundsRunning'), { ceiling: String(limits.maxLiveMasters), running: String(pool?.liveMasters ?? 0) }))),
-            h('div', { class: 'dshssh-bound', key: 'copies' }, h('dt', {}, t('boundsCopies')), h('dd', {}, format(t('boundsRunning'), { ceiling: String(bounds?.effective?.maxConcurrentTransfers ?? '—'), running: String(pool?.transfers ?? 0) }))),
-            // The job lane is the ceiling a reader can run into while nothing appears
-            // to be happening — a backgrounded command holds its slot until it ends —
-            // and it is the one number the profile cannot raise on its own, because
-            // these slots are the ones held back for calls that wait. Both halves are
-            // stated, because a row that only shows the ceiling invites someone to go
-            // looking for a knob that was never there.
-            h('div', { class: 'dshssh-bound', key: 'jobs' }, h('dt', {}, t('boundsJobs')), h('dd', {}, `${format(t('boundsRunning'), { ceiling: String(bounds?.maxRunningJobs ?? limits.maxRunningJobs), running: String(pool?.jobs ?? 0) })} · ${format(t('boundsJobsReserved'), { reserved: String(bounds?.foregroundReservedOps ?? limits.foregroundReservedOps), total: String(bounds?.concurrentOps ?? limits.concurrentOps) })}`)),
-            // Spill is the one ceiling whose cost is a file on disk rather than a
-            // line in the answer, so the card says what is sitting there now and
-            // how many answers the budget already refused to write out.
-            ...(spill === null || spill.max === 0 ? [] : [
-              h('div', {
-                class: 'dshssh-bound',
-                key: 'spill',
-              }, h('dt', {}, t('boundsSpill')), h('dd', {}, `${format(t('spillLine'), { files: String(spill.files), used: String(spill.used), max: String(spill.max) })}${spill.refusals > 0 ? format(t('spillRefused'), { refusals: String(spill.refusals) }) : ''}`)),
-            ]),
-            h('div', { class: 'dshssh-bound', key: 'persist' }, h('dt', {}, t('boundsPersist')), h('dd', {}, idleFor(limits.controlPersistSeconds))),
-          ] : []),
-          h('div', { class: 'dshssh-bound', key: 'round' }, h('dt', {}, t('boundsPerRound')), h('dd', {}, String(limits.probeAllLimit))),
-          h('div', {
-            class: 'dshssh-bound',
-            key: 'timeout',
-          }, h('dt', {}, t('boundsTimeout')), h('dd', {}, measure(bounds?.probeTimeoutMs ?? limits.probeTimeoutMs, 'ms'))),
-          // A Host that resolves its bounds from configuration states each ceiling as
-          // default / cap / in force, which is what makes a capped call legible. An
-          // older one only ever published a two-sided range, so its row keeps that
-          // shape rather than inventing a "default" it never had.
-          ...(bounds === null ? [
-            h('div', { class: 'dshssh-bound', key: 'remote' }, h('dt', {}, t('boundsRemoteTimeout')), h('dd', {}, `${measure(limits.remoteTimeoutMinMs, 'ms')} – ${measure(limits.remoteTimeoutMaxMs, 'ms')}`)),
-            h('div', { class: 'dshssh-bound', key: 'output' }, h('dt', {}, t('boundsOutput')), h('dd', {}, `${measure(limits.outputMinBytes, 'bytes')} – ${measure(limits.outputMaxBytes, 'bytes')}`)),
-            h('div', { class: 'dshssh-bound', key: 'transfer' }, h('dt', {}, t('boundsTransfer')), h('dd', {}, `${measure(limits.transferMinBytes, 'bytes')} – ${measure(limits.transferMaxBytes, 'bytes')}`)),
-          ] : [
-            h('div', { class: 'dshssh-bound', key: 'remote' }, h('dt', {}, t('settingsRemoteTimeout')), h('dd', {}, ceilingText(bounds.timeoutMs, bounds.maxTimeoutMs, bounds.effective?.remoteTimeoutMs, 'ms'))),
-            h('div', { class: 'dshssh-bound', key: 'output' }, h('dt', {}, t('settingsMaxOutput')), h('dd', {}, ceilingText(bounds.outputBytes, bounds.maxOutputBytes, bounds.effective?.maxOutputBytes, 'bytes'))),
-            h('div', { class: 'dshssh-bound', key: 'transfer' }, h('dt', {}, t('settingsMaxTransfer')), h('dd', {}, ceilingText(bounds.transferBytes, bounds.maxTransferBytes, bounds.effective?.maxTransferBytes, 'bytes'))),
-          ]),
-        ),
-        // Where a number came from, and what this Host had to correct on the way to
-        // it: a configuration whose cap sat below its default is a mistake worth
-        // naming out loud rather than one the reader discovers through a surprise.
-        bounds === null ? null : h('p', { class: 'dshssh-muted' }, t('boundsFromConfig')),
-        bounds?.notes?.length > 0
-          ? h('p', { class: 'dshssh-muted' }, String((bounds.notes as unknown[]).join(' · ')))
-          : null,
-        // A fact about this machine, not a bound: the pool only exists if the Host
-        // could make a private directory for its sockets, and when it could not,
-        // every number above still holds while sharing simply does not happen.
-        pool !== null && pool.ready === false
-          ? h('p', { class: 'dshssh-muted' }, format(t('poolOff'), { reason: pool.failure ?? '—' }))
-          : null,
-        // A line that only exists when there is something to report: the sweep ran
-        // at startup, and the only time its arithmetic matters to a reader is the
-        // time it took something.
-        temp !== null && temp.removed.length > 0
-          ? h('p', { class: 'dshssh-muted' }, format(t('tempCollected'), { removed: String(temp.removed.length), scanned: String(temp.scanned), kept: String(temp.kept.length), plural: temp.removed.length === 1 ? '' : 's' }))
-          : null,
-      )
-
-      const listCard = h('section', { class: 'dshssh-card' },
+      const targetsCard = h('section', { class: 'dshssh-card' },
         h('div', { class: 'dshssh-card-head' },
-          h('div', { class: 'dshssh-field' },
+          h('div', { class: 'dshssh-card-headline' },
             h('h3', { class: 'dshssh-card-title' }, t('listTitle')),
-            h('span', { class: 'dshssh-muted' }, format(t('listCount'), { count: String(connections.length), limit: String(limits.maxConnections) })),
+            h('span', { class: 'dshssh-tertiary' }, format(t('listTotal'), { count: String(connections.length) })),
+            probing > 0 ? Badge({ tone: 'idle', text: t('stRunning') }) : null,
           ),
           h('div', { class: 'dshssh-actions' },
-            probing > 0 ? h(Badge, { tone: 'idle', text: t('stRunning') }) : null,
             h('button', {
               class: 'dshssh-btn',
               type: 'button',
@@ -1801,51 +2180,100 @@ window.__ModuleLoader__.load({
               class: 'dshssh-btn dshssh-btn-primary',
               type: 'button',
               disabled: busy !== null || draft !== null || storageFailure || connections.length >= limits.maxConnections,
-              onClick: () => {
-                setDraft(draftOf(null))
-                setDraftProbe(null)
-                setFieldError(null)
-                setFailure(null)
-              },
+              onClick: () => { startEdit(null) },
             }, connections.length >= limits.maxConnections ? t('listAddFull') : t('listAdd')),
           ),
         ),
+        // The form opens above the list it belongs to: adding or editing is the
+        // thing a reader came to do, and a form parked under a long list asks them
+        // to scroll to the task they just pressed the button for.
+        h(TargetFormView, {
+          t,
+          draft,
+          busy,
+          modern,
+          pooling,
+          fieldError,
+          draftProbe,
+          atLimit: draft !== null && draft.id === undefined && connections.length >= limits.maxConnections,
+          count: connections.length,
+          limit: limits.maxConnections,
+          onPatch: patchDraft,
+          onToggleSecret: toggleSecret,
+          onSave: () => { void saveDraft() },
+          onTestDraft: () => { void testDraft() },
+          onCancel: () => {
+            setDraft(null)
+            setDraftProbe(null)
+            setFieldError(null)
+          },
+        }),
         connections.length === 0 && !loading
           ? h('div', { class: 'dshssh-field' },
             h('p', { class: 'dshssh-card-title' }, t('listEmpty')),
-            h('p', { class: 'dshssh-muted' }, t('listEmptyHint')),
+            h('p', { class: 'dshssh-tertiary' }, t('listEmptyHint')),
           )
-          : h('div', { class: 'dshssh-list' }, connections.map(rowOf)),
-        formRegion(),
+          : h('div', { class: 'dshssh-list' }, connections.map((record: ConnectionView) => h(TargetRowView, {
+            key: record.id,
+            t,
+            record,
+            busy,
+            editing: draft?.id === record.id,
+            confirming: confirmId === record.id,
+            expanded: openRows[record.id] === true,
+            isDefault: defaultId === record.id,
+            answer: resolved[record.id],
+            onTest: () => { void testOne(record) },
+            onEdit: () => { startEdit(record) },
+            onRemove: () => { void remove(record) },
+            onStartConfirm: () => { setConfirmId(record.id) },
+            onStopConfirm: () => { setConfirmId(null) },
+            onToggleDetails: () => { setOpenRows((current: Record<string, boolean>) => ({ ...current, [record.id]: current[record.id] !== true })) },
+            onResolve: () => { void resolveTarget(record) },
+            onCopy: () => { void copyDiagnostics(record) },
+          }))),
+        loading && connections.length === 0 ? h('p', { class: 'dshssh-tertiary' }, t('listProbing')) : null,
       )
 
-      const tabs = h(SshSegment, {
-        id: TAB_BASE,
-        role: 'tab',
-        value: tab,
-        groupLabel: t('tabsLabel'),
-        options: [
-          { value: 'list', label: t('tabList') },
-          { value: 'settings', label: t('tabSettings') },
-        ],
-        onChange: (next: string) => { setTab(next) },
+      const paramsCard = h(ClientParamsCardView, {
+        t,
+        bounds,
+        settings,
+        stored: settings ?? {},
+        draft: settingsDraft,
+        busy,
+        loading,
+        storageFailure,
+        dirty,
+        invalid: badCeilings.length > 0,
+        onPatch: (key: string, value: string) => { setSettingsDraft((current: any) => ({ ...current, [key]: value })) },
+        onSave: () => { void saveSettings() },
       })
 
-      const panel = h('div', {
-        id: `${TAB_BASE}-${tab}-panel`,
-        role: 'tabpanel',
-        'aria-labelledby': `${TAB_BASE}-${tab}`,
-        tabIndex: 0,
-        class: 'dshssh-panel',
-      }, tab === 'list' ? listCard : h('div', { class: 'dshssh-panel' }, settingsCard, boundsCard))
+      const runtimeCard = h(RuntimeCardView, {
+        t,
+        bounds,
+        limits,
+        pool,
+        spill,
+        temp,
+        probing,
+        pooling,
+        busy,
+        refreshing,
+        legacy: !modern,
+        onToggle: (event: any) => { if (event?.target?.open === true) void refreshRuntime() },
+        onRefresh: () => { void refreshRuntime() },
+      })
 
       return h('div', { class: 'dshssh-root' },
         h('style', {}, CSS),
         header,
         noticeRegion,
         askpassNotice,
-        tabs,
-        panel,
+        targetsCard,
+        paramsCard,
+        runtimeCard,
       )
     }
 

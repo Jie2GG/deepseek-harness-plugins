@@ -109,6 +109,23 @@ test('every label the page asks for exists in both dictionaries', () => {
   const oneSided = [...used].filter(key => definitions(key) !== 2).map(key => `${key}=${String(definitions(key))}`).sort()
   assert.deepEqual(oneSided, [], 'every label in use is defined exactly twice: en and zh')
   for (const key of ['boundsJobs', 'boundsJobsReserved', 'boundsTimeout']) {
-    assert.equal(definitions(key), 2, `${key}: the row this release added or reworded`)
+    assert.equal(definitions(key), 2, `${key}: the row an earlier release added or reworded`)
+  }
+  // 0.0.40 re-laid the page out: the tabs went, three regions took their place, and
+  // the parameters card grew the words it needs to tell an override from a default.
+  // Each of these is a label the redesigned page asks for, so one side only means a
+  // language rendering its own key name.
+  for (const key of [
+    'runtimeTitle', 'runtimeHint', 'runtimeStorageTitle', 'runtimeUsageFormat', 'runtimeBusy',
+    'paramOverride', 'paramFollowDefault', 'paramCapped', 'paramBadNumber', 'paramDirty', 'paramReset',
+    'defaultChip', 'defaultHint', 'spillFiles', 'spillBytes', 'listTotal', 'rowDetails', 'rowDetailsHide',
+    'refresh', 'unitMs', 'unitBytes', 'storageConfigNote'
+  ]) {
+    assert.equal(definitions(key), 2, `${key}: the copy this release added`)
+  }
+  // The tab strip was the page's only reason to split its two views, and it is gone;
+  // copy that named a tab would be a label with nothing left to label.
+  for (const key of ['tabsLabel', 'tabList', 'tabSettings']) {
+    assert.equal(definitions(key), 0, `${key}: the tabs it named no longer exist`)
   }
 })

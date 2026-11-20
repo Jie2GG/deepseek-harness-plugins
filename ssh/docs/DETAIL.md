@@ -13,15 +13,24 @@ Nothing is installed or upgraded on either side.
 
 Open **Settings** and pick **Remote connections** in the navigation (中文：设置 →
 远程连接). The entry carries its own icon and follows the language you choose in
-General settings. Across its top sit two tabs:
+General settings. The page is one scroll in three regions, ordered by what a
+reader came to do:
 
-- **SSH targets** — the list: add, edit, delete, and test.
-- **Client settings** — the output ceiling, the command timeout, and the
+- **SSH targets** — the list: add, edit, delete, test one, test all. Each row
+  carries its own **Details** toggle for the probe tail, the `ssh -G` view and the
+  diagnostics to copy, so a long inventory stays inside one screen.
+- **Client parameters** — the output ceiling, the command timeout, and the
   transfer ceiling, each stated as this profile's override of a configured default
-  and cap, next to the bounds this Host resolves them against.
+  and cap, with the value that is actually in force printed beside it.
+- **Runtime status and details** — collapsed by default, and the place the fixed
+  bounds live: the limits this Host resolved, what is using each lane right now,
+  what the spill budget has on disk, and how the list and its credentials are
+  stored.
 
-Both tabs read and write one page state, so a probe you started on the first tab
-keeps running while you edit values on the second.
+Everything sits on one page state, so a probe started in the first region keeps
+running while you edit values in the second, and opening the collapsed third
+region asks the Host for fresh counts rather than showing you what the last read
+saw.
 
 ## What the current version does
 
@@ -66,25 +75,35 @@ keeps running while you edit values on the second.
   differently once several commands share a connection, and for those the
   collapsed **Advanced options** of that target carries a **Share this server's
   connection** switch.
-- **Client settings**, on the second tab: the captured output ceiling, the
+- **Client parameters**, the second region: the captured output ceiling, the
   command timeout every agent-issued remote call obeys, and the file-transfer
-  ceiling a copy may not exceed. Those three fields are now this profile's
-  **overrides**: empty follows the configured default, and any positive number is
-  accepted — one past the cap is capped, and the value that actually applied is
-  echoed back instead of the number being refused. Which program dials is still
-  not a setting (`ssh` and `scp` find themselves, `PATH` first and then the usual
-  install locations). The card beside them is no longer **Fixed bounds** but
-  **Resolved bounds**: each ceiling reads “in force / default / cap”, so the
-  number a call actually ran against is visible rather than inferred, and the
-  remaining lines are this Host's fixed rules — how many remote operations run at
-  once, how many servers may each hold one shared connection, how long an idle
-  connection stays open, how many targets one **Test all** round covers, and how
-  long a probe waits (thirty seconds, with the copy's size and tree-counting
-  questions keeping their own ten and the copy itself keeping its own five minutes), and how many copies
-  and jobs may hold a slot at once. The ceilings the page and a call can move —
-  command deadline, output capture, transfer size and transfer deadline — are
-  resolved from the same defaults-and-caps table above, and a number that comes
-  down to a cap is echoed back as what actually ran.
+  ceiling a copy may not exceed. Those three fields are this profile's
+  **overrides**: empty follows the configured default, and any positive whole
+  number is accepted — one past the cap is capped, and the value that actually
+  applied is echoed back instead of the number being refused. Each box says which
+  of the two it is (**override** or **follows the default**), carries a **clear
+  override** button when it is an override, refuses to be saved while its text is
+  not a positive whole number — naming the box that is wrong — and warns in place
+  when the stored number and the number in force differ. **Save** stays down while
+  a write is running and until something actually changed. Which program dials is
+  still not a setting (`ssh` and `scp` find themselves, `PATH` first and then the
+  usual install locations). The fixed numbers now sit in the third, collapsed
+  region, **Runtime status and details**, under the heading **Runtime limits**:
+  each ceiling reads “in force / default / cap”, so the number a call actually ran
+  against is visible rather than inferred, and the remaining lines are this Host's
+  fixed rules — how many targets a profile may keep, how many remote operations
+  are running against their ceiling, how many servers may each hold one shared
+  connection, how many copies and jobs may hold a slot at once and how many slots
+  are held back for calls that wait, how long an idle connection stays open, how
+  many targets one **Test all** round covers, how long a connection test waits
+  (thirty seconds, with the copy's size and tree-counting questions keeping their
+  own ten and the copy itself keeping its own five minutes), and what the spill
+  budget has on disk — file count and bytes against their ceilings. The same
+  region says where the list and the credentials are stored, and what this Host
+  had to correct in its own configuration to print a number. The ceilings the page
+  and a call can move — command deadline, output capture, transfer size and
+  transfer deadline — are resolved from the same defaults-and-caps table above, and
+  a number that comes down to a cap is echoed back as what actually ran.
 
 ## Using it from the chat
 
@@ -304,7 +323,7 @@ classified result.
   workspace file is, because the plugin asks the file pipeline for permission before the
   copy starts. Two honest caveats: only the first change to a path within a turn keeps a
   before-image, and a sub-agent's conversation is not tracked by the recorder.
-- The settings page and its two tabs are the only **interface**; the conversation
+- The settings page and its three regions are the only **interface**; the conversation
   reaches the same capability through the `ssh_client` tool, whose call renders in the
   harness's own tool row like any other tool's.
 - A page probe authenticates and stops there: it runs no command of yours, so it

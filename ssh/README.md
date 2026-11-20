@@ -47,7 +47,7 @@ ssh/
     ├── jobs.ts               # 挂在 harness 作业台账上的一个后台化远程命令
     ├── ops.ts                # 把全部能力收进一个与 transport 无关的对象；页面与工具共用它
     ├── rpc.ts                # Request → Response，失败 code → HTTP status
-    ├── client.ts             # 浏览器那一半：页面、它的标签页与它的图标
+    ├── client.ts             # 浏览器那一半：页面的三个区域与它的图标
     └── client-globals.d.ts   # 环境声明 window/navigator；永不产出到 lib/
 ```
 
@@ -68,7 +68,7 @@ pnpm test           # 先构建，再 node --test tests/*.test.mjs（离线套�
 
 收尾（finalize）这一步不是装饰：web 模块表会把 `lib/client.js` 当脚本来跑，所以它必须恰好带一个 `window.__ModuleLoader__.load(` 调用，且没有顶层的 `import`/`export`。这两半任何一半不对，`pnpm run build` 就会失败。
 
-然后在运行中的 Harness 里：`plugin_manager` → `install_bundle`，填入本目录的绝对路径。按仓库规则的验收标准：无 manifest 诊断，标题、描述、图标与详情文档在英文和中文下都能正常渲染；设置导航里出现一条带图标的 **Remote connections** / 「远程连接」行，页面打开时落在 **SSH targets** 标签页，旁边就是 **Client settings**。一个新装 bundle 的 client 产物需要页面来（重）加载它：打开着的页面会沿 Host 模块图走 HMR，所以已安装那一行的 bundle 重新构建之后，通常无需手动刷新就会被换进来——但被**替换**的包（而不是被重新构建的）需要重启，才能加载全新的一代模块。
+然后在运行中的 Harness 里：`plugin_manager` → `install_bundle`，填入本目录的绝对路径。按仓库规则的验收标准：无 manifest 诊断，标题、描述、图标与详情文档在英文和中文下都能正常渲染；设置导航里出现一条带图标的 **Remote connections** / 「远程连接」行，页面自上而下是 **SSH 目标**、**客户端参数**，以及默认折叠的 **运行状态与高级信息**。一个新装 bundle 的 client 产物需要页面来（重）加载它：打开着的页面会沿 Host 模块图走 HMR，所以已安装那一行的 bundle 重新构建之后，通常无需手动刷新就会被换进来——但被**替换**的包（而不是被重新构建的）需要重启，才能加载全新的一代模块。
 
 ## API
 
@@ -100,7 +100,7 @@ pnpm test           # 先构建，再 node --test tests/*.test.mjs（离线套�
 
 `GET` 只抵达 `list`；这条路由搭乘的是共享的 `/api` 通道，所以只有被服务页面的 owner peer 会被准入，其它任何 principal 一律被拒。
 
-一条连接记录是 `{ id, label, host, user?, port?, identityFile?, proxyJump?, extraArgs?, note?, createdAt, updatedAt, lastProbe?, auth }`，再加上 `secrets: { password, passphrase, root }`。`auth` 在写入时取 `key` 或 `password`；`key+password` 仍然可读（它只在 0.4.0 提供过），并按其一贯的方式探测。`secrets` 只表达存在与否——没有任何响应会带出已存储的值——而一次 `secrets` 补丁会写入一个字符串、用 `null` 表示遗忘、对缺席的键则原样不动。`limits` 带上固定边界，包含被接受的取值范围，好让设置标签页直接陈述它们，而不必在浏览器代码里再复刻一份。失败 code 现在包含 `secret-error`（500）。
+一条连接记录是 `{ id, label, host, user?, port?, identityFile?, proxyJump?, extraArgs?, note?, createdAt, updatedAt, lastProbe?, auth }`，再加上 `secrets: { password, passphrase, root }`。`auth` 在写入时取 `key` 或 `password`；`key+password` 仍然可读（它只在 0.4.0 提供过），并按其一贯的方式探测。`secrets` 只表达存在与否——没有任何响应会带出已存储的值——而一次 `secrets` 补丁会写入一个字符串、用 `null` 表示遗忘、对缺席的键则原样不动。`limits` 带上固定边界，包含被接受的取值范围，好让设置页直接陈述它们，而不必在浏览器代码里再复刻一份。失败 code 现在包含 `secret-error`（500）。
 
 ### 存储
 
@@ -224,14 +224,18 @@ config 中的 `promoteOnTimeout: false`，或者一个没有作业台账的 prof
 
 ### 客户端（`src/client.ts`）
 
-只有一个组件拥有这个页面及其两个标签页：`SshSection` 持有状态、`list` 读取以及全部操作，而 `SshTabs` 切换哪些卡片渲染——**SSH targets**（清单、表单与探测结果），或者 **Client settings**（那三个字段，加上只读的固定边界）。`apply` 先注册 `settings.ssh` 词典（两份基线 locale），然后注册两个座位，各自位于它自己的 `ctx.effect` 之内：
+只有一个容器组件持有这个页面：`SshSection` 拿着状态、`list` 读取以及全部操作，而三个区域是只接收「要渲染什么」的展示组件——`TargetRowView`（一行目标）与 `TargetFormView`（新建 / 编辑表单）属于 **SSH 目标**，`ClientParamsCardView` 是 **客户端参数**，`RuntimeCardView` 是默认折叠的 **运行状态与高级信息**。`apply` 先注册 `settings.ssh` 词典（两份基线 locale），然后注册两个座位，各自位于它自己的 `ctx.effect` 之内：
 
 | 座位 | 注册 | 渲染 |
 | --- | --- | --- |
-| `settings.section` | `{ id: 'ssh', order: 25, label: () => ctx.locale.bind(NS)('nav'), locale: NS }` | 整个页面，含它的标签条 |
+| `settings.section` | `{ id: 'ssh', order: 25, label: () => ctx.locale.bind(NS)('nav'), locale: NS }` | 整个页面，含它的三个区域 |
 | `settings.section.icon` | `{ id: 'ssh' }` | 光标 + 虚线链路 + 服务器机架，与 `icon.svg` 一致 |
 
-设置外壳对插件 section 没有分组机制——一个 section 就是一条导航行——所以一行之下的两个视图，就是页面自己的标签页。那条标签条是把宿主的 `SegmentedControl` *复制*进本模块而非 import，这正是 plugin-UI 规则所要求的；见 **已验证的契约** 之下那条关于 vendoring 的说明，了解它所承载的标记、键盘与 token 契约。
+设置外壳对插件 section 没有分组机制——一个 section 就是一条导航行——所以三个区域排在同一条滚动里，并按读者用得上的顺序：目标在前，参数其次，系统限制收在 `<details>` 后面（它默认不合上就没有成本：数据在挂载时读一次，展开时再读一次，折叠从不冻结任何计数）。曾经那两条标签页由此退场，vendoring 进来的宿主 `SegmentedControl` 如今只剩一个用途——登录方式那个 radiogroup；那段代码连它承载的 `role`、键盘走动与 token 契约一起留着（复制而非 import 的理由与细节见 `CHANGELOG.md` 里 0.5.1 之前的 vendoring 条目）。
+
+卡片、行、字段与描边一律取设置外壳自己的 token：`--dsw-alias-settings-card-fill` / `-stroke` 是卡片，`settings-form` 的字段节奏（label 13/500、hint 12/tertiary、0.5px 分隔线、34px 输入框）是参数区，行与行之间用细线而非各自一个方框——这是「减少重复卡片与不必要的边框」在代码里的具体形状。
+
+**默认目标这件事没有控件。** 存储结构里没有「默认」字段，而本轮不许改动它，也不许改动 target 的解析规则，所以页面不假装有开关：它标出的是 Host 本来的规则（`tool.ts` 的 `findTarget`，`ops.pickTarget` 与之同构）——点名的目标优先，其次是该对话上一次选的目标，只有一台服务器时就是它。因此清单里只有一台时，那一行带着「默认」徽标；有多台时，页面上没有全局默认可设，规则写在折叠卡片的信息段里。
 
 控件与它们的样式表都是插件本地的（`dshssh-*` class，只使用 `--dsw-alias-*` token，无需把任何 Harness client 包作为模块引入），而且样式表是作为组件内部的一个 `<style>` 元素渲染的，好让卸载时把它一并移除。
 
