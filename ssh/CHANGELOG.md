@@ -10,14 +10,21 @@ The repository now fixes each segment's meaning: `major` = 大版本, a breaking
 line decided by the user; `minor` = 用户认可版本, moved up only when the user
 accepts the accumulated work, with `patch` reset to zero; `patch` = Agent 自动
 迭代版本, one step per completed round of changes. No entry below was ever
-user-accepted, so this plugin folds its history into the patch segment: at
+user-accepted — until **2026-11-20**, when the top entry earned the first
+user-blessed line — so this plugin folds its history into the patch segment: at
 adoption the version became **0.0.16** (16 iterations, zero user-blessed lines).
 Historical headings and old numbers (`0.1.0` … `0.16.0`, `0.5.1`) keep their
 pre-rule numbering — an old `0.N.*` maps to iteration `N` — and this adoption
 is a remapping, not a new round. The first change under the new scheme is
 `0.0.17`; the first user acceptance moves the line to `0.1.0`.
 
-## 0.0.40
+Which is what happened: `0.0.40`, the round that re-laid out the settings page
+without touching one Host module, was accepted and became **`0.1.0`**, the first
+release line, with the patch segment reset to zero. The `## 0.1.0` heading far
+below is iteration 1's entry under the *old* numbering (the bundle scaffold) and
+shares that number only through the remapping above — nothing was released twice.
+
+## 0.1.0
 
 A settings-page round: the remote-connections page was re-laid out into three
 regions, the parameter card learned to say what it actually applied, and no Host
@@ -88,7 +95,7 @@ module, wire field, or default moved.
   third card, every runtime metric still stated, live counts read from the Host and
   not from constants, no dead tab chrome, no secret value displayed, the narrow-window
   CSS rules, token-only styles) are asserted from the source. `client-fallbacks`
-  gained the 0.0.40 copy keys and the proof that the tab labels really went away.
+  gained this line's copy keys and the proof that the tab labels really went away.
 - **Known limit.** No browser was driven in this round, so the visual result — pixel
   rhythm, wrapping in a narrow settings window, light/dark side by side — is not
   verified. The suite proves the structure and the reads; the look is still a human's
